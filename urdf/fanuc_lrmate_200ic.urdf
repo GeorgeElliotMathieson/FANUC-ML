@@ -1,0 +1,275 @@
+<?xml version="1.0" ?>
+<robot name="fanuc_lrmate_200ic">
+  <!-- Base Link -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.095" length="0.17"/>
+      </geometry>
+      <material name="fanuc_yellow">
+        <color rgba="1 0.8 0 1"/>
+      </material>
+      <origin xyz="0 0 0.085" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.095" length="0.17"/>
+      </geometry>
+      <origin xyz="0 0 0.085" rpy="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="5.0"/>
+      <origin xyz="0 0 0.085"/>
+      <inertia ixx="0.055" ixy="0" ixz="0" iyy="0.055" iyz="0" izz="0.023"/>
+    </inertial>
+  </link>
+
+  <!-- J1 Link -->
+  <link name="link_1">
+    <visual>
+      <geometry>
+        <cylinder radius="0.09" length="0.12"/>
+      </geometry>
+      <material name="fanuc_yellow"/>
+      <origin xyz="0 0 0.06" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.09" length="0.12"/>
+      </geometry>
+      <origin xyz="0 0 0.06" rpy="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="4.8"/>
+      <origin xyz="0 0 0.08"/>
+      <inertia ixx="0.042" ixy="0" ixz="0" iyy="0.042" iyz="0" izz="0.02"/>
+    </inertial>
+  </link>
+
+  <!-- J1 Joint -->
+  <joint name="joint_1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link_1"/>
+    <origin xyz="0 0 0.17" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.97" upper="2.97" effort="10" velocity="6.11"/>  <!-- ±170° (±2.97 rad) -->
+    <dynamics damping="0.7" friction="0.5"/>
+  </joint>
+
+  <!-- J2 Link -->
+  <link name="link_2">
+    <visual>
+      <geometry>
+        <box size="0.1 0.18 0.1"/>
+      </geometry>
+      <material name="fanuc_yellow"/>
+      <origin xyz="0.05 0 0" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.1 0.18 0.1"/>
+      </geometry>
+      <origin xyz="0.05 0 0" rpy="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="5.0"/>
+      <origin xyz="0.05 0 0"/>
+      <inertia ixx="0.018" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.018"/>
+    </inertial>
+  </link>
+
+  <!-- J2 Joint -->
+  <joint name="joint_2" type="revolute">
+    <parent link="link_1"/>
+    <child link="link_2"/>
+    <origin xyz="0.05 0 0.17" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.05" upper="2.18" effort="10" velocity="6.11"/>  <!-- -60° to 125° (approximately) -->
+    <dynamics damping="0.7" friction="0.5"/>
+  </joint>
+
+  <!-- J3 Link -->
+  <link name="link_3">
+    <visual>
+      <geometry>
+        <box size="0.33 0.09 0.09"/>
+      </geometry>
+      <material name="fanuc_yellow"/>
+      <origin xyz="0.165 0 0" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.33 0.09 0.09"/>
+      </geometry>
+      <origin xyz="0.165 0 0" rpy="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="4.0"/>
+      <origin xyz="0.165 0 0"/>
+      <inertia ixx="0.006" ixy="0" ixz="0" iyy="0.04" iyz="0" izz="0.04"/>
+    </inertial>
+  </link>
+
+  <!-- J3 Joint -->
+  <joint name="joint_3" type="revolute">
+    <parent link="link_2"/>
+    <child link="link_3"/>
+    <origin xyz="0.1 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="1.22" effort="10" velocity="6.98"/>  <!-- -180° to 70° (approximately) -->
+    <dynamics damping="0.7" friction="0.5"/>
+  </joint>
+
+  <!-- J4 Link -->
+  <link name="link_4">
+    <visual>
+      <geometry>
+        <cylinder radius="0.045" length="0.08"/>
+      </geometry>
+      <material name="fanuc_yellow"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.045" length="0.08"/>
+      </geometry>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="2.0"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- J4 Joint -->
+  <joint name="joint_4" type="revolute">
+    <parent link="link_3"/>
+    <child link="link_4"/>
+    <origin xyz="0.33 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-3.32" upper="3.32" effort="10" velocity="7.85"/>  <!-- ±190° (±3.32 rad) -->
+    <dynamics damping="0.7" friction="0.5"/>
+  </joint>
+
+  <!-- J5 Link -->
+  <link name="link_5">
+    <visual>
+      <geometry>
+        <cylinder radius="0.045" length="0.08"/>
+      </geometry>
+      <material name="fanuc_yellow"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.045" length="0.08"/>
+      </geometry>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="1.5"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- J5 Joint -->
+  <joint name="joint_5" type="revolute">
+    <parent link="link_4"/>
+    <child link="link_5"/>
+    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.09" upper="2.09" effort="10" velocity="7.85"/>  <!-- ±120° (±2.09 rad) -->
+    <dynamics damping="0.7" friction="0.5"/>
+  </joint>
+
+  <!-- J6 Link -->
+  <link name="link_6">
+    <visual>
+      <geometry>
+        <cylinder radius="0.04" length="0.05"/>
+      </geometry>
+      <material name="fanuc_yellow"/>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.04" length="0.05"/>
+      </geometry>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="0.5"/>
+      <origin xyz="0 0 0.025"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- J6 Joint -->
+  <joint name="joint_6" type="revolute">
+    <parent link="link_5"/>
+    <child link="link_6"/>
+    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-6.28" upper="6.28" effort="10" velocity="12.57"/>  <!-- ±360° (±6.28 rad) -->
+    <dynamics damping="0.7" friction="0.5"/>
+  </joint>
+
+  <!-- Tool Center Point (TCP) Link -->
+  <link name="tool0">
+    <visual>
+      <geometry>
+        <cylinder radius="0.02" length="0.01"/>
+      </geometry>
+      <material name="tool_steel">
+        <color rgba="0.8 0.8 0.8 1"/>
+      </material>
+      <origin xyz="0 0 0.005" rpy="0 0 0"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.02" length="0.01"/>
+      </geometry>
+      <origin xyz="0 0 0.005" rpy="0 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="0.001"/>
+      <origin xyz="0 0 0.005"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+
+  <!-- TCP Joint -->
+  <joint name="tool0_joint" type="fixed">
+    <parent link="link_6"/>
+    <child link="tool0"/>
+    <origin xyz="0 0 0.05" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Gazebo colors -->
+  <gazebo reference="base_link">
+    <material>Gazebo/Yellow</material>
+  </gazebo>
+  <gazebo reference="link_1">
+    <material>Gazebo/Yellow</material>
+  </gazebo>
+  <gazebo reference="link_2">
+    <material>Gazebo/Yellow</material>
+  </gazebo>
+  <gazebo reference="link_3">
+    <material>Gazebo/Yellow</material>
+  </gazebo>
+  <gazebo reference="link_4">
+    <material>Gazebo/Yellow</material>
+  </gazebo>
+  <gazebo reference="link_5">
+    <material>Gazebo/Yellow</material>
+  </gazebo>
+  <gazebo reference="link_6">
+    <material>Gazebo/Yellow</material>
+  </gazebo>
+  <gazebo reference="tool0">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+</robot>
