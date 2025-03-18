@@ -290,9 +290,63 @@ class FANUCRobotEnv:
         # Convert to radians
         for joint, limits in self.joint_limits.items():
             self.joint_limits[joint] = [np.deg2rad(limits[0]), np.deg2rad(limits[1])]
+        
+        # Set up collision detection: disable self-collisions for all links except end effector
+        self._configure_collision_detection()
             
         # Initial configuration
         self.reset()
+    
+    def _configure_collision_detection(self):
+        """
+        Configure collision detection for the robot:
+        1. Disable self-collisions between robot links
+        2. Keep only end effector collision enabled
+        """
+        if self.verbose:
+            print("Configuring robot collision detection: end effector only")
+            
+        # Define collision groups
+        ROBOT_BODY_GROUP = 1  # Group for the robot body
+        EE_GROUP = 2          # Group for the end effector
+        
+        # End effector is the last link in the chain
+        ee_link_id = self.dof - 1
+        
+        # Set all links except the end effector to not collide with each other
+        for i in range(self.num_joints):
+            if i != ee_link_id:
+                # Set this link to the robot body group
+                p.setCollisionFilterGroupMask(
+                    self.robot_id,
+                    i,
+                    ROBOT_BODY_GROUP,  # This link is in the robot body group
+                    0,  # This link doesn't collide with any other link
+                    physicsClientId=self.client
+                )
+            else:
+                # Set the end effector to its own group that can collide
+                p.setCollisionFilterGroupMask(
+                    self.robot_id,
+                    i,
+                    EE_GROUP,  # End effector is in its own group
+                    0xFFFF,    # End effector can collide with everything
+                    physicsClientId=self.client
+                )
+        
+        # Also set the base link (link_id = -1)
+        p.setCollisionFilterGroupMask(
+            self.robot_id,
+            -1,
+            ROBOT_BODY_GROUP,
+            0,  # Base doesn't collide with any robot parts
+            physicsClientId=self.client
+        )
+        
+        # Store for reference
+        self.ee_link_id = ee_link_id
+        self.ROBOT_BODY_GROUP = ROBOT_BODY_GROUP
+        self.EE_GROUP = EE_GROUP
     
     def _load_robot(self):
         # Load the URDF for the FANUC LR Mate 200iC
@@ -351,86 +405,27 @@ class FANUCRobotEnv:
         
         Args:
             action: Can be either:
-                   - A list of 6 target joint positions (for backward compatibility)
-                   - A tuple of (positions, velocities) where each is a list of 6 values
-                   - A tuple of (None, velocities) to only control velocities
+                   - If tuple: (positions, velocities) where each is a list of 6 values
+                   - If positions is None, only velocities will be applied
         """
-        # Check if we received both positions and velocities
+        # Apply the action as joint velocities if it's a tuple with None and velocities
         if isinstance(action, tuple) and len(action) == 2:
             positions, velocities = action
             
             # If positions is None, only apply velocity control
-            if positions is None:
-                if velocities is not None:
-                    # Get current joint states for limit checking
-                    joint_states = []
-                    for i in range(self.dof):
-                        state = p.getJointState(self.robot_id, i)
-                        joint_states.append(state[0])  # Joint position
-                    
-                    # Apply velocity control with limit checks
-                    for i in range(len(velocities)):
-                        if i in self.joint_limits:
-                            # Check if we're near limits and adjust velocity accordingly
-                            limit_low, limit_high = self.joint_limits[i]
-                            current_pos = joint_states[i]
-                            
-                            # Ensure we're within limits
-                            if current_pos <= limit_low and velocities[i] < 0:
-                                # At lower limit and trying to move further down
-                                velocities[i] = 0.0
-                            elif current_pos >= limit_high and velocities[i] > 0:
-                                # At upper limit and trying to move further up
-                                velocities[i] = 0.0
-                    
-                    # Apply velocity control only, with enforced limits
-                    p.setJointMotorControlArray(
-                        bodyUniqueId=self.robot_id,
-                        jointIndices=range(self.dof),
-                        controlMode=p.VELOCITY_CONTROL,
-                        targetVelocities=velocities,
-                        forces=[self.max_force] * self.dof,
-                        velocityGains=[self.velocity_gain] * self.dof
-                    )
+            if positions is None and velocities is not None:
+                # Apply velocity control with limit checks
+                p.setJointMotorControlArray(
+                    bodyUniqueId=self.robot_id,
+                    jointIndices=range(self.dof),
+                    controlMode=p.VELOCITY_CONTROL,
+                    targetVelocities=velocities,
+                    forces=[self.max_force] * self.dof,
+                    velocityGains=[self.velocity_gain] * self.dof,
+                    physicsClientId=self.client
+                )
             else:
-                # No enforcement of joint limits - allow full range of motion
-                # Only prevent extreme values that would cause simulation instability
-                for i in range(len(positions)):
-                    # Only apply extremely loose limits to prevent simulation crashes
-                    pos = positions[i]
-                    vel = velocities[i]
-                    
-                    # Enforce joint limits for positions
-                    if i in self.joint_limits:
-                        limit_low, limit_high = self.joint_limits[i]
-                        if isinstance(pos, (int, float)):
-                            # Handle scalar values
-                            positions[i] = max(limit_low, min(pos, limit_high))
-                        else:
-                            # Handle numpy arrays or other iterables
-                            positions[i] = np.clip(pos, limit_low, limit_high)
-                    else:
-                        # For joints without defined limits, use generous defaults
-                        if isinstance(pos, (int, float)):
-                            # Handle scalar values
-                            if pos < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
-                                positions[i] = -10 * np.pi
-                            elif pos > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
-                                positions[i] = 10 * np.pi
-                        else:
-                            # Handle numpy arrays or other iterables
-                            positions[i] = np.clip(pos, -10 * np.pi, 10 * np.pi)
-                        
-                    # Limit velocities to reasonable ranges (±5 rad/s)
-                    if isinstance(vel, (int, float)):
-                        if vel < -5.0:
-                            velocities[i] = -5.0
-                        elif vel > 5.0:
-                            velocities[i] = 5.0
-                    else:
-                        velocities[i] = np.clip(vel, -5.0, 5.0)
-                
-                # Set joint positions with target velocities
+                # Apply both position and velocity control
                 p.setJointMotorControlArray(
                     bodyUniqueId=self.robot_id,
                     jointIndices=range(self.dof),
@@ -439,58 +434,29 @@ class FANUCRobotEnv:
                     targetVelocities=velocities,
                     forces=[self.max_force] * self.dof,
                     positionGains=[self.position_gain] * self.dof,
-                    velocityGains=[self.velocity_gain] * self.dof
+                    velocityGains=[self.velocity_gain] * self.dof,
+                    physicsClientId=self.client
                 )
         else:
-            # Backward compatibility - just positions
-            positions = action
-            
-            # Enforce joint limits
-            for i, a in enumerate(positions):
-                if i in self.joint_limits:
-                    limit_low, limit_high = self.joint_limits[i]
-                    if isinstance(a, (int, float)):
-                        # Handle scalar values
-                        positions[i] = max(limit_low, min(a, limit_high))
-                    else:
-                        # Handle numpy arrays or other iterables
-                        positions[i] = np.clip(a, limit_low, limit_high)
-                else:
-                    # For joints without defined limits, use generous defaults
-                    if isinstance(a, (int, float)):
-                        # Handle scalar values
-                        if a < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
-                            positions[i] = -10 * np.pi
-                        elif a > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
-                            positions[i] = 10 * np.pi
-                    else:
-                        # Handle numpy arrays or other iterables
-                        positions[i] = np.clip(a, -10 * np.pi, 10 * np.pi)
-            
-            # Set joint positions
+            # For backward compatibility - just positions
             p.setJointMotorControlArray(
                 bodyUniqueId=self.robot_id,
                 jointIndices=range(self.dof),
                 controlMode=p.POSITION_CONTROL,
-                targetPositions=positions,
+                targetPositions=action,
                 forces=[self.max_force] * self.dof,
                 positionGains=[self.position_gain] * self.dof,
-                velocityGains=[self.velocity_gain] * self.dof
+                velocityGains=[self.velocity_gain] * self.dof,
+                physicsClientId=self.client
             )
         
         # Step simulation
-        p.stepSimulation()
+        p.stepSimulation(physicsClientId=self.client)
         
         # Get new state
         next_state = self._get_state()
         
-        # Calculate reward (placeholder - customize based on your task)
-        reward = 0
-        
-        # Check if done (placeholder - customize based on your task)
-        done = False
-        
-        return next_state, reward, done, {}
+        return next_state
     
     def _get_state(self):
         # Get joint states
@@ -756,6 +722,20 @@ class RobotPositioningEnv(gym.Env):
         # Then create the robot environment with this client
         self.robot = FANUCRobotEnv(render=gui, verbose=verbose, client=self.client_id)
         
+        # Initialize the home position (center of workspace)
+        # This will be used for the center-avoidance reward
+        robot_base_pos, _ = p.getBasePositionAndOrientation(
+            self.robot.robot_id, 
+            physicsClientId=self.client_id
+        )
+        # Add shoulder height offset to get the center of the workspace
+        shoulder_height = 0.33
+        self.home_position = np.array([
+            robot_base_pos[0], 
+            robot_base_pos[1],
+            robot_base_pos[2] + shoulder_height
+        ])
+        
         # We need joint limits for the action space
         self.robot_joint_limits = self.robot.joint_limits
         self.dof = self.robot.dof
@@ -797,14 +777,6 @@ class RobotPositioningEnv(gym.Env):
             
         if self.verbose:
             print(f"Using workspace size: {self.workspace_size:.3f}m")
-        
-        # Get the home position of the end effector
-        self.robot.reset()
-        state = self.robot._get_state()
-        self.home_position = state[12:15]  # End-effector position
-        
-        # Initialize target position at home position
-        self.target_position = self.home_position.copy()
         
         # Initialize episode counter and maximum distance
         self.episode_count = 0
@@ -931,6 +903,10 @@ class RobotPositioningEnv(gym.Env):
         # Reset best position tracking
         self.best_distance_in_episode = float('inf')
         self.best_position_in_episode = None
+        
+        # Reset previous distance for progress rewards
+        if hasattr(self, 'prev_distance'):
+            delattr(self, 'prev_distance')
         
         # Store the previous episode count
         prev_episode_count = self.episode_count
@@ -1097,11 +1073,8 @@ class RobotPositioningEnv(gym.Env):
                 # Default velocity for joints without limits
                 joint_velocities.append(power * 0.1)  # Some reasonable default
         
-        # Apply velocities to the robot - pass None for positions, only using velocities
-        self.robot.step((None, joint_velocities))
-        
-        # Step simulation
-        p.stepSimulation()
+        # Pass the action to the FANUCRobotEnv by passing None for positions (velocity control only)
+        next_state = self.robot.step((None, joint_velocities))
         
         # Store the current action for next observation
         self.previous_action = np.array(action)
@@ -1121,36 +1094,75 @@ class RobotPositioningEnv(gym.Env):
         info = {}
         info["distance_cm"] = distance * 100  # Keep this in cm for easier reading
         
-        # Check for collisions - simplified to only check ground collision
-        ground_collision, _, collision_info = self._detect_collisions()
+        # Check for collisions - ground and end effector self-collisions
+        ground_collision, ee_self_collision, collision_info = self._detect_collisions()
         info["collision_info"] = collision_info
         
-        # Simplified reward system
+        # Improved reward system with more components
         # Base reward is 0
         reward = 0
         
         # Check if we've reached the target
         if distance <= self.accuracy_threshold:
             # Target reached! Maximum reward
-            reward = 10.0
+            reward = 20.0  # Increased from 10.0 to 20.0 to make target reaching more significant
             done = True
             info["target_reached"] = True
         else:
             # Not at target yet
             
-            # Linear gradient reward based on distance
+            # Calculate progress compared to previous step
+            if hasattr(self, 'prev_distance'):
+                # Progress is positive if we got closer to the target
+                progress = self.prev_distance - distance
+                
+                # Add a progress reward component (higher when making good progress)
+                # Scale based on current distance to create stronger gradient when close
+                progress_scale = 10.0 * (1.0 - min(distance / self.workspace_size, 1.0))
+                progress_reward = progress * progress_scale
+                
+                # Only reward positive progress to avoid exploits
+                if progress > 0:
+                    reward += progress_reward
+                    info["progress_reward"] = progress_reward
+            
+            # Store current distance for next step
+            self.prev_distance = distance
+            
+            # Use an exponential distance reward instead of linear
+            # This creates a much stronger gradient as the robot gets closer to the target
             # Maximum distance possible is workspace_size
-            # Reward ranges from 0 (at max distance) to 1 (at target)
             normalized_distance = min(distance / self.workspace_size, 1.0)
-            distance_reward = 1.0 - normalized_distance  # Linear gradient
+            # Exponential curve: from nearly 0 when far to nearly 1 when very close
+            distance_reward = 2.0 * np.exp(-3.0 * normalized_distance)
             
             # Apply the distance reward
-            reward = distance_reward
+            reward += distance_reward
+            info["distance_reward"] = distance_reward
+            
+            # Add a penalty for staying near the center of the workspace
+            # Calculate distance from home position (center of workspace)
+            home_distance = np.linalg.norm(current_ee_pos - self.home_position)
+            normalized_home_distance = min(home_distance / (self.workspace_size * 0.5), 1.0)
+            
+            # Penalize being close to the center (higher penalty when closer to center)
+            center_penalty = 0.5 * (1.0 - normalized_home_distance)
+            
+            # Only apply center penalty when we're not very close to the target
+            if distance > self.accuracy_threshold * 3:
+                reward -= center_penalty
+                info["center_penalty"] = center_penalty
             
             # Simple fixed penalty for ground collision
             if ground_collision:
                 reward -= self.ground_collision_penalty  # Use the class variable for consistency
                 info["ground_collision"] = True
+            
+            # Penalty for end effector self-collision
+            if ee_self_collision:
+                # Use the same penalty as ground collision for consistency
+                reward -= self.ground_collision_penalty
+                info["ee_self_collision"] = True
             
             # Check timeout
             if self.steps >= self.timeout_steps:
@@ -1340,10 +1352,12 @@ class RobotPositioningEnv(gym.Env):
 
     def _detect_collisions(self):
         """
-        Simplified collision detection - only check for collisions with the ground plane.
+        Enhanced collision detection:
+        1. Ground plane collisions (as before)
+        2. End effector self-collision detection
         
         Returns:
-            tuple: (ground_collision, False, collision_info)
+            tuple: (ground_collision, ee_self_collision, collision_info)
         """
         # Get current robot state
         state = self.robot._get_state()
@@ -1369,6 +1383,29 @@ class RobotPositioningEnv(gym.Env):
                     ground_collision_links.append(i)
                     break  # Exit early once a collision is found
         
+        # Check for end effector self-collisions
+        ee_self_collision = False
+        
+        # Make sure the robot has the ee_link_id attribute (added in _configure_collision_detection)
+        if hasattr(self.robot, 'ee_link_id'):
+            robot_id = self.robot.robot_id
+            ee_link = self.robot.ee_link_id
+            
+            # Get all contact points for the end effector
+            contact_points = p.getContactPoints(
+                bodyA=robot_id,
+                linkIndexA=ee_link,
+                physicsClientId=self.client_id
+            )
+            
+            # Check if any contact involves the end effector and another part of the robot
+            for point in contact_points:
+                if point[1] == robot_id:  # If bodyB is also our robot
+                    link_b = point[3]
+                    if link_b != ee_link and link_b != -1:  # Not with itself or the base
+                        ee_self_collision = True
+                        break
+        
         # Calculate distance from home position (center of workspace)
         distance_from_home = np.linalg.norm(ee_position - self.home_position)
         
@@ -1376,12 +1413,13 @@ class RobotPositioningEnv(gym.Env):
         collision_info = {
             "ground_collision": ground_collision,
             "ground_collision_links": ground_collision_links,
+            "ee_self_collision": ee_self_collision,
             "ee_position": ee_position,
             "distance_from_home": distance_from_home
         }
         
-        # Return with bounds_collision always False since we're ignoring all other collisions
-        return ground_collision, False, collision_info
+        # Return with both ground and end effector collision information
+        return ground_collision, ee_self_collision, collision_info
 
     def _cleanup_visualization(self):
         """Clean up all visualization resources to prevent memory leaks"""
@@ -1458,14 +1496,13 @@ class RobotPositioningEnv(gym.Env):
         
         # Define the range of distances that are reachable
         # Use the full workspace range from the workspace data
-        min_reach = 0.15  # Minimum reach distance (to avoid targets too close to the robot)
+        min_reach = 0.25  # Increased minimum reach to avoid targets too close to the center
         max_reach = self.workspace_size   # Maximum reach distance
         
         # Define the robot base radius to avoid spawning targets inside or too close to the base
         robot_base_radius = 0.15  # Approximate radius of the robot's base
         
         # Define ground clearance to ensure targets are not in contact with or below the ground
-        # Increased from 0.05 to 0.1 to ensure a more significant clearance
         ground_clearance = 0.1  # 10cm above the ground
         
         # Use the ground plane height for ground level
@@ -1473,13 +1510,40 @@ class RobotPositioningEnv(gym.Env):
         # Maximum attempts to find a valid target
         max_attempts = 100
         
+        # Choose a sampling strategy - bias towards outer regions of workspace
+        sampling_strategy = np.random.choice(['uniform', 'outer_bias', 'structured'], 
+                                            p=[0.2, 0.5, 0.3])
+        
         for _ in range(max_attempts):
-            # Sample a random direction (spherical coordinates)
-            theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
-            phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
-            
-            # Sample a random distance within the reachable range
-            distance = np.random.uniform(min_reach, max_reach)
+            # Different sampling strategies to create more variety
+            if sampling_strategy == 'uniform':
+                # Uniform sampling in spherical coordinates
+                theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
+                phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
+                distance = np.random.uniform(min_reach, max_reach)
+                
+            elif sampling_strategy == 'outer_bias':
+                # Bias towards outer regions of workspace using beta distribution
+                theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
+                phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
+                # Beta distribution with alpha=1, beta=0.7 biases towards higher values (outer radius)
+                normalized_distance = np.random.beta(1.0, 0.7)  
+                distance = min_reach + normalized_distance * (max_reach - min_reach)
+                
+            else:  # 'structured'
+                # Generate targets at specific segments of the workspace
+                # This ensures coverage of different areas in a more structured way
+                segment = np.random.randint(0, 8)  # Divide workspace into 8 segments
+                
+                # Each segment corresponds to a specific region
+                phi_segment = (segment % 4) * (np.pi/2) + np.random.uniform(-np.pi/4, np.pi/4)
+                theta_segment = np.pi/3 if segment < 4 else 2*np.pi/3 + np.random.uniform(-np.pi/6, np.pi/6)
+                
+                # Use maximum reach for structured targets to encourage reaching
+                distance = np.random.uniform(0.6 * max_reach, max_reach)
+                
+                theta = theta_segment
+                phi = phi_segment
             
             # Convert spherical coordinates to Cartesian
             x = distance * np.sin(theta) * np.cos(phi)
@@ -1502,12 +1566,19 @@ class RobotPositioningEnv(gym.Env):
             # If the target is valid, return it
             if is_above_ground and is_not_in_base:
                 if self.verbose:
-                    print(f"Valid target position sampled at {target_position}")
+                    print(f"Valid target position sampled at {target_position} using {sampling_strategy} strategy")
                 return target_position
         
         # If we couldn't find a valid target after max_attempts, use a fallback method
-        # Generate a point directly in front of the robot at a safe distance
-        fallback_position = shoulder_position + np.array([0.5, 0, 0.2])
+        # Generate a point in a more distant location to encourage movement
+        # Pick a random direction instead of always in front
+        random_angle = np.random.uniform(0, 2 * np.pi)
+        fallback_position = shoulder_position + np.array([
+            0.5 * np.cos(random_angle),  # Random direction
+            0.5 * np.sin(random_angle),  # Random direction
+            0.2
+        ])
+        
         if self.verbose:
             print(f"Using fallback target position at {fallback_position}")
         
@@ -1984,6 +2055,27 @@ def create_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=False, dis
     # Create environments
     envs = []
     
+    # Calculate a scaling factor for timeout steps based on number of environments
+    # This ensures that as we add more robots, timeouts still occur at roughly
+    # the same real-time rate, by reducing the number of steps before timeout
+    timeout_scale_factor = 1.0
+    if num_envs > 1:
+        # Apply a diminishing scale factor as robot count increases
+        # Formula: scale = 1.0 / (0.5 + 0.5 * sqrt(num_robots))
+        # This gives a more gradual scaling than direct division
+        timeout_scale_factor = 1.0 / (0.5 + 0.5 * math.sqrt(num_envs))
+    
+    # Base timeout steps (before scaling)
+    base_timeout_steps = 800 if eval_env else 200  # Base values 
+    
+    # Apply scaling to get effective timeout steps
+    effective_timeout_steps = int(base_timeout_steps * timeout_scale_factor)
+    
+    # Ensure a minimum reasonable timeout
+    effective_timeout_steps = max(effective_timeout_steps, 50)
+    
+    print(f"Using timeout of {effective_timeout_steps} steps for {num_envs} robots (scale factor: {timeout_scale_factor:.2f})")
+    
     # For parallel visualization, we need to create environments with offsets
     if parallel_viz and gui:
         # Calculate offsets for each robot
@@ -1997,10 +2089,7 @@ def create_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=False, dis
         
         # Create environments with offsets
         for i in range(num_envs):
-            # Set a longer timeout for evaluation environments
-            # For evaluation, give the robot much more time to reach targets
-            timeout_steps = 800 if eval_env else 200  # Increased by a factor of 4 (from 200/50 to 800/200)
-            
+            # Set a scaled timeout for environments
             env = RobotPositioningEnv(
                 gui=gui,
                 gui_delay=0.0,
@@ -2013,8 +2102,8 @@ def create_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=False, dis
                 # enable_bounds_collision parameter removed as it's permanently disabled
             )
             
-            # Set the timeout steps
-            env.timeout_steps = timeout_steps
+            # Set the scaled timeout steps
+            env.timeout_steps = effective_timeout_steps
             
             # Add the environment to the list
             envs.append(env)
@@ -2024,10 +2113,6 @@ def create_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=False, dis
     else:
         # Create environments without offsets
         for i in range(num_envs):
-            # Set a longer timeout for evaluation environments
-            # For evaluation, give the robot much more time to reach targets
-            timeout_steps = 800 if eval_env else 200  # Increased by a factor of 4 (from 200/50 to 800/200)
-            
             env = RobotPositioningEnv(
                 gui=(gui and i == 0),  # Only GUI for the first environment
                 gui_delay=0.0,
@@ -2038,8 +2123,8 @@ def create_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=False, dis
                 # enable_bounds_collision parameter removed as it's permanently disabled
             )
             
-            # Set the timeout steps
-            env.timeout_steps = timeout_steps
+            # Set the scaled timeout steps
+            env.timeout_steps = effective_timeout_steps
             
             # Wrap with DelayedGUIEnv if visualization is enabled
             if gui and i == 0 and viz_speed > 0.0:
@@ -2090,6 +2175,27 @@ def create_multiple_robots_in_same_env(num_robots=3, viz_speed=0.1, verbose=Fals
         
         robot_positions.append((x_offset, y_offset))
     
+    # Calculate a scaling factor for timeout steps based on number of robots
+    # This ensures that as we add more robots, timeouts still occur at roughly
+    # the same real-time rate, by reducing the number of steps before timeout
+    timeout_scale_factor = 1.0
+    if num_robots > 1:
+        # Apply a diminishing scale factor as robot count increases
+        # Formula: scale = 1.0 / (0.5 + 0.5 * sqrt(num_robots))
+        # This gives a more gradual scaling than direct division
+        timeout_scale_factor = 1.0 / (0.5 + 0.5 * math.sqrt(num_robots))
+    
+    # Base timeout steps (before scaling)
+    base_timeout_steps = 200  # Standard training timeout 
+    
+    # Apply scaling to get effective timeout steps
+    effective_timeout_steps = int(base_timeout_steps * timeout_scale_factor)
+    
+    # Ensure a minimum reasonable timeout
+    effective_timeout_steps = max(effective_timeout_steps, 50)
+    
+    print(f"Using timeout of {effective_timeout_steps} steps for {num_robots} robots (scale factor: {timeout_scale_factor:.2f})")
+    
     # Create environments
     envs = []
     for i in range(num_robots):
@@ -2105,6 +2211,9 @@ def create_multiple_robots_in_same_env(num_robots=3, viz_speed=0.1, verbose=Fals
             rank=i,
             offset_x=x_offset
         )
+        
+        # Set the scaled timeout steps
+        env.timeout_steps = effective_timeout_steps
         
         # Apply y offset
         if y_offset != 0.0:
@@ -2278,71 +2387,95 @@ def get_best_timeout_reward():
 # Add a ModelUpdateCallback class to handle model weight updates
 class ModelUpdateCallback(BaseCallback):
     """
-    Callback to update model weights when a robot reaches the target.
+    Callback to update model weights when robots complete episodes.
+    All robots contribute to the model updates rather than just the best-performing one.
     """
     def __init__(self, verbose=0):
         super(ModelUpdateCallback, self).__init__(verbose)
         self.update_count = 0
+        self.robot_contributions = {}  # Track which robots have contributed to the current update
         
     def _on_step(self):
-        # Check if model update is needed
-        if is_model_update_needed():
-            # Get which robot triggered the update
-            update_robot = get_model_update_robot_rank()
-            
-            # Get the best timeout robot rank
-            best_timeout_robot = get_best_timeout_robot_rank()
-            
-            # Reset the flag
-            reset_model_update_flag()
-            
-            # Update the model weights
-            self.update_count += 1
-            
-            # Limit the episode info buffer to prevent memory growth
-            limit_ep_info_buffer(self.model, max_size=100)
-            
-            # Check if this was a direct target reach or a timeout best performance
-            best_timeout_distance = get_best_timeout_distance()
-            best_timeout_reward = get_best_timeout_reward()
-            
-            if best_timeout_robot >= 0:
-                # This was a timeout best performance update
-                if self.verbose > 0:
-                    print(f"\n{'='*60}")
-                    print(f"MODEL UPDATE #{self.update_count}: Best timeout performance!")
-                    # Use the best_timeout_robot instead of update_robot
-                    # Use full precision without rounding
-                    print(f"Robot {best_timeout_robot} achieved the best reward: {best_timeout_reward} (range: -100 to 100)")
-                    print(f"Distance to target: {best_timeout_distance*100}cm")
-                    print(f"Updating model weights from Robot {best_timeout_robot} and resetting all robots.")
-                    print(f"{'='*60}\n")
-            else:
-                # This was a direct target reach update
-                if self.verbose > 0:
-                    print(f"\n{'='*60}")
-                    print(f"MODEL UPDATE #{self.update_count}: Target reached with 1mm precision!")
-                    print(f"Robot {update_robot} reached the target!")
-                    print(f"Updating model weights from Robot {update_robot} and resetting all robots.")
-                    print(f"{'='*60}\n")
-            
-            # Reset the best timeout tracking for the next round
-            reset_best_timeout_tracking()
-            
-            # Update the shared model with the current model weights
-            # This ensures all robots are using the same version of the model
-            model_version = increment_shared_model_version()
-            
-            if self.verbose > 0:
-                print(f"Updated shared model to version {model_version}")
-            
-            # Force target repositioning for all robots by updating the target randomization time
-            update_target_randomization_time()
-            
-            # Force garbage collection to free up memory
-            force_garbage_collection()
-            
+        """Process model updates from all robots in parallel"""
+        
+        # Check if an episode has completed (either by reaching target or timeout)
+        # This is key: instead of having one "best" robot update the model,
+        # we'll collect experiences from all completed episodes
+        
+        # Rather than checking a global update flag, we'll gather updates from
+        # all environments that have completed episodes in this step
+        envs_completed = []
+        rewards_achieved = []
+        distances_achieved = []
+        
+        # Get all active environments
+        vec_env = self.training_env
+        
+        # Check all environments for completed episodes
+        for i in range(vec_env.num_envs):
+            # Check if this environment has completed an episode
+            if hasattr(vec_env, 'dones') and vec_env.dones[i]:
+                # This environment has completed an episode
+                envs_completed.append(i)
+                
+                # Get the reward and distance achieved
+                if hasattr(vec_env, 'infos') and vec_env.infos[i] is not None:
+                    reward = vec_env.infos[i].get('reward', 0.0)
+                    rewards_achieved.append(reward)
+                    
+                    distance = vec_env.infos[i].get('distance_cm', float('inf')) / 100.0  # Convert to meters
+                    distances_achieved.append(distance)
+                    
+                    # Check if target was reached
+                    target_reached = vec_env.infos[i].get('target_reached', False)
+                    
+                    if target_reached:
+                        # Target reached - trigger a model update and log it
+                        if self.verbose > 0:
+                            print(f"\n{'='*60}")
+                            print(f"TARGET REACHED by Robot {i}!")
+                            print(f"Distance to target: {distance*100:.2f}cm")
+                            print(f"Reward: {reward}")
+                            print(f"Robot {i} has reached the target and contributed to model update.")
+                            print(f"{'='*60}\n")
+                
+        # If no environments completed episodes, return
+        if not envs_completed:
             return True
+            
+        # If we have completed episodes, update the model
+        self.update_count += 1
+        
+        # Print information about the update
+        if self.verbose > 0:
+            avg_reward = np.mean(rewards_achieved) if rewards_achieved else 0.0
+            avg_distance = np.mean(distances_achieved) if distances_achieved else float('inf')
+            
+            print(f"\n{'='*60}")
+            print(f"MODEL UPDATE #{self.update_count}: {len(envs_completed)} robots contributed")
+            print(f"Average reward: {avg_reward:.4f}")
+            print(f"Average distance: {avg_distance*100:.2f}cm")
+            print(f"Updating shared model weights with all robot experiences.")
+            print(f"{'='*60}\n")
+        
+        # Limit the episode info buffer to prevent memory growth
+        limit_ep_info_buffer(self.model, max_size=100)
+        
+        # Update the shared model with the current model weights from all robots
+        # This ensures all robots contribute to the same version of the model
+        model_version = increment_shared_model_version()
+        
+        if self.verbose > 0:
+            print(f"Updated shared model to version {model_version}")
+        
+        # Force target repositioning for all robots by updating the target randomization time
+        update_target_randomization_time()
+        
+        # Reset the best timeout tracking for the next round
+        reset_best_timeout_tracking()
+        
+        # Force garbage collection to free up memory
+        force_garbage_collection()
         
         return True
 
@@ -2593,10 +2726,15 @@ def main():
     print("When any robot reaches the target with 1mm precision:")
     print("1. Model weights will be updated from that successful run")
     print("2. All robots will reset and start a new run with the updated model")
-    print("\nIf no robot reaches the target within the time limit (100 steps):")
+    print("\nIf no robot reaches the target within the time limit:")
     print("1. The robot that achieved the best accuracy will be used for model updates")
     print("2. Model weights will only be updated if the best distance is within 5cm of the target")
     print("3. All robots will reset and start a new run with the updated model")
+    
+    print("\nCollision detection:")
+    print("1. Ground collisions are detected and penalized")
+    print("2. End effector self-collisions are detected and penalized")
+    print("3. Other robot parts can clip through each other (simplified physical model)")
     
     model.learn(total_timesteps=args.steps, callback=model_update_callback)
     
