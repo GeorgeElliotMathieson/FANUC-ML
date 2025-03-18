@@ -53,7 +53,6 @@ os.makedirs("./plots", exist_ok=True)  # Add directory for plots
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Train a robot arm for precise end effector positioning')
-parser.add_argument('--cpu', action='store_true', help='Force using CPU even if GPU is available')
 parser.add_argument('--steps', type=int, default=1000000, help='Total number of training steps')
 parser.add_argument('--target-accuracy', type=float, default=1.0, help='Target accuracy in cm')
 parser.add_argument('--debug', action='store_true', help='Enable debug mode with more verbose output')
@@ -83,9 +82,9 @@ parser.add_argument('--seed', type=int, default=None, help='Random seed for repr
 parser.add_argument('--disable-bounds-collision', action='store_true', help='Disable workspace boundary collisions')
 args = parser.parse_args()
 
-# Set up device (CPU only)
-device = torch.device("cpu")
-print("Using CPU for training")
+# Set up device based on args
+device = torch.device("cpu")  # Default to CPU, the actual device will be set in main()
+print("Using CPU for training (default setting, can be overridden with command line arguments)")
 
 # Apply high learning rate if requested
 if args.high_lr:
@@ -367,16 +366,27 @@ class FANUCRobotEnv:
             # Only prevent extreme values that would cause simulation instability
             for i in range(len(positions)):
                 # Only apply extremely loose limits to prevent simulation crashes
-                if positions[i] < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
-                    positions[i] = -10 * np.pi
-                elif positions[i] > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
-                    positions[i] = 10 * np.pi
+                pos = positions[i]
+                vel = velocities[i]
+                
+                if isinstance(pos, (int, float)):
+                    # Handle scalar values
+                    if pos < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
+                        positions[i] = -10 * np.pi
+                    elif pos > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
+                        positions[i] = 10 * np.pi
+                else:
+                    # Handle numpy arrays or other iterables
+                    positions[i] = np.clip(pos, -10 * np.pi, 10 * np.pi)
                     
                 # Limit velocities to reasonable ranges (±5 rad/s)
-                if velocities[i] < -5.0:
-                    velocities[i] = -5.0
-                elif velocities[i] > 5.0:
-                    velocities[i] = 5.0
+                if isinstance(vel, (int, float)):
+                    if vel < -5.0:
+                        velocities[i] = -5.0
+                    elif vel > 5.0:
+                        velocities[i] = 5.0
+                else:
+                    velocities[i] = np.clip(vel, -5.0, 5.0)
             
             # Set joint positions with target velocities
             p.setJointMotorControlArray(
@@ -397,10 +407,15 @@ class FANUCRobotEnv:
             # Only prevent extreme values that would cause simulation instability
             for i, a in enumerate(positions):
                 # Only apply extremely loose limits to prevent simulation crashes
-                if a < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
-                    positions[i] = -10 * np.pi
-                elif a > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
-                    positions[i] = 10 * np.pi
+                if isinstance(a, (int, float)):
+                    # Handle scalar values
+                    if a < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
+                        positions[i] = -10 * np.pi
+                    elif a > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
+                        positions[i] = 10 * np.pi
+                else:
+                    # Handle numpy arrays or other iterables
+                    positions[i] = np.clip(a, -10 * np.pi, 10 * np.pi)
             
             # Set joint positions
             p.setJointMotorControlArray(
@@ -688,8 +703,11 @@ class RobotPositioningEnv(gym.Env):
         # Set ground plane height (no offset)
         self.ground_plane_height = 0.0  # Standard ground plane height (no offset)
         
-        # Create the robot environment - this is the actual robot simulation
-        self.robot = FANUCRobotEnv(render=gui, verbose=verbose)
+        # Create the PyBullet client first
+        self.client_id = get_shared_pybullet_client(render=gui)
+        
+        # Then create the robot environment with this client
+        self.robot = FANUCRobotEnv(render=gui, verbose=verbose, client=self.client_id)
         
         # We need joint limits for the action space
         self.robot_joint_limits = self.robot.joint_limits
@@ -725,10 +743,6 @@ class RobotPositioningEnv(gym.Env):
         self.marker_expiry_steps = 24  # Markers will expire after 24 steps
         self.marker_creation_steps = {}  # Track when each marker was created
         self.target_line_id = None
-        
-        # Create the robot environment
-        self.client_id = get_shared_pybullet_client(render=gui)
-        self.robot = FANUCRobotEnv(render=gui, verbose=verbose, client=self.client_id)
         
         # Load workspace data if not already loaded
         load_workspace_data(verbose=verbose)
