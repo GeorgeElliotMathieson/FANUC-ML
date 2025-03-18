@@ -4,13 +4,28 @@ import pybullet_data
 import time
 import numpy as np
 import os
+from pybullet_utils import get_pybullet_client, configure_visualization
 
 class FANUCRobotEnv:
-    def __init__(self, render=True):
-        # Connect to the physics server
-        self.client = p.connect(p.GUI if render else p.DIRECT)
+    def __init__(self, render=True, verbose=False):
+        # Store verbose flag
+        self.verbose = verbose
+        
+        # Store render mode
+        self.render_mode = render
+        
+        # Connect to the physics server using the shared client function
+        self.client = get_pybullet_client(render=render)
+            
+        if self.verbose:
+            print(f"Connected to PyBullet physics server with client ID: {self.client}")
+        
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
+        
+        # Configure visualization if in GUI mode
+        if render and p.getConnectionInfo(self.client)['connectionMethod'] == p.GUI:
+            configure_visualization(self.client, clean_viz=True)
         
         # Load plane
         self.plane_id = p.loadURDF("plane.urdf")
@@ -31,12 +46,12 @@ class FANUCRobotEnv:
         
         # Joint limits from manual
         self.joint_limits = {
-            0: [-170, 170],  # J1 axis (in degrees)
-            1: [-60, 75],    # J2 axis
-            2: [-70, 50],    # J3 axis
-            3: [-170, 170],  # J4 axis
-            4: [-110, 110],  # J5 axis
-            5: [-360, 360]   # J6 axis
+            0: [-720, 720],  # J1 axis - physical limit (multiple rotations allowed)
+            1: [-360, 360],  # J2 axis - physical limit
+            2: [-360, 360],  # J3 axis - physical limit
+            3: [-720, 720],  # J4 axis - physical limit (multiple rotations allowed)
+            4: [-360, 360],  # J5 axis - physical limit
+            5: [-1080, 1080]  # J6 axis - physical limit (multiple rotations allowed)
         }
         
         # Convert to radians
@@ -47,17 +62,31 @@ class FANUCRobotEnv:
         self.reset()
         
     def _load_robot(self):
-        # In a real implementation, you would load the URDF for the FANUC LR Mate 200iC
-        # For this example, we'll use a simple URDF as a placeholder
-        # You'll need to create a proper URDF based on the manual specs
+        # Load the URDF for the FANUC LR Mate 200iC
         
-        # Check if we have a URDF file for the robot (you'll need to create this)
-        urdf_path = "fanuc_lrmate_200ic.urdf"
-        if os.path.exists(urdf_path):
-            return p.loadURDF(urdf_path, [0, 0, 0], useFixedBase=True)
-        else:
-            # Fallback to a simple robot for testing
-            return p.loadURDF("kuka_iiwa/model.urdf", [0, 0, 0], useFixedBase=True)
+        # Check for the URDF file in various possible locations
+        possible_paths = [
+            "fanuc_lrmate_200ic.urdf",                  # Current directory
+            "res/fanuc_lrmate_200ic.urdf",              # res directory
+            "../res/fanuc_lrmate_200ic.urdf",           # One level up
+            "../../res/fanuc_lrmate_200ic.urdf",        # Two levels up
+            os.path.join(os.path.dirname(__file__), "../../res/fanuc_lrmate_200ic.urdf")  # Relative to this file
+        ]
+        
+        # Try each path
+        for urdf_path in possible_paths:
+            if os.path.exists(urdf_path):
+                if self.verbose:
+                    print(f"Loading FANUC LR Mate 200iC URDF from: {urdf_path}")
+                return p.loadURDF(urdf_path, [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
+        
+        # If we couldn't find the URDF, print a warning and fall back to a simple robot
+        print("WARNING: Could not find FANUC LR Mate 200iC URDF file. Falling back to default robot.")
+        print("Current working directory:", os.getcwd())
+        print("Searched paths:", possible_paths)
+        
+        # Fallback to a simple robot for testing
+        return p.loadURDF("kuka_iiwa/model.urdf", [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
     
     def reset(self):
         # Reset to home position
@@ -73,11 +102,14 @@ class FANUCRobotEnv:
         # Apply action (joint positions) to the robot
         # action should be a list of 6 target joint positions
         
-        # Ensure action is within joint limits
+        # No enforcement of joint limits - allow full range of motion
+        # Only prevent extreme values that would cause simulation instability
         for i, a in enumerate(action):
-            if i in self.joint_limits:
-                limit_low, limit_high = self.joint_limits[i]
-                action[i] = np.clip(a, limit_low, limit_high)
+            # Only apply extremely loose limits to prevent simulation crashes
+            if a < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
+                action[i] = -10 * np.pi
+            elif a > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
+                action[i] = 10 * np.pi
         
         # Set joint positions
         p.setJointMotorControlArray(
@@ -122,11 +154,57 @@ class FANUCRobotEnv:
         return state
     
     def render(self):
-        # PyBullet renders automatically in GUI mode
-        pass
+        """
+        Render the environment.
+        If we're in DIRECT mode, try to switch to GUI mode.
+        """
+        # If we're already in GUI mode, nothing to do
+        if p.getConnectionInfo(self.client)['connectionMethod'] == p.GUI:
+            # Force the GUI to update
+            p.configureDebugVisualizer(p.COV_ENABLE_SINGLE_STEP_RENDERING, 1, physicsClientId=self.client)
+            return
+        
+        # If we're in DIRECT mode, try to switch to GUI
+        try:
+            # Disconnect from the current client
+            p.disconnect(self.client)
+            
+            # Connect to a new client in GUI mode
+            self.client = p.connect(p.GUI)
+            self.render_mode = True
+            
+            if self.verbose:
+                print(f"Switched to GUI mode with client ID: {self.client}")
+            
+            # Reconfigure the environment
+            p.setAdditionalSearchPath(pybullet_data.getDataPath())
+            p.setGravity(0, 0, -9.81)
+            
+            # Configure visualization
+            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=self.client)
+            p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1, physicsClientId=self.client)
+            p.configureDebugVisualizer(p.COV_ENABLE_MOUSE_PICKING, 1, physicsClientId=self.client)
+            p.configureDebugVisualizer(p.COV_ENABLE_KEYBOARD_SHORTCUTS, 1, physicsClientId=self.client)
+            
+            # Reload the environment
+            self.plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client)
+            
+            # Reload the robot using the _load_robot method to ensure the correct URDF is used
+            self.robot_id = self._load_robot()
+            
+            # Reset to the current state
+            self.reset()
+            
+        except Exception as e:
+            print(f"Warning: Could not switch to GUI mode: {e}")
     
     def close(self):
-        p.disconnect(self.client)
+        try:
+            # Check if we're still connected before disconnecting
+            if p.isConnected(self.client):
+                p.disconnect(self.client)
+        except Exception as e:
+            print(f"Warning: Error closing PyBullet connection: {e}")
 
 # Test the environment
 if __name__ == "__main__":

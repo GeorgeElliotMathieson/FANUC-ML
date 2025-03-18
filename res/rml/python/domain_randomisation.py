@@ -1,10 +1,11 @@
 # domain_randomization.py
 import numpy as np
+import torch
 from robot_sim import FANUCRobotEnv
 
 class DomainRandomizedEnv(FANUCRobotEnv):
-    def __init__(self, render=True, randomize=True):
-        super(DomainRandomizedEnv, self).__init__(render=render)
+    def __init__(self, render=True, randomize=True, verbose=False):
+        # Set randomize attribute before calling parent's __init__
         self.randomize = randomize
         
         # Default parameters
@@ -20,8 +21,24 @@ class DomainRandomizedEnv(FANUCRobotEnv):
         # Current parameters
         self.current_params = self.default_params.copy()
         
+        # Call parent's __init__ after setting randomize
+        super(DomainRandomizedEnv, self).__init__(render=render, verbose=verbose)
+        
         # Apply initial parameters
         self._apply_parameters()
+        
+        # Set random seed for reproducibility
+        self.seed()
+        
+    def seed(self, seed=None):
+        """Set random seed for reproducibility"""
+        if seed is not None:
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(seed)
+                torch.cuda.manual_seed_all(seed)
+        return [seed]
         
     def reset(self):
         # Randomize parameters if enabled
