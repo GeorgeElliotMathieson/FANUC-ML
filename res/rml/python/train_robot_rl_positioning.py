@@ -59,11 +59,11 @@ parser.add_argument('--debug', action='store_true', help='Enable debug mode with
 parser.add_argument('--load', type=str, default='', help='Load a pre-trained model to continue training')
 parser.add_argument('--eval-only', action='store_true', help='Only run evaluation on a pre-trained model')
 parser.add_argument('--gui-delay', type=float, default=0.01, help='Delay between steps for better visualization (seconds)')
-parser.add_argument('--parallel', type=int, default=0, help='Number of parallel environments (0=auto)')
-parser.add_argument('--parallel-viz', action='store_true', help='Enable parallel visualization (multiple robots in separate windows)')
+parser.add_argument('--parallel', type=int, default=2, help='Number of parallel environments (default: 2)')
+parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in same view), default: True')
 parser.add_argument('--workspace-size', type=float, default=0.7, help='Size of the workspace for target positions')
-parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (SAC only)')
-parser.add_argument('--learning-rate', type=float, default=5e-4, help='Learning rate for the optimizer (default: 5e-4, balanced for stability and speed)')
+parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (default: sac)')
+parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate for the optimizer (default: 0.001)')
 parser.add_argument('--batch-size', type=int, default=256, help='Batch size for updates (default: 256, balanced for learning)')
 parser.add_argument('--buffer-size', type=int, default=1000000, help='Replay buffer size for SAC (default: 1M, larger for better stability)')
 parser.add_argument('--train-freq', type=int, default=1, help='Update frequency for SAC (default: 1, update every step)')
@@ -74,7 +74,7 @@ parser.add_argument('--save-freq', type=int, default=5000, help='Model saving fr
 parser.add_argument('--clean-viz', action='store_true', help='Enable clean visualization with zoomed-in view of the robot')
 parser.add_argument('--eval-viz', action='store_true', help='Enable visualization for evaluation only')
 parser.add_argument('--high-lr', action='store_true', help='Use a higher learning rate (1e-3) for faster learning')
-parser.add_argument('--viz-speed', type=float, default=0.0, help='Control visualization speed (delay in seconds, higher = slower, 0.0 = default, 0.05 = slow motion)')
+parser.add_argument('--viz-speed', type=float, default=0.1, help='Control visualization speed (delay in seconds, higher = slower, default: 0.1)')
 parser.add_argument('--optimize-training', action='store_true', help='Enable optimized training settings for faster learning', default=True)
 parser.add_argument('--verbose', action='store_true', help='Enable verbose output for debugging')
 parser.add_argument('--exploration', type=float, default=0.2, help='Initial exploration rate (higher values = more exploration)')
@@ -297,26 +297,22 @@ class FANUCRobotEnv:
     def _load_robot(self):
         # Load the URDF for the FANUC LR Mate 200iC
         
-        # Check for the URDF file in various possible locations
-        possible_paths = [
-            "fanuc_lrmate_200ic.urdf",                  # Current directory
-            "res/fanuc_lrmate_200ic.urdf",              # res directory
-            "../res/fanuc_lrmate_200ic.urdf",           # One level up
-            "../../res/fanuc_lrmate_200ic.urdf",        # Two levels up
-            os.path.join(os.path.dirname(__file__), "../../res/fanuc_lrmate_200ic.urdf")  # Relative to this file
-        ]
+        # Get the absolute path to the workspace directory
+        workspace_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         
-        # Try each path
-        for urdf_path in possible_paths:
-            if os.path.exists(urdf_path):
-                if self.verbose:
-                    print(f"Loading FANUC LR Mate 200iC URDF from: {urdf_path}")
-                return p.loadURDF(urdf_path, [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
+        # Define the absolute path to the URDF file
+        urdf_path = os.path.join(workspace_dir, "res", "fanuc_lrmate_200ic.urdf")
+        
+        # Check if the URDF file exists
+        if os.path.exists(urdf_path):
+            if self.verbose:
+                print(f"Loading FANUC LR Mate 200iC URDF from: {urdf_path}")
+            return p.loadURDF(urdf_path, [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
         
         # If we couldn't find the URDF, print a warning and fall back to a simple robot
         print("WARNING: Could not find FANUC LR Mate 200iC URDF file. Falling back to default robot.")
+        print("Expected URDF path:", urdf_path)
         print("Current working directory:", os.getcwd())
-        print("Searched paths:", possible_paths)
         
         # Fallback to a simple robot for testing
         return p.loadURDF("kuka_iiwa/model.urdf", [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
@@ -2592,14 +2588,14 @@ def parse_args():
     parser.add_argument('--save-dir', type=str, default='./models', help='Directory to save models to')
     parser.add_argument('--eval-only', action='store_true', help='Only evaluate the model, no training')
     parser.add_argument('--gui', action='store_true', help='Enable GUI visualization')
-    parser.add_argument('--parallel', type=int, default=1, help='Number of parallel environments to use')
-    parser.add_argument('--parallel-viz', action='store_true', help='Enable parallel visualization (multiple robots in view)')
-    parser.add_argument('--viz-speed', type=float, default=0.0, help='Control visualization speed (delay in seconds, higher = slower, 0.0 = default, 0.05 = slow motion)')
+    parser.add_argument('--parallel', type=int, default=2, help='Number of parallel environments to use (default: 2)')
+    parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in view), default: True')
+    parser.add_argument('--viz-speed', type=float, default=0.1, help='Control visualization speed (delay in seconds, higher = slower, default: 0.1)')
     parser.add_argument('--cuda', dest='use_cuda', action='store_true', help='Use CUDA for training if available')
     parser.add_argument('--cpu', dest='use_cuda', action='store_false', help='Use CPU for training even if CUDA is available')
     parser.add_argument('--workspace-size', type=float, default=0.7, help='Size of the workspace for target positions')
-    parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (SAC only)')
-    parser.add_argument('--learning-rate', type=float, default=5e-4, help='Learning rate for the optimizer (default: 5e-4, balanced for stability and speed)')
+    parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (default: sac)')
+    parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate for the optimizer (default: 0.001)')
     parser.add_argument('--batch-size', type=int, default=256, help='Batch size for updates (default: 256, balanced for learning)')
     parser.add_argument('--buffer-size', type=int, default=1000000, help='Replay buffer size for SAC (default: 1M, larger for better stability)')
     parser.add_argument('--train-freq', type=int, default=1, help='Update frequency for SAC (default: 1, update every step)')
