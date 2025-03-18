@@ -250,7 +250,7 @@ class FANUCRobotEnv:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
         
-        # Load plane
+        # Load plane - keeping it visible as requested
         self.plane_id = p.loadURDF("plane.urdf")
         
         # Set collision filter for the plane to interact with all robots
@@ -1225,8 +1225,7 @@ class RobotPositioningEnv(gym.Env):
     def _visualize_reachable_workspace(self):
         """
         Visualize the reachable workspace of the robot.
-        Shows the minimum and maximum reach distances as spheres.
-        Also visualizes the robot's base radius and ground plane.
+        Shows only the maximum reach distance as a sphere.
         """
         # Get the robot's base position
         robot_base_pos, _ = p.getBasePositionAndOrientation(
@@ -1244,17 +1243,15 @@ class RobotPositioningEnv(gym.Env):
         ])
         
         # Define the range of distances that are reachable
-        min_reach = 0.15  # Minimum reach distance
+        min_reach = 0.15  # Minimum reach distance (kept for reference but not visualized)
         # Use the workspace_size for the maximum reach to match collision detection
         max_reach = self.workspace_size
         
-        # Define the robot base radius
+        # Define the robot base radius (kept for reference but not visualized)
         robot_base_radius = 0.15  # Approximate radius of the robot's base
         
         # Define ground clearance
         ground_clearance = 0.1  # 10cm above the ground
-        
-        # Use self.ground_plane_height for ground plane visualization
         
         # Remove any previous visualizations
         if hasattr(self, 'viz_ids') and self.viz_ids:
@@ -1263,21 +1260,6 @@ class RobotPositioningEnv(gym.Env):
         
         # Initialize visualization IDs list
         self.viz_ids = []
-        
-        # Create a visual sphere for the minimum reach
-        min_sphere_id = p.createVisualShape(
-            shapeType=p.GEOM_SPHERE,
-            radius=min_reach,
-            rgbaColor=[0, 1, 0, 0.3],  # Green, semi-transparent
-            physicsClientId=self.robot.client
-        )
-        min_sphere_body = p.createMultiBody(
-            baseMass=0,
-            baseVisualShapeIndex=min_sphere_id,
-            basePosition=shoulder_position,
-            physicsClientId=self.robot.client
-        )
-        self.viz_ids.append(min_sphere_body)
         
         # Create a visual sphere for the maximum reach
         max_sphere_id = p.createVisualShape(
@@ -1294,44 +1276,11 @@ class RobotPositioningEnv(gym.Env):
         )
         self.viz_ids.append(max_sphere_body)
         
-        # Create a visual cylinder for the robot's base radius
-        base_cylinder_id = p.createVisualShape(
-            shapeType=p.GEOM_CYLINDER,
-            radius=robot_base_radius,
-            length=0.01,  # Very thin cylinder
-            rgbaColor=[1, 0, 0, 0.3],  # Red, semi-transparent
-            physicsClientId=self.robot.client
-        )
-        base_cylinder_body = p.createMultiBody(
-            baseMass=0,
-            baseVisualShapeIndex=base_cylinder_id,
-            basePosition=[robot_base_pos[0], robot_base_pos[1], robot_base_pos[2] + 0.005],  # Slightly above the base
-            physicsClientId=self.robot.client
-        )
-        self.viz_ids.append(base_cylinder_body)
-        
-        # Visualize the ground plane and ground clearance
-        # Create a visual box for the ground plane (large flat box)
-        ground_size = 2.0  # 2m x 2m ground plane
-        ground_plane_id = p.createVisualShape(
-            shapeType=p.GEOM_BOX,
-            halfExtents=[ground_size, ground_size, 0.001],  # Very thin box
-            rgbaColor=[0.8, 0.8, 0.8, 0.5],  # Gray, semi-transparent
-            physicsClientId=self.robot.client
-        )
-        ground_plane_body = p.createMultiBody(
-            baseMass=0,
-            baseVisualShapeIndex=ground_plane_id,
-            basePosition=[robot_base_pos[0], robot_base_pos[1], self.ground_plane_height],
-            physicsClientId=self.robot.client
-        )
-        self.viz_ids.append(ground_plane_body)
-        
-        # Create a visual box for the ground clearance plane
+        # Create invisible ground clearance plane for functionality (completely transparent)
         clearance_plane_id = p.createVisualShape(
             shapeType=p.GEOM_BOX,
-            halfExtents=[ground_size, ground_size, 0.001],  # Very thin box
-            rgbaColor=[1, 0.7, 0, 0.0],  # Orange, fully transparent (alpha=0)
+            halfExtents=[2.0, 2.0, 0.001],  # Very thin box
+            rgbaColor=[0, 0, 0, 0],  # Completely transparent
             physicsClientId=self.robot.client
         )
         clearance_plane_body = p.createMultiBody(
@@ -1344,11 +1293,7 @@ class RobotPositioningEnv(gym.Env):
         
         if self.verbose:
             print(f"Visualized reachable workspace:")
-            print(f"  - Minimum reach: {min_reach:.2f}m (green sphere)")
             print(f"  - Maximum reach: {max_reach:.2f}m (blue sphere)")
-            print(f"  - Robot base radius: {robot_base_radius:.2f}m (red cylinder)")
-            print(f"  - Ground plane: {self.ground_plane_height:.2f}m (gray plane)")
-            print(f"  - Ground clearance: {self.ground_plane_height + ground_clearance:.2f}m (orange plane)")
 
     def _detect_collisions(self):
         """
