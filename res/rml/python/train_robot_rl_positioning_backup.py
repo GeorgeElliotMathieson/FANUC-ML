@@ -248,74 +248,70 @@ class FANUCRobotEnv:
             print(f"Connected to PyBullet physics server with client ID: {self.client}")
         
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.setGravity(0, 0, -9.81)
         
-        # Load plane
-        self.plane_id = p.loadURDF("plane.urdf")
-        
-        # Set collision filter for the plane to interact with all robots
-        # The plane is in group 0 and can collide with all groups
-        p.setCollisionFilterGroupMask(
-            self.plane_id,
-            -1,  # Base link of the plane
-            0,   # Group 0
-            0xFFFF,  # Mask: collide with all groups
-            physicsClientId=self.client
-        )
-        
-        # Robot parameters from the documentation
-        self.dof = 6  # 6 degrees of freedom
-        self.max_force = 100  # Maximum force for joint motors
+        # Set up physical properties
+        self.timeStep = 1./240.
         self.position_gain = 0.3
         self.velocity_gain = 1.0
+        self.max_force = 100.0  # Maximum force for the robot's joints
         
-        # Load the robot URDF (you'll need to create this based on the manual specs)
-        # For now, we'll use a placeholder
-        self.robot_id = self._load_robot()
+        # Set gravity - standard Earth gravity
+        p.setGravity(0, 0, -9.81, physicsClientId=self.client)
         
-        # Get joint information
-        self.num_joints = p.getNumJoints(self.robot_id)
-        self.joint_indices = range(self.num_joints)
+        # Store the ground plane height
+        self.ground_plane_height = 0.0
         
-        # Joint limits from manual
+        # Initialize the robot
+        self.dof = 6  # Degrees of freedom (6 for FANUC LR Mate 200iC)
+        self.robot_id = None
+        self._load_robot()
+        
+        # Define joint limits for the FANUC LR Mate 200iC
         self.joint_limits = {
-            0: [-720, 720],  # J1 axis - physical limit (multiple rotations allowed)
-            1: [-360, 360],  # J2 axis - physical limit
-            2: [-360, 360],  # J3 axis - physical limit
-            3: [-720, 720],  # J4 axis - physical limit (multiple rotations allowed)
-            4: [-360, 360],  # J5 axis - physical limit
-            5: [-1080, 1080]  # J6 axis - physical limit (multiple rotations allowed)
+            0: (-2.965, 2.965),   # J1 (base rotation) limits in radians
+            1: (-1.745, 1.570),   # J2 (shoulder) limits in radians
+            2: (-2.623, 4.538),   # J3 (elbow) limits in radians
+            3: (-3.316, 3.316),   # J4 (wrist roll) limits in radians
+            4: (-2.356, 2.356),   # J5 (wrist bend) limits in radians
+            5: (-7.854, 7.854)    # J6 (tool rotation) limits in radians
         }
         
-        # Convert to radians
-        for joint, limits in self.joint_limits.items():
-            self.joint_limits[joint] = [np.deg2rad(limits[0]), np.deg2rad(limits[1])]
-            
-        # Initial configuration
-        self.reset()
+        # Initialize last_target_randomization_time
+        self.last_target_randomization_time = get_last_target_randomization_time()
+        
+        # Flag to track if this is the first reset
+        self.first_reset_done = False
     
     def _load_robot(self):
+        """Load the FANUC LR Mate 200iC robot"""
         # Load the URDF for the FANUC LR Mate 200iC
         
         # Get the absolute path to the workspace directory
-        workspace_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        workspace_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         
-        # Define the absolute path to the URDF file
+        # Construct the path to the URDF file
         urdf_path = os.path.join(workspace_dir, "res", "fanuc_lrmate_200ic.urdf")
         
-        # Check if the URDF file exists
-        if os.path.exists(urdf_path):
-            if self.verbose:
-                print(f"Loading FANUC LR Mate 200iC URDF from: {urdf_path}")
-            return p.loadURDF(urdf_path, [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
+        # Check if the file exists
+        if not os.path.isfile(urdf_path):
+            # Try a different path (for when running from the Python directory)
+            urdf_path = os.path.join(workspace_dir, "fanuc_lrmate_200ic.urdf")
         
-        # If we couldn't find the URDF, print a warning and fall back to a simple robot
-        print("WARNING: Could not find FANUC LR Mate 200iC URDF file. Falling back to default robot.")
-        print("Expected URDF path:", urdf_path)
-        print("Current working directory:", os.getcwd())
+        # Load the robot URDF
+        print(f"Loading FANUC LR Mate 200iC URDF from: {urdf_path}")
+        self.robot_id = p.loadURDF(
+            urdf_path,
+            [0, 0, 0],  # Base position
+            [0, 0, 0, 1],  # Base orientation (quaternion)
+            useFixedBase=True,  # Fix the base to the ground
+            flags=p.URDF_USE_INERTIA_FROM_FILE,  # Use inertia from URDF
+            physicsClientId=self.client
+        )
         
-        # Fallback to a simple robot for testing
-        return p.loadURDF("kuka_iiwa/model.urdf", [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
+        if self.robot_id is None:
+            raise ValueError(f"Failed to load robot URDF from {urdf_path}")
+            
+        return self.robot_id
     
     def reset(self):
         # Get the current joint states if they exist (for subsequent resets)
@@ -350,147 +346,228 @@ class FANUCRobotEnv:
         Apply action to the robot
         
         Args:
-            action: Can be either:
-                   - A list of 6 target joint positions (for backward compatibility)
-                   - A tuple of (positions, velocities) where each is a list of 6 values
-                   - A tuple of (None, velocities) to only control velocities
+            action: Power and direction for each motor (-100 to 100)
+                   where -100 is full power in one direction, 0 is not moving at all, 
+                   and 100 is full power in the other direction
         """
-        # Check if we received both positions and velocities
-        if isinstance(action, tuple) and len(action) == 2:
-            positions, velocities = action
+        # Check if the global target randomization time has been updated since this robot's last reset
+        # If so, we need to sample a new target for this robot
+        if get_target_randomization_time() > self.last_target_randomization_time:
+            # Update this robot's last target randomization time
+            self.last_target_randomization_time = get_target_randomization_time()
             
-            # If positions is None, only apply velocity control
-            if positions is None:
-                if velocities is not None:
-                    # Get current joint states for limit checking
-                    joint_states = []
-                    for i in range(self.dof):
-                        state = p.getJointState(self.robot_id, i)
-                        joint_states.append(state[0])  # Joint position
-                    
-                    # Apply velocity control with limit checks
-                    for i in range(len(velocities)):
-                        if i in self.joint_limits:
-                            # Check if we're near limits and adjust velocity accordingly
-                            limit_low, limit_high = self.joint_limits[i]
-                            current_pos = joint_states[i]
-                            
-                            # Ensure we're within limits
-                            if current_pos <= limit_low and velocities[i] < 0:
-                                # At lower limit and trying to move further down
-                                velocities[i] = 0.0
-                            elif current_pos >= limit_high and velocities[i] > 0:
-                                # At upper limit and trying to move further up
-                                velocities[i] = 0.0
-                    
-                    # Apply velocity control only, with enforced limits
-                    p.setJointMotorControlArray(
-                        bodyUniqueId=self.robot_id,
-                        jointIndices=range(self.dof),
-                        controlMode=p.VELOCITY_CONTROL,
-                        targetVelocities=velocities,
-                        forces=[self.max_force] * self.dof,
-                        velocityGains=[self.velocity_gain] * self.dof
-                    )
-            else:
-                # No enforcement of joint limits - allow full range of motion
-                # Only prevent extreme values that would cause simulation instability
-                for i in range(len(positions)):
-                    # Only apply extremely loose limits to prevent simulation crashes
-                    pos = positions[i]
-                    vel = velocities[i]
-                    
-                    # Enforce joint limits for positions
-                    if i in self.joint_limits:
-                        limit_low, limit_high = self.joint_limits[i]
-                        if isinstance(pos, (int, float)):
-                            # Handle scalar values
-                            positions[i] = max(limit_low, min(pos, limit_high))
-                        else:
-                            # Handle numpy arrays or other iterables
-                            positions[i] = np.clip(pos, limit_low, limit_high)
-                    else:
-                        # For joints without defined limits, use generous defaults
-                        if isinstance(pos, (int, float)):
-                            # Handle scalar values
-                            if pos < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
-                                positions[i] = -10 * np.pi
-                            elif pos > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
-                                positions[i] = 10 * np.pi
-                        else:
-                            # Handle numpy arrays or other iterables
-                            positions[i] = np.clip(pos, -10 * np.pi, 10 * np.pi)
-                        
-                    # Limit velocities to reasonable ranges (±5 rad/s)
-                    if isinstance(vel, (int, float)):
-                        if vel < -5.0:
-                            velocities[i] = -5.0
-                        elif vel > 5.0:
-                            velocities[i] = 5.0
-                    else:
-                        velocities[i] = np.clip(vel, -5.0, 5.0)
-                
-                # Set joint positions with target velocities
-                p.setJointMotorControlArray(
-                    bodyUniqueId=self.robot_id,
-                    jointIndices=range(self.dof),
-                    controlMode=p.POSITION_CONTROL,
-                    targetPositions=positions,
-                    targetVelocities=velocities,
-                    forces=[self.max_force] * self.dof,
-                    positionGains=[self.position_gain] * self.dof,
-                    velocityGains=[self.velocity_gain] * self.dof
-                )
-        else:
-            # Backward compatibility - just positions
-            positions = action
+            # Sample a new target position
+            self.target_position = self._sample_target()
             
-            # Enforce joint limits
-            for i, a in enumerate(positions):
-                if i in self.joint_limits:
-                    limit_low, limit_high = self.joint_limits[i]
-                    if isinstance(a, (int, float)):
-                        # Handle scalar values
-                        positions[i] = max(limit_low, min(a, limit_high))
-                    else:
-                        # Handle numpy arrays or other iterables
-                        positions[i] = np.clip(a, limit_low, limit_high)
+            if self.verbose:
+                print(f"Robot {self.rank} received a new target at {self.target_position}")
+            
+            # Visualize the new target if rendering is enabled
+            if self.gui:
+                try:
+                    # Remove previous target visualization if it exists
+                    if hasattr(self, 'target_visual_id') and self.target_visual_id is not None:
+                        try:
+                            p.removeBody(self.target_visual_id, physicsClientId=self.robot.client)
+                        except:
+                            pass
+                    
+                    # Create new target visualization
+                    self.target_visual_id = visualize_target(self.target_position, self.robot.client)
+                except Exception as e:
+                    print(f"Warning: Could not visualize target: {e}")
+                    
+        # Convert power/direction values to joint positions and velocities
+        # Each motor value represents power and direction
+        joint_positions = []
+        joint_velocities = []
+        
+        # Get current joint positions
+        current_state = self._get_state()
+        current_joint_positions = current_state[:self.dof*2:2]  # Extract joint positions
+        
+        # For each joint, calculate position and velocity based on power/direction
+        for i in range(len(action)):
+            motor_power = action[i]
+            
+            # Direction based on sign of motor_power
+            direction = 1 if motor_power > 0 else -1 if motor_power < 0 else 0
+            
+            # Calculate velocity based on motor_power (scaled to appropriate range)
+            # abs(motor_power) gives the magnitude of power (0-100)
+            velocity = abs(motor_power) * 0.05  # Scale factor to keep velocities reasonable
+            
+            # Calculate target position by moving in the direction of power
+            # from current position, with magnitude based on power
+            current_pos = current_joint_positions[i]
+            
+            # Move toward joint limit based on direction
+            if i in self.joint_limits:
+                limit_low, limit_high = self.joint_limits[i]
+                # If power is positive, move toward high limit, if negative, move toward low limit
+                if direction > 0:
+                    # Moving toward high limit
+                    target_pos = min(current_pos + (velocity * 0.1), limit_high)
+                elif direction < 0:
+                    # Moving toward low limit
+                    target_pos = max(current_pos - (velocity * 0.1), limit_low)
                 else:
-                    # For joints without defined limits, use generous defaults
-                    if isinstance(a, (int, float)):
-                        # Handle scalar values
-                        if a < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
-                            positions[i] = -10 * np.pi
-                        elif a > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
-                            positions[i] = 10 * np.pi
-                    else:
-                        # Handle numpy arrays or other iterables
-                        positions[i] = np.clip(a, -10 * np.pi, 10 * np.pi)
+                    # No movement
+                    target_pos = current_pos
+                    velocity = 0.0
+            else:
+                # For joints without limits, just use current position
+                target_pos = current_pos
             
-            # Set joint positions
-            p.setJointMotorControlArray(
-                bodyUniqueId=self.robot_id,
-                jointIndices=range(self.dof),
-                controlMode=p.POSITION_CONTROL,
-                targetPositions=positions,
-                forces=[self.max_force] * self.dof,
-                positionGains=[self.position_gain] * self.dof,
-                velocityGains=[self.velocity_gain] * self.dof
-            )
+            joint_positions.append(target_pos)
+            joint_velocities.append(velocity * direction)  # Apply direction to velocity
         
-        # Step simulation
-        p.stepSimulation()
+        # Store action for next observation
+        self.previous_action = np.array(action)
         
-        # Get new state
-        next_state = self._get_state()
+        # Apply action to the robot - pass both positions and velocities
+        try:
+            self.robot.step((joint_positions, joint_velocities))
+        except Exception as e:
+            print(f"Warning: Could not apply action to robot: {e}")
+            traceback.print_exc()
+            
+        # Step simulation - use the robot's client
+        p.stepSimulation(physicsClientId=self.robot.client)
         
-        # Calculate reward (placeholder - customize based on your task)
-        reward = 0
+        # Increment step counter
+        self.steps += 1
         
-        # Check if done (placeholder - customize based on your task)
-        done = False
+        # Add GUI delay if enabled
+        if self.gui_delay > 0.0:
+            time.sleep(self.gui_delay)
         
-        return next_state, reward, done, {}
+        # Calculate reward based on distance to target
+        # Get current end effector position
+        state = self._get_state()
+        current_ee_pos = state[12:15]
+        
+        # Calculate distance to target
+        distance = np.linalg.norm(current_ee_pos - self.target_position)
+        
+        # Create an info dictionary to store additional information
+        info = {}
+        info["distance_cm"] = distance * 100  # Keep this in cm for easier reading
+        
+        # Check if we've reached the target
+        if distance <= self.accuracy_threshold:
+            # Target reached!
+            if self.verbose:
+                print(f"Robot {self.rank}: Target reached! Distance: {distance*100:.2f}cm")
+            
+            # Maximum reward for reaching target
+            reward = 100.0
+            done = True
+            info["target_reached"] = True
+        else:
+            # Not at target yet
+            
+            # Normalize distance relative to workspace size
+            max_possible_distance = self.workspace_size  # Maximum reach distance
+            normalized_distance = distance / max_possible_distance
+            
+            # Calculate exponential distance reward with a stronger gradient
+            # This creates a much stronger gradient as the robot gets closer to the target
+            exponent = 5.0  # Higher value creates a steeper gradient
+            exp_factor = 3.0  # Scale the exponential curve
+            distance_factor = 1.0 - normalized_distance  # Inverse distance (1 when at target, 0 when at max distance)
+            
+            # Apply exponential scaling
+            exp_distance = exp_factor * np.exp(exponent * distance_factor) - exp_factor
+            
+            # Scale to a reasonable reward range
+            scaled_distance = ((exp_distance / (exp_factor * np.exp(exponent) - exp_factor)) * 100.0)
+            
+            # Use the scaled distance as the reward
+            reward = scaled_distance
+            
+            # Calculate progress if we have a previous distance
+            if hasattr(self, 'prev_distance') and self.prev_distance is not None:
+                progress = self.prev_distance - distance
+                
+                # Add a bonus for positive progress
+                if progress > 0:
+                    # Scale the progress bonus based on proximity to target
+                    progress_scale = 50.0 * (1.0 - normalized_distance)  # Higher bonus when closer to target
+                    progress_bonus = progress * progress_scale
+                    reward += progress_bonus
+                    info["progress_bonus"] = progress_bonus
+            
+            # Store current distance for next step's progress calculation
+            self.prev_distance = distance
+            
+            # Check timeout
+            if self.steps >= self.timeout_steps:
+                done = True
+                info["timeout"] = True
+            else:
+                done = False
+        
+        # Store reward and distance info
+        info["reward"] = reward
+        
+        # Track best position achieved during the episode
+        if distance < self.best_distance_in_episode:
+            self.best_distance_in_episode = distance
+            self.best_position_in_episode = current_ee_pos.copy()
+            info["best_distance"] = self.best_distance_in_episode * 100  # Convert to cm
+            info["best_position"] = self.best_position_in_episode
+        
+        # Get observation for next step
+        observation = self._get_observation()
+        
+        return observation, reward, done, False, info
+    
+    def apply_action(self, positions, velocities):
+        """
+        Apply action to the robot with positions and velocities
+        
+        Args:
+            positions: List of 6 target joint positions
+            velocities: List of 6 target joint velocities
+        """
+        # Prevent extreme values that would cause simulation instability
+        for i in range(len(positions)):
+            # Only apply extremely loose limits to prevent simulation crashes
+            pos = positions[i]
+            vel = velocities[i]
+            
+            if isinstance(pos, (int, float)):
+                # Handle scalar values
+                if pos < -10 * np.pi:  # Prevent more than 10 full rotations in negative direction
+                    positions[i] = -10 * np.pi
+                elif pos > 10 * np.pi:  # Prevent more than 10 full rotations in positive direction
+                    positions[i] = 10 * np.pi
+            else:
+                # Handle numpy arrays or other iterables
+                positions[i] = np.clip(pos, -10 * np.pi, 10 * np.pi)
+            
+            # Limit velocities to reasonable ranges (±5 rad/s)
+            if isinstance(vel, (int, float)):
+                if vel < -5.0:
+                    velocities[i] = -5.0
+                elif vel > 5.0:
+                    velocities[i] = 5.0
+            else:
+                velocities[i] = np.clip(vel, -5.0, 5.0)
+        
+        # Set joint positions with target velocities
+        p.setJointMotorControlArray(
+            bodyUniqueId=self.robot_id,
+            jointIndices=range(self.dof),
+            controlMode=p.POSITION_CONTROL,
+            targetPositions=positions,
+            targetVelocities=velocities,
+            forces=[self.max_force] * self.dof,
+            positionGains=[self.position_gain] * self.dof,
+            velocityGains=[self.velocity_gain] * self.dof,
+            physicsClientId=self.client
+        )
     
     def _get_state(self):
         # Get joint states
@@ -538,663 +615,6 @@ class DomainRandomizedEnv(gym.Wrapper):
                         self.env.robot.robot_id, 
                         link_id, 
                         collision_group, 
-                        0,  # Mask of 0 means don't collide with any other group
-                        physicsClientId=self.env.client_id
-                    )
-                
-                # Also set for the base link (link_id = -1)
-                p.setCollisionFilterGroupMask(
-                    self.env.robot.robot_id, 
-                    -1, 
-                    collision_group, 
-                    0,
-                    physicsClientId=self.env.client_id
-                )
-        else:
-            self.robot_offset = 0.0
-            
-        # Apply the offset to the robot's position
-        self._apply_robot_offset()
-        
-    def _apply_robot_offset(self):
-        """Apply the offset to the robot's position."""
-        # Get the current base position and orientation
-        pos, orn = p.getBasePositionAndOrientation(
-            self.env.robot.robot_id, 
-            physicsClientId=self.env.client_id
-        )
-        
-        # Apply the offset to the x position
-        new_pos = [pos[0] + self.robot_offset, pos[1], pos[2]]
-        
-        # Set the new position
-        p.resetBasePositionAndOrientation(
-            self.env.robot.robot_id, 
-            new_pos, 
-            orn, 
-            physicsClientId=self.env.client_id
-        )
-        
-        # Also update the home position for this robot
-        if hasattr(self.env, 'home_position'):
-            self.env.home_position[0] += self.robot_offset
-            print(f"Setting target at home position: {self.env.home_position}")
-            
-    def reset(self, **kwargs):
-        """Reset the environment with domain randomization."""
-        obs = self.env.reset(**kwargs)
-        
-        # Re-apply the offset after reset
-        self._apply_robot_offset()
-        
-        return obs
-
-# Add a global variable to track when any robot reaches the target
-_TARGET_REACHED_FLAG = False
-
-# Function to reset the target reached flag
-def reset_target_reached_flag():
-    """Reset the global target reached flag to False."""
-    global _TARGET_REACHED_FLAG
-    _TARGET_REACHED_FLAG = False
-
-# Function to set the target reached flag
-def set_target_reached_flag():
-    """Set the global target reached flag to True, indicating a target was reached."""
-    global _TARGET_REACHED_FLAG
-    _TARGET_REACHED_FLAG = True
-
-# Function to check if the target reached flag is set
-def is_target_reached():
-    """Check if the global target reached flag is set."""
-    global _TARGET_REACHED_FLAG
-    return _TARGET_REACHED_FLAG
-
-# Add a global variable to track the last target randomization timestamp
-_LAST_TARGET_RANDOMIZATION_TIME = 0.0
-
-# Function to get the last target randomization time
-def get_last_target_randomization_time():
-    """Get the timestamp of the last target randomization."""
-    global _LAST_TARGET_RANDOMIZATION_TIME
-    return _LAST_TARGET_RANDOMIZATION_TIME
-
-# Function to update the target randomization time
-def update_target_randomization_time():
-    """Update the timestamp of the last target randomization to the current time."""
-    global _LAST_TARGET_RANDOMIZATION_TIME
-    _LAST_TARGET_RANDOMIZATION_TIME = time.time()
-
-def determine_reachable_workspace(robot_env, home_position, num_samples=1000, verbose=False):
-    """
-    Determine the reachable workspace of the robot by sampling random joint configurations
-    and recording the resulting end effector positions.
-    
-    Args:
-        robot_env: The robot environment
-        home_position: The home position of the robot
-        num_samples: Number of random configurations to sample
-        verbose: Whether to print verbose output
-        
-    Returns:
-        tuple: (max_reach, workspace_bounds)
-            max_reach: Maximum distance from home position that the robot can reach
-            workspace_bounds: Dictionary with min/max values for each dimension
-    """
-    # Store original joint positions
-    original_joint_positions = []
-    for i in range(robot_env.dof):
-        state = p.getJointState(robot_env.robot_id, i, physicsClientId=robot_env.client)
-        original_joint_positions.append(state[0])
-    
-    # Sample random joint configurations and record end effector positions
-    ee_positions = []
-    distances = []
-    
-    if verbose:
-        print("Sampling random configurations to determine reachable workspace...")
-    
-    for _ in range(num_samples):
-        # Generate random joint positions within limits
-        joint_positions = []
-        for i in range(robot_env.dof):
-            if i in robot_env.joint_limits:
-                limit_low, limit_high = robot_env.joint_limits[i]
-                # Add some margin to avoid edge cases
-                margin = (limit_high - limit_low) * 0.05  # 5% margin
-                pos = np.random.uniform(limit_low + margin, limit_high - margin)
-                joint_positions.append(pos)
-            else:
-                joint_positions.append(0)
-        
-        # Set joint positions
-        for i, pos in enumerate(joint_positions):
-            p.resetJointState(robot_env.robot_id, i, pos, physicsClientId=robot_env.client)
-        
-        # Step simulation to settle
-        for _ in range(5):
-            p.stepSimulation(physicsClientId=robot_env.client)
-        
-        # Get end effector position
-        ee_link_state = p.getLinkState(robot_env.robot_id, robot_env.dof-1, physicsClientId=robot_env.client)
-        ee_position = ee_link_state[0]
-        
-        # Calculate distance from home position
-        distance = np.linalg.norm(np.array(ee_position) - home_position)
-        
-        # Store results
-        ee_positions.append(ee_position)
-        distances.append(distance)
-    
-    # Restore original joint positions
-    for i, pos in enumerate(original_joint_positions):
-        p.resetJointState(robot_env.robot_id, i, pos, physicsClientId=robot_env.client)
-    
-    # Step simulation to settle back
-    for _ in range(5):
-        p.stepSimulation(physicsClientId=robot_env.client)
-    
-    # Calculate maximum reach
-    max_reach = np.max(distances) if distances else 0.0
-    
-    # Calculate workspace bounds
-    ee_positions = np.array(ee_positions)
-    x_min, y_min, z_min = np.min(ee_positions, axis=0)
-    x_max, y_max, z_max = np.max(ee_positions, axis=0)
-    
-    workspace_bounds = {
-        'x': (x_min, x_max),
-        'y': (y_min, y_max),
-        'z': (z_min, z_max)
-    }
-    
-    if verbose:
-        print(f"Maximum reach from home position: {max_reach:.3f}m")
-        print(f"Workspace bounds:")
-        print(f"  X: [{x_min:.3f}, {x_max:.3f}]")
-        print(f"  Y: [{y_min:.3f}, {y_max:.3f}]")
-        print(f"  Z: [{z_min:.3f}, {z_max:.3f}]")
-    
-    return max_reach, workspace_bounds
-
-# Modify the RobotPositioningEnv class to use the improved workspace determination
-class RobotPositioningEnv(gym.Env):
-    """
-    Environment for robot positioning task
-    """
-    metadata = {'render.modes': ['human']}
-    
-    def __init__(self, gui=True, gui_delay=0.0, workspace_size=0.7, clean_viz=False, viz_speed=0.0, verbose=False, parallel_viz=False, rank=0, offset_x=0.0):
-        """
-        Initialize the robot positioning environment
-        
-        Args:
-            gui: Whether to use GUI or headless mode
-            gui_delay: Delay between steps for visualization
-            workspace_size: Size of the workspace for sampling targets
-            clean_viz: Whether to use clean visualization
-            viz_speed: Speed of visualization (0.0 for realtime, higher for slow motion)
-            verbose: Whether to print verbose output
-            parallel_viz: Whether this is a parallel visualization environment
-            rank: Rank of this environment (for parallel environments)
-            offset_x: X offset for the robot (for parallel visualization)
-        """
-        # Store arguments
-        self.gui = gui
-        self.gui_delay = gui_delay
-        self.workspace_size = workspace_size
-        self.clean_viz = clean_viz
-        self.viz_speed = viz_speed
-        self.verbose = verbose
-        self.parallel_viz = parallel_viz
-        self.rank = rank
-        self.offset_x = offset_x
-        
-        # Create the PyBullet client first
-        self.client_id = get_shared_pybullet_client(render=gui)
-        
-        # Then create the robot environment with this client
-        self.robot = FANUCRobotEnv(render=gui, verbose=verbose, client=self.client_id)
-        
-        # We need joint limits for the action space
-        self.robot_joint_limits = self.robot.joint_limits
-        self.dof = self.robot.dof
-        
-        if self.verbose and self.rank == 0:
-            print(f"\n{'='*60}\nONLY GROUND PLANE COLLISIONS ENABLED\n{'='*60}\n")
-        
-        # Simplified collision setup - only ground collisions are checked
-        # Fixed ground collision penalty of 0.5
-        self.ground_collision_penalty = 0.5
-        
-        # Set ground plane height to 0.0 to use the standard ground plane as the boundary
-        self.ground_plane_height = 0.0  # Standard ground plane height (no offset)
-        
-        # Add state tracking for ground collision events
-        self.in_ground_collision = False  # Track if we're currently in a ground collision
-        
-        # Threshold for ground collision detection
-        self.ground_collision_threshold = 0.01  # Threshold for ground collision detection
-        
-        # Initialize visualization variables
-        self.target_visual_id = None
-        self.ee_markers = []
-        self.trajectory_markers = []  # Add initialization for trajectory_markers
-        self.max_trajectory_markers = 12  # Limit to 12 markers per robot
-        self.marker_expiry_steps = 24  # Markers will expire after 24 steps
-        self.marker_creation_steps = {}  # Track when each marker was created
-        self.target_line_id = None
-        
-        # Load workspace data if not already loaded
-        load_workspace_data(verbose=verbose)
-        
-        # Set workspace size based on loaded data or default
-        if _WORKSPACE_MAX_REACH is not None:
-            # Use 90% of the maximum reach to ensure reachability
-            self.workspace_size = min(workspace_size, _WORKSPACE_MAX_REACH * 0.9)
-        else:
-            self.workspace_size = workspace_size
-            
-        if self.verbose:
-            print(f"Using workspace size: {self.workspace_size:.3f}m")
-        
-        # Get the home position of the end effector
-        self.robot.reset()
-        state = self.robot._get_state()
-        self.home_position = state[12:15]  # End-effector position
-        
-        # Initialize target position at home position
-        self.target_position = self.home_position.copy()
-        
-        # Initialize episode counter and maximum distance
-        self.episode_count = 0
-        self.current_max_distance = 0.0
-        self.max_distance_increment = 0.05  # 5cm increment
-        self.max_workspace_distance = self.workspace_size
-        
-        # Initialize step counter
-        self.steps = 0
-        
-        # Initialize best position tracking
-        self.best_distance_in_episode = float('inf')
-        self.best_position_in_episode = None
-        
-        # Initialize total reward tracking for the episode
-        self.total_reward_in_episode = 0.0
-        
-        # Initialize previous action
-        self.previous_action = np.zeros(6)  # Changed from 12 to 6 (only motor power/direction)
-        
-        # Initialize target randomization time
-        self.last_target_randomization_time = get_last_target_randomization_time()
-        
-        # Define action space for the new requirements
-        # Each action value represents power and direction of each motor (-100 to 100)
-        # -100 = full power in one direction
-        # 0 = not moving at all
-        # 100 = full power in the other direction
-        self.action_space = spaces.Box(
-            low=-100.0,
-            high=100.0,
-            shape=(6,),  # 6 values representing power/direction for the 6 motors
-            dtype=np.float32
-        )
-        
-        # Define observation space for the new requirements
-        # The observation includes:
-        # - Previous outputs (6 values, -100 to 100)
-        # - Current joint angles (6 values, 0 to 100% of usable range)
-        # - Current vector length to target (1 value, in mm)
-        low_obs = np.array(
-            [-100.0] * 6 +  # Previous outputs
-            [0.0] * 6 +    # Joint angles
-            [0.0]          # Distance to target
-        )
-        high_obs = np.array(
-            [100.0] * 6 +  # Previous outputs
-            [100.0] * 6 +  # Joint angles
-            [2000.0]       # Distance to target (max 2 meters in mm)
-        )
-        self.observation_space = spaces.Box(
-            low=low_obs,
-            high=high_obs,
-            shape=(13,),  # 6 + 6 + 1 = 13 values
-            dtype=np.float32
-        )
-        
-        # Initialize previous action with zeros (for the 6 motors)
-        self.previous_action = np.zeros(6)
-        
-        # Set the accuracy threshold for reaching the target
-        self.accuracy_threshold = 0.01  # 1cm
-        
-        # Set the timeout for each episode
-        self.timeout_steps = 200  # Increased by a factor of 4 (from 50 to 200) to give more time to reach targets
-        
-        # Reset the environment
-        self.reset()
-        
-        # Apply robot offset if in parallel visualization mode
-        if self.parallel_viz and self.offset_x != 0.0:
-            self._apply_robot_offset()
-    
-    def seed(self, seed=None):
-        """Set random seed for reproducibility"""
-        if seed is not None:
-            np.random.seed(seed)
-        return [seed]
-    
-    def reset(self, seed=None, options=None):
-        """
-        Reset the environment
-        
-        Args:
-            seed: Random seed
-            options: Additional options for reset
-                force_new_target: Whether to force a new target to be sampled
-                keep_robot_position: Whether to keep the current robot position
-                
-        Returns:
-            tuple: (observation, info)
-        """
-        # Set seed if provided
-        if seed is not None:
-            self.seed(seed)
-        
-        # Parse options
-        options = options or {}
-        force_new_target = options.get('force_new_target', False)
-        keep_robot_position = options.get('keep_robot_position', False)
-        
-        # Reset collision counters
-        # self.consecutive_ground_collisions = 0
-        # self.consecutive_bounds_collisions = 0
-        
-        # Reset collision state tracking
-        self.in_ground_collision = False
-        self.in_bounds_collision = False
-        
-        # Clean up visualization resources
-        self._cleanup_visualization()
-        
-        # Ensure all marker tracking is reset
-        self.ee_markers = []
-        self.trajectory_markers = []
-        self.marker_creation_steps = {}
-        
-        # Reset step counter
-        self.steps = 0
-        
-        # Reset total reward for this episode
-        self.total_reward_in_episode = 0.0
-        
-        # Reset best position tracking
-        self.best_distance_in_episode = float('inf')
-        self.best_position_in_episode = None
-        
-        # Store the previous episode count
-        prev_episode_count = self.episode_count
-        
-        # Check if the global target reached flag is set
-        # If so, we need to reset it since we're starting a new episode
-        if get_target_reached_flag():
-            reset_target_reached_flag()
-            # Update the target randomization time when a robot triggers a reset
-            update_target_randomization_time()
-            # Force a new target when the target reached flag is set
-            force_new_target = True
-            
-            if self.verbose:
-                print(f"Robot {self.rank}: Target reached flag was set, forcing new target")
-        
-        # Always force a new target on the first reset (episode_count == 0)
-        if self.episode_count == 0:
-            force_new_target = True
-            if self.verbose:
-                print(f"Robot {self.rank}: First reset, forcing new target")
-        
-        # Store the current target randomization time for this robot
-        self.last_target_randomization_time = get_target_randomization_time()
-        
-        # Only reset the robot to home position on the very first reset (when the environment is created)
-        if not hasattr(self, 'first_env_reset_done'):
-            self.robot.reset()
-            self.first_env_reset_done = True
-            if self.verbose:
-                print(f"Robot {self.rank}: First environment reset, initializing robot position")
-        else:
-            # For subsequent resets, keep the robot at its current position
-            if self.verbose:
-                print(f"Robot {self.rank}: Keeping current robot position on reset")
-        
-        # Always sample a new target position on reset
-        self.target_position = self._sample_target()
-        
-        if self.verbose:
-            print(f"Robot {self.rank} received a new target at {self.target_position}")
-        
-        # Visualize the target if rendering is enabled
-        if self.gui:
-            try:
-                # Remove previous target visualization if it exists
-                if self.target_visual_id is not None:
-                    try:
-                        p.removeBody(self.target_visual_id, physicsClientId=self.robot.client)
-                    except:
-                        pass
-                
-                # Create new target visualization
-                self.target_visual_id = visualize_target(self.target_position, self.robot.client)
-                
-                # Visualize the reachable workspace with semitranslucent spheres
-                self._visualize_reachable_workspace()
-                
-                # Clear trajectory markers
-                for marker_id in self.trajectory_markers:
-                    try:
-                        p.removeBody(marker_id, physicsClientId=self.robot.client)
-                    except:
-                        pass
-                self.trajectory_markers = []
-                
-            except Exception as e:
-                print(f"Warning: Could not visualize target: {e}")
-        
-        # Get current state
-        observation = self._get_observation()
-        
-        # Return observation and info dict (Gymnasium API)
-        return observation, {}
-    
-    def step(self, action):
-        """
-        Apply action to the robot
-        
-        Args:
-            action: A list of 6 values representing power and direction for each motor
-                   -100 = full power in one direction
-                   0 = not moving at all
-                   100 = full power in the other direction
-        """
-        # Check if the global target randomization time has been updated since this robot's last reset
-        # If so, we need to sample a new target for this robot
-        if get_target_randomization_time() > self.last_target_randomization_time:
-            # Update this robot's last target randomization time
-            self.last_target_randomization_time = get_target_randomization_time()
-            
-            # Sample a new target position
-            self.target_position = self._sample_target()
-            
-            if self.verbose:
-                print(f"Robot {self.rank} received a new target at {self.target_position}")
-            
-            # Visualize the new target if rendering is enabled
-            if self.gui:
-                try:
-                    # Remove previous target visualization if it exists
-                    if hasattr(self, 'target_visual_id') and self.target_visual_id is not None:
-                        try:
-                            p.removeBody(self.target_visual_id, physicsClientId=self.robot.client)
-                        except:
-                            pass
-                    
-                    # Create new target visualization
-                    self.target_visual_id = visualize_target(self.target_position, self.robot.client)
-                except Exception as e:
-                    print(f"Warning: Could not visualize target: {e}")
-        
-        # Apply the action directly as motor powers/velocities
-        # Convert the power/direction values (-100 to 100) to appropriate joint velocities
-        joint_velocities = []
-        
-        # Get current joint states for limit checking
-        current_state = self.robot._get_state()
-        current_joint_positions = current_state[:self.robot.dof*2:2]  # Extract joint positions
-        
-        for i, power in enumerate(action):
-            # Convert the -100 to 100 power value to actual velocity
-            # Maximum velocity is scaled based on joint limits
-            if i in self.robot.joint_limits:
-                limit_low, limit_high = self.robot.joint_limits[i]
-                
-                # Calculate maximum safe velocity based on current position and limits
-                current_pos = current_joint_positions[i]
-                
-                # Get the distance to each limit
-                distance_to_low = current_pos - limit_low
-                distance_to_high = limit_high - current_pos
-                
-                # Calculate safe maximum velocity (10% of range per step)
-                base_max_vel = (limit_high - limit_low) * 0.1
-                
-                # Enforce direction limits when approaching joint limits
-                # If we're within 5% of a limit, restrict movement in that direction
-                limit_threshold = (limit_high - limit_low) * 0.05
-                
-                # Initialize velocity calculation
-                velocity = (power / 100.0) * base_max_vel
-                
-                # Enforce limits when approaching boundaries
-                if distance_to_low < limit_threshold and velocity < 0:
-                    # Close to lower limit and trying to move further down
-                    # Scale velocity based on proximity to limit (closer = slower)
-                    scaling_factor = max(0.0, distance_to_low / limit_threshold)
-                    velocity = velocity * scaling_factor
-                    if self.verbose and scaling_factor < 0.5:
-                        print(f"Joint {i} approaching lower limit: {current_pos:.2f} rad (limit: {limit_low:.2f} rad)")
-                
-                elif distance_to_high < limit_threshold and velocity > 0:
-                    # Close to upper limit and trying to move further up
-                    # Scale velocity based on proximity to limit (closer = slower)
-                    scaling_factor = max(0.0, distance_to_high / limit_threshold)
-                    velocity = velocity * scaling_factor
-                    if self.verbose and scaling_factor < 0.5:
-                        print(f"Joint {i} approaching upper limit: {current_pos:.2f} rad (limit: {limit_high:.2f} rad)")
-                
-                # Add clamped velocity to the list
-                joint_velocities.append(velocity)
-            else:
-                # Default velocity for joints without limits
-                joint_velocities.append(power * 0.1)  # Some reasonable default
-        
-        # Apply velocities to the robot - pass None for positions, only using velocities
-        self.robot.step((None, joint_velocities))
-        
-        # Step simulation
-        p.stepSimulation()
-        
-        # Store the current action for next observation
-        self.previous_action = np.array(action)
-        
-        # Increment step counter
-        self.steps += 1
-        
-        # Calculate reward based on distance to target
-        # Get current end effector position
-        state = self.robot._get_state()
-        current_ee_pos = state[12:15]
-        
-        # Calculate distance to target (in meters)
-        distance = np.linalg.norm(current_ee_pos - self.target_position)
-        
-        # Create an info dictionary to store additional information
-        info = {}
-        info["distance_cm"] = distance * 100  # Keep this in cm for easier reading
-        
-        # Check for collisions - simplified to only check ground collision
-        ground_collision, _, collision_info = self._detect_collisions()
-        info["collision_info"] = collision_info
-        
-        # Simplified reward system
-        # Base reward is 0
-        reward = 0
-        
-        # Check if we've reached the target
-        if distance <= self.accuracy_threshold:
-            # Target reached! Maximum reward
-            reward = 10.0
-            done = True
-            info["target_reached"] = True
-        else:
-            # Not at target yet
-            
-            # Linear gradient reward based on distance
-            # Maximum distance possible is workspace_size
-            # Reward ranges from 0 (at max distance) to 1 (at target)
-            normalized_distance = min(distance / self.workspace_size, 1.0)
-            distance_reward = 1.0 - normalized_distance  # Linear gradient
-            
-            # Apply the distance reward
-            reward = distance_reward
-            
-            # Simple fixed penalty for ground collision
-            if ground_collision:
-                reward -= self.ground_collision_penalty  # Use the class variable for consistency
-                info["ground_collision"] = True
-            
-            # Check timeout
-            if self.steps >= self.timeout_steps:
-                done = True
-                info["timeout"] = True
-            else:
-                done = False
-        
-        # Store reward and distance info
-        info["reward"] = reward
-        
-        # Track best position achieved during the episode
-        if distance < self.best_distance_in_episode:
-            self.best_distance_in_episode = distance
-            self.best_position_in_episode = current_ee_pos.copy()
-            info["best_distance"] = self.best_distance_in_episode * 100  # Convert to cm
-            info["best_position"] = self.best_position_in_episode
-        
-        # Get observation for next step
-        observation = self._get_observation()
-        
-        return observation, reward, done, False, info
-    
-    def _get_state(self):
-        # Get joint states
-        joint_states = []
-        for i in range(self.dof):
-            state = p.getJointState(self.robot_id, i)
-            joint_states.append(state[0])  # Joint position
-            joint_states.append(state[1])  # Joint velocity
-        
-        # Get end-effector position and orientation
-        ee_link_state = p.getLinkState(self.robot_id, self.dof-1)
-        ee_position = ee_link_state[0]
-        ee_orientation = ee_link_state[1]
-        
-        # Combine for full state
-        state = np.array(joint_states + list(ee_position) + list(ee_orientation))
-        return state
-    
-    def close(self):
-        # We don't disconnect the client here since it's shared
-        pass
-
     def _apply_robot_offset(self):
         """Apply the robot offset to the robot's position"""
         # Get the robot's position
@@ -1340,7 +760,8 @@ class RobotPositioningEnv(gym.Env):
 
     def _detect_collisions(self):
         """
-        Simplified collision detection - only check for collisions with the ground plane.
+        Detect collisions with the ground plane only.
+        Optimized for performance by checking only essential links.
         
         Returns:
             tuple: (ground_collision, False, collision_info)
@@ -1352,10 +773,11 @@ class RobotPositioningEnv(gym.Env):
         ee_position = state[12:15]
         
         # Check for ground plane collisions - only check end effector and last two links
+        # This reduces the computational overhead while still catching most collisions
         ground_collision = False
         ground_collision_links = []
         
-        # Only check the last 3 links (including end effector)
+        # Only check the last 3 links (including end effector) instead of all links
         critical_links = [self.robot.num_joints-3, self.robot.num_joints-2, self.robot.num_joints-1]
         
         for i in critical_links:
@@ -1372,15 +794,18 @@ class RobotPositioningEnv(gym.Env):
         # Calculate distance from home position (center of workspace)
         distance_from_home = np.linalg.norm(ee_position - self.home_position)
         
+        # No longer check for bounds collision, just calculate the distance for informational purposes
+        
         # Prepare collision info dictionary
         collision_info = {
             "ground_collision": ground_collision,
             "ground_collision_links": ground_collision_links,
+            "bounds_collision": False,  # Always False since we're no longer checking for bounds collisions
             "ee_position": ee_position,
             "distance_from_home": distance_from_home
         }
         
-        # Return with bounds_collision always False since we're ignoring all other collisions
+        # Return with bounds_collision always False
         return ground_collision, False, collision_info
 
     def _cleanup_visualization(self):
@@ -1514,7 +939,7 @@ class RobotPositioningEnv(gym.Env):
         return fallback_position
         
     def _get_observation(self):
-        """Get the current observation according to the new requirements"""
+        """Get the current observation"""
         # Get current state from robot environment
         state = self.robot._get_state()
         
@@ -1526,16 +951,14 @@ class RobotPositioningEnv(gym.Env):
         for i, pos in enumerate(joint_positions):
             if i in self.robot.joint_limits:
                 limit_low, limit_high = self.robot.joint_limits[i]
-                # Normalize to 0-1 range
-                norm_pos = (pos - limit_low) / (limit_high - limit_low)
-                # Scale to 0 to 100 range (percentage)
-                norm_pos = norm_pos * 100.0
+                # Normalize to 0-100 range (percentage within usable range)
+                norm_pos = (pos - limit_low) / (limit_high - limit_low) * 100.0
                 # Cap extreme values to prevent numerical instability
                 norm_pos = max(min(norm_pos, 100.0), 0.0)
                 normalized_joint_positions.append(norm_pos)
             else:
                 # For joints without limits, use a default normalized position
-                normalized_joint_positions.append(50.0)  # Middle of range
+                normalized_joint_positions.append(50.0)
         
         # Convert to numpy array
         normalized_joint_positions = np.array(normalized_joint_positions)
@@ -1546,96 +969,74 @@ class RobotPositioningEnv(gym.Env):
         # Calculate relative position (target - ee)
         relative_position = self.target_position - ee_position
         
-        # Calculate distance to target (vector length between end effector and target in mm)
-        distance_to_target = np.linalg.norm(relative_position) * 1000.0  # Convert to mm
+        # Calculate distance to target (scalar) in mm
+        distance_to_target = np.linalg.norm(relative_position) * 1000  # Convert m to mm
         
-        # Combine all observations into a single array according to new requirements
+        # Combine all observations into a single array
         observation = np.concatenate([
-            self.previous_action,         # Previous outputs (-100 to 100 for each motor)
-            normalized_joint_positions,   # Current joint angles (0 to 100% for each joint)
-            [distance_to_target]          # Current vector length to target (in mm)
+            self.previous_action,     # Previous motor outputs (6) - between -100 and 100
+            normalized_joint_positions, # Normalized joint positions (6) - between 0 and 100
+            [distance_to_target],    # Distance to target in mm (1)
         ])
         
         return observation
 
-# Custom neural network architecture for the policy with the new requirements
+# Custom neural network architecture for the policy
 class CustomActorCriticNetwork(nn.Module):
     def __init__(self, feature_dim):
         super(CustomActorCriticNetwork, self).__init__()
         
-        # Input dimension: 
-        # - Previous outputs (6 values, -100 to 100)
-        # - Current joint angles (6 values, 0 to 100)
-        # - Current vector length to target (1 value, in mm)
-        input_dim = 13  # 6 (previous outputs) + 6 (joint angles) + 1 (distance)
+        # Input dimension is now: previous motor outputs (6) + joint angles (6) + distance to target (1) = 13
+        input_dim = 13
         
-        # Significantly larger shared feature extractor with more layers
+        # Shared feature extractor with consistent size reduction
         self.shared_net = nn.Sequential(
-            nn.Linear(input_dim, 512),  # Increased from 256 to 512
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 512),  # Added a second layer of the same size
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 384),  # Increased from 128 to 384
-            nn.ReLU(),
-            nn.BatchNorm1d(384),
-            nn.Linear(384, 256),  # Added new layer
+            nn.Linear(input_dim, 256),
             nn.ReLU(),
             nn.BatchNorm1d(256),
-            nn.Linear(256, feature_dim),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.Linear(128, feature_dim),
             nn.ReLU(),
             nn.BatchNorm1d(feature_dim)
         )
         
-        # Larger actor network (policy) with more layers
+        # Actor network (policy) with consistent size reduction
         self.actor_net = nn.Sequential(
-            nn.Linear(feature_dim, 256),  # Increased from 64 to 256
+            nn.Linear(feature_dim, 64),
             nn.ReLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 192),  # Added new layer
+            nn.BatchNorm1d(64),
+            nn.Linear(64, 32),
             nn.ReLU(),
-            nn.BatchNorm1d(192),
-            nn.Linear(192, 128),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            nn.Linear(128, 64),   # Increased from 32 to 64
-            nn.ReLU(),
-            nn.BatchNorm1d(64)
+            nn.BatchNorm1d(32)
         )
         
-        # Larger critic network (value function) with more layers
+        # Critic network (value function) with consistent size reduction
         self.critic_net = nn.Sequential(
-            nn.Linear(feature_dim, 256),  # Increased from 64 to 256
+            nn.Linear(feature_dim, 64),
             nn.ReLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 192),  # Added new layer
+            nn.BatchNorm1d(64),
+            nn.Linear(64, 32),
             nn.ReLU(),
-            nn.BatchNorm1d(192),
-            nn.Linear(192, 128),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            nn.Linear(128, 64),   # Increased from 32 to 64
-            nn.ReLU(),
-            nn.BatchNorm1d(64)
+            nn.BatchNorm1d(32)
         )
         
-        # Output layer: power and direction of each motor (-100 to 100)
-        # -100 = full power in one direction
-        # 0 = not moving at all
-        # 100 = full power in the other direction
+        # Output layer - 6 motor power/direction values (-100 to 100 range)
         self.mean_layer = nn.Sequential(
-            nn.Linear(64, 6),  # 6 outputs (one per motor)
-            nn.Tanh(),         # Outputs between -1 and 1
+            nn.Linear(32, 6),  # 6 outputs for motor power/direction
+            nn.Tanh(),  # Outputs between -1 and 1
             ScaleLayer(-100.0, 100.0)  # Scale to -100 to 100 range
         )
         
-        # Log standard deviation layer (for stochastic policy)
-        self.log_std_layer = nn.Linear(64, 6)  # 6 outputs to match mean layer
+        # Log standard deviation layer (still needs to be unbounded)
+        self.log_std_layer = nn.Linear(32, 6)  # 6 outputs to match mean layer
         
-        # Value layer
+        # Value layer with tanh to ensure output is between -100 and 100
         self.value_layer = nn.Sequential(
-            nn.Linear(64, 1)
+            nn.Linear(32, 1),
+            nn.Tanh(),  # Outputs between -1 and 1
+            ScaleLayer(-100.0, 100.0)  # Scale to -100 to 100 range
         )
     
     def forward(self, x):
@@ -1643,10 +1044,10 @@ class CustomActorCriticNetwork(nn.Module):
         
         # Actor
         actor_features = self.actor_net(features)
-        mean = self.mean_layer(actor_features)  # Outputs 6 values between -100 and 100
-        log_std = self.log_std_layer(actor_features)  # Outputs 6 log std values
+        mean = self.mean_layer(actor_features)  # Now outputs 6 values between -100 and 100
+        log_std = self.log_std_layer(actor_features)  # Now outputs 6 log std values
         
-        # Critic
+        # Critic - value between -100 and 100
         critic_features = self.critic_net(features)
         value = self.value_layer(critic_features)
         
@@ -1999,7 +1400,7 @@ def create_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=False, dis
         for i in range(num_envs):
             # Set a longer timeout for evaluation environments
             # For evaluation, give the robot much more time to reach targets
-            timeout_steps = 800 if eval_env else 200  # Increased by a factor of 4 (from 200/50 to 800/200)
+            timeout_steps = 200 if eval_env else 50  # Changed from 800/200 to 200/50
             
             env = RobotPositioningEnv(
                 gui=gui,
@@ -2026,7 +1427,7 @@ def create_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=False, dis
         for i in range(num_envs):
             # Set a longer timeout for evaluation environments
             # For evaluation, give the robot much more time to reach targets
-            timeout_steps = 800 if eval_env else 200  # Increased by a factor of 4 (from 200/50 to 800/200)
+            timeout_steps = 200 if eval_env else 50  # Changed from 800/200 to 200/50
             
             env = RobotPositioningEnv(
                 gui=(gui and i == 0),  # Only GUI for the first environment
