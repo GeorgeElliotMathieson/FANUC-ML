@@ -924,14 +924,6 @@ class RobotPositioningEnv(gym.Env):
         # Clear collision notification flag so new collisions will be reported
         if hasattr(self, 'collision_notified'):
             del self.collision_notified
-            
-        # Clear curl-up posture notification flag
-        if hasattr(self, 'curl_notified'):
-            del self.curl_notified
-        
-        # Clear last curl factor tracking
-        if hasattr(self, 'last_curl_factor'):
-            del self.last_curl_factor
         
         # Clean up visualization resources
         self._cleanup_visualization()
@@ -954,6 +946,9 @@ class RobotPositioningEnv(gym.Env):
         # Reset previous distance for progress rewards
         if hasattr(self, 'prev_distance'):
             delattr(self, 'prev_distance')
+        
+        # Reset compactness tracking
+        self.min_compactness_in_episode = float('inf')  # To track the most extended configuration
         
         # Check if the global target reached flag is set
         # If so, we need to reset it since we're starting a new episode
@@ -1186,57 +1181,46 @@ class RobotPositioningEnv(gym.Env):
             # Normalize distance to 0-1 range (1 when at target, 0 when at max distance)
             normalized_distance = 1.0 - min(distance / self.workspace_size, 1.0)
             # Linear scale: directly proportional to normalized distance
-            # Increase the distance reward weight significantly to make target-seeking more important
-            distance_reward = 5.0 * normalized_distance  # Increased from 2.0 to 5.0
+            distance_reward = 2.0 * normalized_distance
             
             # Apply the distance reward
             reward += distance_reward
             info["distance_reward"] = distance_reward
+            
+            # Calculate robot compactness (how curled up the robot is)
+            compactness = self._calculate_robot_compactness()
+            
+            # Track the minimum compactness (most extended configuration)
+            if compactness < self.min_compactness_in_episode:
+                self.min_compactness_in_episode = compactness
+                info["min_compactness"] = self.min_compactness_in_episode
+            
+            # Create a compactness penalty that's inverse to the distance reward
+            # When close to target, allow more compactness
+            # When far from target, heavily penalize compactness
+            compactness_penalty_factor = 2.0  # Same scale as distance reward for balance
+            compactness_penalty = compactness_penalty_factor * compactness * (1.0 - normalized_distance)
+            
+            # Apply the compactness penalty
+            reward -= compactness_penalty
+            info["compactness"] = compactness
+            info["compactness_penalty"] = compactness_penalty
+            
+            if self.verbose and compactness > 0.7 and self.steps % 20 == 0:
+                print(f"Robot {self.rank}: High compactness detected ({compactness:.2f}), penalty: {compactness_penalty:.2f}")
             
             # Add a penalty for staying near the center of the workspace
             # Calculate distance from home position (center of workspace)
             home_distance = np.linalg.norm(current_ee_pos - self.home_position)
             normalized_home_distance = min(home_distance / (self.workspace_size * 0.5), 1.0)
             
-            # Significantly increase center penalty to discourage curling up behavior
-            # Higher penalty when closer to center
-            center_penalty = 2.0 * (1.0 - normalized_home_distance)  # Increased from 0.5 to 2.0
+            # Penalize being close to the center (higher penalty when closer to center)
+            center_penalty = 0.5 * (1.0 - normalized_home_distance)
             
-            # Apply center penalty more aggressively - only avoid if very close to target
-            if distance > self.accuracy_threshold * 2:  # Reduced threshold from 3x to 2x
+            # Only apply center penalty when we're not very close to the target
+            if distance > self.accuracy_threshold * 3:
                 reward -= center_penalty
                 info["center_penalty"] = center_penalty
-                
-                # Add additional penalty for being in a curled-up posture
-                # Check joint angles - are they close to home/rest position?
-                joint_positions = state[:6]  # First 6 values are joint positions
-                
-                # Calculate how far joints are from their zero/rest position
-                joint_activation = np.sum(np.abs(joint_positions)) / 6.0  # Average joint movement
-                
-                # Calculate a normalized curl factor (0 = fully extended, 1 = fully curled)
-                curl_factor = max(0, 1.0 - (joint_activation / 0.4))
-                
-                # If joints aren't moving much (robot is curled up) and we're far from target, penalize
-                if curl_factor > 0.25 and distance > 0.1:  # At least 25% curled and not close to target
-                    # Progressive penalty based on curl severity and distance from target
-                    curl_penalty = 1.5 * curl_factor * (distance / 0.3)  # Scale with curl severity and distance
-                    curl_penalty = min(curl_penalty, 3.0)  # Cap at 3.0 to avoid extreme penalties
-                    
-                    reward -= curl_penalty
-                    info["curl_penalty"] = curl_penalty
-                    info["curl_factor"] = curl_factor
-                    
-                    if self.verbose and (not hasattr(self, 'curl_notified') or 
-                                           (hasattr(self, 'last_curl_factor') and curl_factor > self.last_curl_factor + 0.2)):
-                        print(f"\nRobot {self.rank}: Curled-up posture detected! Applied penalty: {curl_penalty:.2f}")
-                        print(f"Joint activation: {joint_activation:.2f}, Curl factor: {curl_factor:.2f}")
-                        print(f"Distance to target: {distance*100:.2f}cm")
-                        self.curl_notified = True
-                        self.last_curl_factor = curl_factor
-                        
-                        # Add visual warning for curl detection
-                        self._visualize_curl_warning()
             
             # Simple fixed penalty for ground collision
             if ground_collision:
@@ -1293,6 +1277,8 @@ class RobotPositioningEnv(gym.Env):
         info["position_improved"] = position_improved
         info["improvement_amount"] = improvement_amount * 100  # Convert to cm
         info["initial_distance"] = self.initial_distance_to_target * 100  # Convert to cm
+        info["min_compactness"] = self.min_compactness_in_episode
+        info["current_compactness"] = compactness
         
         # If the episode is ending, log the improvement information
         if done and self.verbose:
@@ -1300,11 +1286,13 @@ class RobotPositioningEnv(gym.Env):
                 print(f"\nRobot {self.rank}: Position IMPROVED by {improvement_amount*100:.2f}cm")
                 print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
                 print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
+                print(f"  Min compactness: {self.min_compactness_in_episode:.2f} (lower is more extended)")
                 print(f"  Model weights WILL be updated\n")
             else:
                 print(f"\nRobot {self.rank}: Position did NOT improve")
                 print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
                 print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
+                print(f"  Min compactness: {self.min_compactness_in_episode:.2f} (lower is more extended)")
                 print(f"  Model weights will NOT be updated\n")
         
         # Get observation for next step
@@ -1533,23 +1521,6 @@ class RobotPositioningEnv(gym.Env):
             except Exception:
                 pass  # Silently ignore errors
             self.collision_line = None
-            
-        # Clean up curl warning markers
-        if hasattr(self, 'curl_warning_markers') and self.curl_warning_markers:
-            for marker_id in self.curl_warning_markers:
-                try:
-                    p.removeBody(marker_id, physicsClientId=self.robot.client)
-                except Exception:
-                    pass  # Silently ignore errors
-            self.curl_warning_markers = []
-            
-        # Clean up curl warning text
-        if hasattr(self, 'curl_warning_text') and self.curl_warning_text is not None:
-            try:
-                p.removeUserDebugItem(self.curl_warning_text, physicsClientId=self.robot.client)
-            except Exception:
-                pass  # Silently ignore errors
-            self.curl_warning_text = None
             
         # Clear the marker creation steps tracking
         if hasattr(self, 'marker_creation_steps'):
@@ -1820,61 +1791,52 @@ class RobotPositioningEnv(gym.Env):
             print(f"Link {link_b} position: {link_b_pos}")
             print(f"Distance between links: {np.linalg.norm(np.array(link_a_pos) - np.array(link_b_pos)):.4f}m")
 
-    def _visualize_curl_warning(self):
+    def _calculate_robot_compactness(self):
         """
-        Creates a visual warning when the robot is detected in a curled-up posture.
-        This helps debug and identify when the robot is exhibiting the unwanted behavior.
+        Calculate a measure of the robot's configuration compactness.
+        Higher value = more curled up/compact configuration.
+        Lower value = more extended configuration.
+        
+        Returns:
+            float: Compactness score (higher = more compact/curled up)
         """
-        # Skip visualization if we're in headless mode
-        if not hasattr(self, 'gui') or not self.gui:
-            return  # Skip visualization if rendering is disabled
+        # Get positions of all links
+        link_positions = []
+        
+        # Skip the base link (index -1) and start from 0
+        for i in range(self.robot.num_joints):
+            link_state = p.getLinkState(self.robot.robot_id, i, physicsClientId=self.client_id)
+            link_pos = link_state[0]  # Link position (x, y, z)
+            link_positions.append(link_pos)
             
-        # Position the warning above the robot
-        warning_pos = self.home_position + np.array([0, 0, 0.6])
+        # Calculate average pairwise distance between links
+        # Lower average distance = more compact configuration
+        total_distance = 0.0
+        count = 0
         
-        # Get curl factor if available, otherwise use default message
-        curl_msg = "CURL DETECTED!"
-        if hasattr(self, 'last_curl_factor'):
-            curl_percentage = int(self.last_curl_factor * 100)
-            curl_msg = f"CURL: {curl_percentage}%"
+        for i in range(len(link_positions)):
+            for j in range(i + 1, len(link_positions)):
+                # Skip adjacent links (which are naturally close)
+                if abs(i - j) > 1:
+                    pos_i = np.array(link_positions[i])
+                    pos_j = np.array(link_positions[j])
+                    distance = np.linalg.norm(pos_i - pos_j)
+                    total_distance += distance
+                    count += 1
+        
+        # Avoid division by zero
+        if count == 0:
+            return 0.0
             
-            # Adjust color based on severity (more red for higher curl factor)
-            r = 1.0
-            g = max(0, 1.0 - self.last_curl_factor)
-            b = 0
-            color = [r, g, b]
-        else:
-            color = [1, 0, 0]  # Default red
+        average_distance = total_distance / count
         
-        # Create a warning text
-        text_id = p.addUserDebugText(
-            curl_msg,
-            warning_pos,
-            textColorRGB=color,
-            textSize=1.5,
-            lifeTime=1.0,  # Show for 1 second
-            physicsClientId=self.client_id
-        )
+        # Calculate the inverse: higher value means more compact
+        # Scale to a reasonable range based on workspace size
+        # Normalize so that a fully extended robot is close to 0 penalty
+        # and a fully curled up robot is close to 1
+        normalized_compactness = max(0.0, 1.0 - (average_distance / (self.workspace_size * 0.5)))
         
-        # Create a warning sphere with color based on curl severity
-        warning_visual = p.createVisualShape(
-            shapeType=p.GEOM_SPHERE,
-            radius=0.05,
-            rgbaColor=color + [0.7],  # Add alpha channel
-            physicsClientId=self.client_id
-        )
-        
-        warning_body = p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=-1,
-            baseVisualShapeIndex=warning_visual,
-            basePosition=warning_pos,
-            physicsClientId=self.client_id
-        )
-        
-        # Store for cleanup
-        self.curl_warning_markers = [warning_body]
-        self.curl_warning_text = text_id
+        return normalized_compactness
 
 # Custom neural network architecture for the policy with the new requirements
 class CustomActorCriticNetwork(nn.Module):
