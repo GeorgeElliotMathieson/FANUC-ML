@@ -53,14 +53,16 @@ os.makedirs("./plots", exist_ok=True)  # Add directory for plots
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Train a robot arm for precise end effector positioning')
-parser.add_argument('--steps', type=int, default=1000000, help='Total number of training steps')
-parser.add_argument('--target-accuracy', type=float, default=1.0, help='Target accuracy in cm')
+parser.add_argument('--steps', type=int, default=50000, help='Total number of training steps')
+parser.add_argument('--target-accuracy', type=float, default=0.5, help='Target accuracy in cm')
 parser.add_argument('--debug', action='store_true', help='Enable debug mode with more verbose output')
-parser.add_argument('--load', type=str, default='', help='Load a pre-trained model to continue training')
+parser.add_argument('--load', type=str, default=None, help='Load a pre-trained model to continue training')
 parser.add_argument('--eval-only', action='store_true', help='Only run evaluation on a pre-trained model')
-parser.add_argument('--gui-delay', type=float, default=0.01, help='Delay between steps for better visualization (seconds)')
+parser.add_argument('--gui', action='store_true', default=True, help='Enable GUI visualization (enabled by default)')
+parser.add_argument('--no-gui', action='store_true', help='Disable GUI visualization (headless mode)')
+parser.add_argument('--viz-speed', type=float, default=0.0, help='Control visualization speed (delay in seconds, 0.0 = real-time with no delay, higher = slower)')
 parser.add_argument('--parallel', type=int, default=2, help='Number of parallel environments (default: 2)')
-parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in same view), default: True')
+parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in view), default: True')
 parser.add_argument('--workspace-size', type=float, default=0.7, help='Size of the workspace for target positions')
 parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (default: sac)')
 parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate for the optimizer (default: 0.001)')
@@ -74,13 +76,18 @@ parser.add_argument('--save-freq', type=int, default=5000, help='Model saving fr
 parser.add_argument('--clean-viz', action='store_true', help='Enable clean visualization with zoomed-in view of the robot')
 parser.add_argument('--eval-viz', action='store_true', help='Enable visualization for evaluation only')
 parser.add_argument('--high-lr', action='store_true', help='Use a higher learning rate (1e-3) for faster learning')
-parser.add_argument('--viz-speed', type=float, default=0.1, help='Control visualization speed (delay in seconds, higher = slower, default: 0.1)')
+parser.add_argument('--cuda', dest='use_cuda', action='store_true', help='Use CUDA for training if available')
+parser.add_argument('--cpu', dest='use_cuda', action='store_false', help='Use CPU for training even if CUDA is available')
 parser.add_argument('--optimize-training', action='store_true', help='Enable optimized training settings for faster learning', default=True)
 parser.add_argument('--verbose', action='store_true', help='Enable verbose output for debugging')
 parser.add_argument('--exploration', type=float, default=0.2, help='Initial exploration rate (higher values = more exploration)')
 parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
 parser.add_argument('--disable-bounds-collision', action='store_true', help='Disable workspace boundary collisions')
 args = parser.parse_args()
+
+# Handle gui/no-gui conflict
+if args.no_gui:
+    args.gui = False
 
 # Set up device based on args
 device = torch.device("cpu")  # Default to CPU, the actual device will be set in main()
@@ -723,7 +730,6 @@ class RobotPositioningEnv(gym.Env):
         self.robot = FANUCRobotEnv(render=gui, verbose=verbose, client=self.client_id)
         
         # Initialize the home position (center of workspace)
-        # This will be used for the center-avoidance reward
         robot_base_pos, _ = p.getBasePositionAndOrientation(
             self.robot.robot_id, 
             physicsClientId=self.client_id
@@ -742,10 +748,6 @@ class RobotPositioningEnv(gym.Env):
         
         if self.verbose and self.rank == 0:
             print(f"\n{'='*60}\nONLY GROUND PLANE COLLISIONS ENABLED\n{'='*60}\n")
-        
-        # Simplified collision setup - only ground collisions are checked
-        # Fixed ground collision penalty of 0.5
-        self.ground_collision_penalty = 0.5
         
         # Set ground plane height to 0.0 to use the standard ground plane as the boundary
         self.ground_plane_height = 0.0  # Standard ground plane height (no offset)
@@ -947,9 +949,6 @@ class RobotPositioningEnv(gym.Env):
         if hasattr(self, 'prev_distance'):
             delattr(self, 'prev_distance')
         
-        # Reset compactness tracking
-        self.min_compactness_in_episode = float('inf')  # To track the most extended configuration
-        
         # Check if the global target reached flag is set
         # If so, we need to reset it since we're starting a new episode
         if get_target_reached_flag():
@@ -958,9 +957,6 @@ class RobotPositioningEnv(gym.Env):
             update_target_randomization_time()
             # Force a new target when the target reached flag is set
             force_new_target = True
-            
-            if self.verbose:
-                print(f"Robot {self.rank}: Target reached flag was set, forcing new target")
         
         # Always force a new target on the first reset (episode_count == 0)
         if self.episode_count == 0:
@@ -1145,14 +1141,14 @@ class RobotPositioningEnv(gym.Env):
         ground_collision, ee_self_collision, collision_info = self._detect_collisions()
         info["collision_info"] = collision_info
         
-        # Improved reward system with more components
+        # Simplified reward system - only distance-based rewards
         # Base reward is 0
         reward = 0
         
         # Check if we've reached the target
         if distance <= self.accuracy_threshold:
             # Target reached! Maximum reward
-            reward = 20.0  # Increased from 10.0 to 20.0 to make target reaching more significant
+            reward = 20.0  # Keeping the target reached reward
             done = True
             info["target_reached"] = True
         else:
@@ -1187,64 +1183,13 @@ class RobotPositioningEnv(gym.Env):
             reward += distance_reward
             info["distance_reward"] = distance_reward
             
-            # Calculate robot compactness (how curled up the robot is)
-            compactness = self._calculate_robot_compactness()
+            # Remove compactness penalty
             
-            # Track the minimum compactness (most extended configuration)
-            if compactness < self.min_compactness_in_episode:
-                self.min_compactness_in_episode = compactness
-                info["min_compactness"] = self.min_compactness_in_episode
+            # Remove center penalty
             
-            # Create a compactness penalty that's inverse to the distance reward
-            # When close to target, allow more compactness
-            # When far from target, heavily penalize compactness
-            compactness_penalty_factor = 2.0  # Same scale as distance reward for balance
-            compactness_penalty = compactness_penalty_factor * compactness * (1.0 - normalized_distance)
+            # Remove ground collision penalty
             
-            # Apply the compactness penalty
-            reward -= compactness_penalty
-            info["compactness"] = compactness
-            info["compactness_penalty"] = compactness_penalty
-            
-            if self.verbose and compactness > 0.7 and self.steps % 20 == 0:
-                print(f"Robot {self.rank}: High compactness detected ({compactness:.2f}), penalty: {compactness_penalty:.2f}")
-            
-            # Add a penalty for staying near the center of the workspace
-            # Calculate distance from home position (center of workspace)
-            home_distance = np.linalg.norm(current_ee_pos - self.home_position)
-            normalized_home_distance = min(home_distance / (self.workspace_size * 0.5), 1.0)
-            
-            # Penalize being close to the center (higher penalty when closer to center)
-            center_penalty = 0.5 * (1.0 - normalized_home_distance)
-            
-            # Only apply center penalty when we're not very close to the target
-            if distance > self.accuracy_threshold * 3:
-                reward -= center_penalty
-                info["center_penalty"] = center_penalty
-            
-            # Simple fixed penalty for ground collision
-            if ground_collision:
-                reward -= self.ground_collision_penalty  # Use the class variable for consistency
-                info["ground_collision"] = True
-            
-            # Increased penalty for end effector self-collision to strongly discourage this behavior
-            if ee_self_collision:
-                # More severe penalty for end effector collisions (2x the ground collision penalty)
-                ee_collision_penalty = self.ground_collision_penalty * 2.0
-                reward -= ee_collision_penalty
-                info["ee_self_collision"] = True
-                info["ee_collision_penalty"] = ee_collision_penalty
-                
-                if self.verbose and not hasattr(self, 'collision_notified'):
-                    print(f"\nRobot {self.rank}: End effector collision detected with link {collision_info['ee_collision_links']}")
-                    print(f"Applied penalty: {ee_collision_penalty:.2f}\n")
-                    self.collision_notified = True
-                    
-                    # Visualize the collision if there are colliding links
-                    if collision_info['ee_collision_links']:
-                        # Take the first collision pair
-                        ee_link, other_link = collision_info['ee_collision_links'][0]
-                        self._visualize_collision(ee_link, other_link)
+            # Remove end effector self-collision penalty
             
             # Check timeout
             if self.steps >= self.timeout_steps:
@@ -1277,8 +1222,6 @@ class RobotPositioningEnv(gym.Env):
         info["position_improved"] = position_improved
         info["improvement_amount"] = improvement_amount * 100  # Convert to cm
         info["initial_distance"] = self.initial_distance_to_target * 100  # Convert to cm
-        info["min_compactness"] = self.min_compactness_in_episode
-        info["current_compactness"] = compactness
         
         # If the episode is ending, log the improvement information
         if done and self.verbose:
@@ -1286,13 +1229,11 @@ class RobotPositioningEnv(gym.Env):
                 print(f"\nRobot {self.rank}: Position IMPROVED by {improvement_amount*100:.2f}cm")
                 print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
                 print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
-                print(f"  Min compactness: {self.min_compactness_in_episode:.2f} (lower is more extended)")
                 print(f"  Model weights WILL be updated\n")
             else:
                 print(f"\nRobot {self.rank}: Position did NOT improve")
                 print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
                 print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
-                print(f"  Min compactness: {self.min_compactness_in_episode:.2f} (lower is more extended)")
                 print(f"  Model weights will NOT be updated\n")
         
         # Get observation for next step
@@ -2901,7 +2842,7 @@ def get_model_version():
 # Modify the main function to use the ModelUpdateCallback
 def main():
     """Main function for training the robot."""
-    # Parse arguments
+    # Parse command line arguments
     args = parse_args()
     
     # Set random seed for reproducibility
@@ -2918,11 +2859,16 @@ def main():
     # Print a message about bounds collision being disabled
     print(f"\nWorkspace bounds collision is permanently disabled in this version")
     
+    # Ensure gui is enabled if viz_speed > 0
+    if args.viz_speed > 0.0:
+        args.gui = True
+        print(f"Setting GUI mode to True because viz_speed > 0")
+        
     # Load workspace data
     load_workspace_data(verbose=True)
     
     # Create environments
-    if args.parallel_viz and args.viz_speed > 0.0:
+    if args.parallel_viz and args.gui:
         print(f"Using {args.parallel} robots in the same environment with visualization")
         envs = create_multiple_robots_in_same_env(
             num_robots=args.parallel,
@@ -2931,16 +2877,16 @@ def main():
         )
     else:
         # For visualization without parallel-viz, use a single environment
-        if args.viz_speed > 0.0 and not args.parallel_viz:
+        if args.gui and not args.parallel_viz:
             print("Using a single environment with visualization")
             args.parallel = 1
-        elif args.viz_speed > 0.0 and args.parallel_viz:
+        elif args.gui and args.parallel_viz:
             print(f"Using {args.parallel} environments with parallel visualization")
             
         # Create environments using the standard method
         envs = create_envs(
             num_envs=args.parallel,
-            viz_speed=args.viz_speed,
+            viz_speed=args.viz_speed if args.gui else 0.0,
             parallel_viz=args.parallel_viz,
             eval_env=args.eval_only
             # disable_bounds_collision parameter removed as it's permanently disabled
@@ -3040,17 +2986,17 @@ def main():
 def parse_args():
     """Parse command line arguments."""
     # Create argument parser
-    parser = argparse.ArgumentParser(description='Train a robot to position itself in a 3D environment')
-    parser.add_argument('--steps', type=int, default=999999999, help='Number of steps to train for (default: 999,999,999)')
-    parser.add_argument('--load', type=str, default=None, help='Load a trained model from file')
+    parser = argparse.ArgumentParser(description='Train a robot arm for precise end effector positioning')
+    parser.add_argument('--steps', type=int, default=999999999, help='Total number of training steps')
+    parser.add_argument('--target-accuracy', type=float, default=0.5, help='Target accuracy in cm')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode with more verbose output')
+    parser.add_argument('--load', type=str, default=None, help='Load a pre-trained model to continue training')
     parser.add_argument('--save-dir', type=str, default='./models', help='Directory to save models to')
-    parser.add_argument('--eval-only', action='store_true', help='Only evaluate the model, no training')
-    parser.add_argument('--gui', action='store_true', help='Enable GUI visualization')
-    parser.add_argument('--parallel', type=int, default=2, help='Number of parallel environments to use (default: 2)')
-    parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in view), default: True')
-    parser.add_argument('--viz-speed', type=float, default=0.1, help='Control visualization speed (delay in seconds, higher = slower, default: 0.1)')
-    parser.add_argument('--cuda', dest='use_cuda', action='store_true', help='Use CUDA for training if available')
-    parser.add_argument('--cpu', dest='use_cuda', action='store_false', help='Use CPU for training even if CUDA is available')
+    parser.add_argument('--eval-only', action='store_true', help='Only run evaluation on a pre-trained model')
+    parser.add_argument('--gui', action='store_true', default=True, help='Enable GUI visualization (enabled by default)')
+    parser.add_argument('--no-gui', action='store_true', help='Disable GUI visualization (headless mode)')
+    parser.add_argument('--parallel', type=int, default=2, help='Number of parallel environments (default: 2)')
+    parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in same view), default: True')
     parser.add_argument('--workspace-size', type=float, default=0.7, help='Size of the workspace for target positions')
     parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (default: sac)')
     parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate for the optimizer (default: 0.001)')
@@ -3064,12 +3010,20 @@ def parse_args():
     parser.add_argument('--clean-viz', action='store_true', help='Enable clean visualization with zoomed-in view of the robot')
     parser.add_argument('--eval-viz', action='store_true', help='Enable visualization for evaluation only')
     parser.add_argument('--high-lr', action='store_true', help='Use a higher learning rate (1e-3) for faster learning')
+    parser.add_argument('--viz-speed', type=float, default=0.0, help='Control visualization speed (delay in seconds, 0.0 = real-time with no delay, higher = slower)')
+    parser.add_argument('--cuda', dest='use_cuda', action='store_true', help='Use CUDA for training if available')
+    parser.add_argument('--cpu', dest='use_cuda', action='store_false', help='Use CPU for training even if CUDA is available')
     parser.add_argument('--optimize-training', action='store_true', help='Enable optimized training settings for faster learning', default=True)
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output for debugging')
     parser.add_argument('--exploration', type=float, default=0.2, help='Initial exploration rate (higher values = more exploration)')
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
-    # Remove the --disable-bounds-collision argument since bounds collision is now permanently disabled
+    parser.add_argument('--disable-bounds-collision', action='store_true', help='Disable workspace boundary collisions')
     args = parser.parse_args()
+    
+    # Handle gui/no-gui conflict
+    if args.no_gui:
+        args.gui = False
+    
     return args
 
 def print_hardware_info(args):
@@ -3086,8 +3040,15 @@ def print_hardware_info(args):
     print(f"Using learning rate: {args.learning_rate}")
     
     # Print visualization information
+    if args.gui:
+        print(f"GUI visualization enabled")
+    else:
+        print(f"GUI visualization disabled (headless mode)")
+        
     if args.viz_speed > 0.0:
         print(f"Using visualization speed: {args.viz_speed}s delay (slow motion)")
+    else:
+        print(f"Using real-time visualization speed (no delay)")
     
     # Print PyTorch threads
     print(f"Using {torch.get_num_threads()} CPU threads for PyTorch")
