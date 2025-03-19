@@ -51,6 +51,16 @@ os.makedirs("./models", exist_ok=True)
 os.makedirs("./logs", exist_ok=True)
 os.makedirs("./plots", exist_ok=True)  # Add directory for plots
 
+# Global variables for curriculum learning
+_CURRICULUM_STAGE = 0  # Current curriculum stage (0 = narrow cone, higher = wider cone)
+_MAX_CURRICULUM_STAGES = 5  # Maximum number of curriculum stages
+_CURRICULUM_CONE_MIN_ANGLE = 15  # Minimum cone angle in degrees (stage 0)
+_CURRICULUM_CONE_MAX_ANGLE = 180  # Maximum cone angle in degrees (final stage)
+_CURRICULUM_PERFORMANCE_HISTORY = []  # List to track performance (success rate) over time
+_CURRICULUM_MIN_EPISODES = 50  # Minimum episodes before considering stage advancement
+_CURRICULUM_PLATEAU_THRESHOLD = 0.05  # Performance improvement threshold to detect plateaus
+_CURRICULUM_WINDOW_SIZE = 20  # Window size for measuring performance plateau
+
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Train a robot arm for precise end effector positioning')
 parser.add_argument('--steps', type=int, default=1000000, help='Total number of training steps')
@@ -60,7 +70,7 @@ parser.add_argument('--load', type=str, default='', help='Load a pre-trained mod
 parser.add_argument('--eval-only', action='store_true', help='Only run evaluation on a pre-trained model')
 parser.add_argument('--gui-delay', type=float, default=0.01, help='Delay between steps for better visualization (seconds)')
 parser.add_argument('--parallel', type=int, default=2, help='Number of parallel environments (default: 2)')
-parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in same view), default: True')
+parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in view), default: True')
 parser.add_argument('--workspace-size', type=float, default=0.7, help='Size of the workspace for target positions')
 parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (default: sac)')
 parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate for the optimizer (default: 0.001)')
@@ -858,55 +868,29 @@ class RobotPositioningEnv(gym.Env):
     
     def reset(self, seed=None, options=None):
         """
-        Reset the environment
-        
-        Args:
-            seed: Random seed
-            options: Additional options for reset
-                force_new_target: Whether to force a new target to be sampled
-                keep_robot_position: Whether to keep the current robot position
-                
-        Returns:
-            tuple: (observation, info)
+        Reset the environment to start a new episode
         """
-        # Set seed if provided
-        if seed is not None:
-            self.seed(seed)
-        
-        # Parse options
-        options = options or {}
-        force_new_target = options.get('force_new_target', False)
-        keep_robot_position = options.get('keep_robot_position', False)
-        
-        # Reset collision counters
-        # self.consecutive_ground_collisions = 0
-        # self.consecutive_bounds_collisions = 0
-        
-        # Reset collision state tracking
-        self.in_ground_collision = False
-        self.in_bounds_collision = False
-        
-        # Clean up visualization resources
-        self._cleanup_visualization()
-        
-        # Ensure all marker tracking is reset
-        self.ee_markers = []
-        self.trajectory_markers = []
-        self.marker_creation_steps = {}
-        
         # Reset step counter
         self.steps = 0
         
-        # Reset total reward for this episode
-        self.total_reward_in_episode = 0.0
-        
-        # Reset best position tracking
+        # Initialize best-in-episode distance and position tracking
         self.best_distance_in_episode = float('inf')
         self.best_position_in_episode = None
         
-        # Reset previous distance for progress rewards
-        if hasattr(self, 'prev_distance'):
-            delattr(self, 'prev_distance')
+        # Increment episode counter
+        self.episode_count += 1
+        
+        # For rendering and tracking
+        self.trajectory_markers = []
+        self.ee_markers = []
+        self.marker_creation_steps = {}
+        
+        # Initialize or reset state info
+        if not hasattr(self, 'prev_distance'):
+            self.prev_distance = 0
+        
+        # Flag to determine if we need to force a new target
+        force_new_target = False
         
         # Store the previous episode count
         prev_episode_count = self.episode_count
@@ -943,35 +927,25 @@ class RobotPositioningEnv(gym.Env):
             if self.verbose:
                 print(f"Robot {self.rank}: Keeping current robot position on reset")
         
-        # Always sample a new target position on reset
+        # ALWAYS sample a new target position on reset for consistent behavior
+        # Force a new target by updating the randomization time
+        update_target_randomization_time()
         self.target_position = self._sample_target()
         
         if self.verbose:
-            print(f"Robot {self.rank} received a new target at {self.target_position}")
+            print(f"Robot {self.rank} received a new target at {self.target_position} on reset")
         
-        # Visualize the target if rendering is enabled
+        # Visualize the new target if rendering is enabled
         if self.gui:
             try:
                 # Remove previous target visualization if it exists
-                if self.target_visual_id is not None:
-                    try:
-                        p.removeBody(self.target_visual_id, physicsClientId=self.robot.client)
-                    except:
-                        pass
+                self._cleanup_visualization()
                 
                 # Create new target visualization
                 self.target_visual_id = visualize_target(self.target_position, self.robot.client)
                 
                 # Visualize the reachable workspace with semitranslucent spheres
                 self._visualize_reachable_workspace()
-                
-                # Clear trajectory markers
-                for marker_id in self.trajectory_markers:
-                    try:
-                        p.removeBody(marker_id, physicsClientId=self.robot.client)
-                    except:
-                        pass
-                self.trajectory_markers = []
                 
             except Exception as e:
                 print(f"Warning: Could not visualize target: {e}")
@@ -1008,11 +982,7 @@ class RobotPositioningEnv(gym.Env):
             if self.gui:
                 try:
                     # Remove previous target visualization if it exists
-                    if hasattr(self, 'target_visual_id') and self.target_visual_id is not None:
-                        try:
-                            p.removeBody(self.target_visual_id, physicsClientId=self.robot.client)
-                        except:
-                            pass
+                    self._cleanup_visualization()
                     
                     # Create new target visualization
                     self.target_visual_id = visualize_target(self.target_position, self.robot.client)
@@ -1098,6 +1068,9 @@ class RobotPositioningEnv(gym.Env):
         ground_collision, ee_self_collision, collision_info = self._detect_collisions()
         info["collision_info"] = collision_info
         
+        # Initialize done flag
+        done = False
+        
         # Improved reward system with more components
         # Base reward is 0
         reward = 0
@@ -1108,6 +1081,10 @@ class RobotPositioningEnv(gym.Env):
             reward = 20.0  # Increased from 10.0 to 20.0 to make target reaching more significant
             done = True
             info["target_reached"] = True
+            # Set the target reached flag for a new target on reset
+            set_target_reached_flag()
+            if self.verbose:
+                print(f"Target reached by Robot {self.rank}, setting target_reached_flag")
         else:
             # Not at target yet
             
@@ -1168,8 +1145,10 @@ class RobotPositioningEnv(gym.Env):
             if self.steps >= self.timeout_steps:
                 done = True
                 info["timeout"] = True
-            else:
-                done = False
+                # Set the target reached flag for a new target on reset after timeout
+                set_target_reached_flag()
+                if self.verbose:
+                    print(f"Timeout for Robot {self.rank}, setting target_reached_flag for new target")
         
         # Store reward and distance info
         info["reward"] = reward
@@ -1386,18 +1365,18 @@ class RobotPositioningEnv(gym.Env):
                     pass  # Silently ignore errors
             self.trajectory_markers = []
             
-        # Clear the marker creation steps tracking
-        if hasattr(self, 'marker_creation_steps'):
-            self.marker_creation_steps = {}
-        
         # Clean up target visualization
         if hasattr(self, 'target_visual_id') and self.target_visual_id is not None:
             try:
                 p.removeBody(self.target_visual_id, physicsClientId=self.robot.client)
-                self.target_visual_id = None
             except Exception:
                 pass  # Silently ignore errors
-                
+            self.target_visual_id = None
+            
+        # Clear the marker creation steps tracking
+        if hasattr(self, 'marker_creation_steps'):
+            self.marker_creation_steps = {}
+        
         # Clean up target line
         if hasattr(self, 'target_line_id') and self.target_line_id is not None:
             try:
@@ -1418,7 +1397,7 @@ class RobotPositioningEnv(gym.Env):
     def _sample_target(self):
         """
         Sample a target position for the robot to reach.
-        Uses the full workspace of the robot, with distances relative to the shoulder position.
+        Uses a cone above the robot that widens with curriculum stages.
         Ensures targets don't spawn in contact with the robot's base or the ground.
         
         Returns:
@@ -1450,50 +1429,47 @@ class RobotPositioningEnv(gym.Env):
         # Define ground clearance to ensure targets are not in contact with or below the ground
         ground_clearance = 0.1  # 10cm above the ground
         
-        # Use the ground plane height for ground level
+        # Get current cone angle from curriculum stage
+        cone_angle_degrees = get_current_cone_angle()
+        cone_angle_radians = np.radians(cone_angle_degrees)
         
         # Maximum attempts to find a valid target
         max_attempts = 100
         
-        # Choose a sampling strategy - bias towards outer regions of workspace
-        sampling_strategy = np.random.choice(['uniform', 'outer_bias', 'structured'], 
-                                            p=[0.2, 0.5, 0.3])
+        # Log curriculum information if verbose
+        if self.verbose:
+            print(f"Sampling target in cone with angle {cone_angle_degrees:.1f}° (curriculum stage {get_curriculum_stage()})")
         
+        # Choose sampling method appropriate for curriculum stage
         for _ in range(max_attempts):
-            # Different sampling strategies to create more variety
-            if sampling_strategy == 'uniform':
-                # Uniform sampling in spherical coordinates
-                theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
-                phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
-                distance = np.random.uniform(min_reach, max_reach)
-                
-            elif sampling_strategy == 'outer_bias':
-                # Bias towards outer regions of workspace using beta distribution
-                theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
-                phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
-                # Beta distribution with alpha=1, beta=0.7 biases towards higher values (outer radius)
-                normalized_distance = np.random.beta(1.0, 0.7)  
-                distance = min_reach + normalized_distance * (max_reach - min_reach)
-                
-            else:  # 'structured'
-                # Generate targets at specific segments of the workspace
-                # This ensures coverage of different areas in a more structured way
-                segment = np.random.randint(0, 8)  # Divide workspace into 8 segments
-                
-                # Each segment corresponds to a specific region
-                phi_segment = (segment % 4) * (np.pi/2) + np.random.uniform(-np.pi/4, np.pi/4)
-                theta_segment = np.pi/3 if segment < 4 else 2*np.pi/3 + np.random.uniform(-np.pi/6, np.pi/6)
-                
-                # Use maximum reach for structured targets to encourage reaching
-                distance = np.random.uniform(0.6 * max_reach, max_reach)
-                
-                theta = theta_segment
-                phi = phi_segment
+            # Sample distance - prefer outer regions of the workspace
+            normalized_distance = np.random.beta(1.0, 0.7)  # Beta distribution biases towards higher values
+            distance = min_reach + normalized_distance * (max_reach - min_reach)
+            
+            # In a cone above the robot, centered on the Z axis
+            # For curriculum learning, we restrict the cone's angle based on the current stage
+            
+            # Sample direction within the cone
+            # For a cone along the Z axis, we need theta to be between 0 and cone_angle/2
+            # where 0 is straight up
+            max_theta = cone_angle_radians / 2
+            
+            # Generate random angles within the cone
+            # theta is the angle from the z-axis (0 = straight up)
+            theta = np.random.uniform(0, max_theta)
+            
+            # phi is the full azimuthal angle around the cone
+            # In early curriculum stages with narrow cones, restrict phi to point more upward
+            # As curriculum progresses, allow full 360° rotation
+            if cone_angle_degrees <= 45:  # Narrow cone - point mostly upward
+                phi = np.random.uniform(-np.pi/4, np.pi/4)  # Restrict to a segment pointing up
+            else:
+                phi = np.random.uniform(0, 2 * np.pi)  # Full rotation around the cone
             
             # Convert spherical coordinates to Cartesian
             x = distance * np.sin(theta) * np.cos(phi)
             y = distance * np.sin(theta) * np.sin(phi)
-            z = distance * np.cos(theta)
+            z = distance * np.cos(theta)  # This will be positive (above) because theta is in [0, max_theta]
             
             # Add to shoulder position - this ensures the target is relative to the robot's actual position
             target_position = shoulder_position + np.array([x, y, z])
@@ -1511,18 +1487,12 @@ class RobotPositioningEnv(gym.Env):
             # If the target is valid, return it
             if is_above_ground and is_not_in_base:
                 if self.verbose:
-                    print(f"Valid target position sampled at {target_position} using {sampling_strategy} strategy")
+                    print(f"Valid target position sampled at {target_position} within curriculum cone")
                 return target_position
         
         # If we couldn't find a valid target after max_attempts, use a fallback method
-        # Generate a point in a more distant location to encourage movement
-        # Pick a random direction instead of always in front
-        random_angle = np.random.uniform(0, 2 * np.pi)
-        fallback_position = shoulder_position + np.array([
-            0.5 * np.cos(random_angle),  # Random direction
-            0.5 * np.sin(random_angle),  # Random direction
-            0.2
-        ])
+        # Generate a point directly upward from the shoulder position
+        fallback_position = shoulder_position + np.array([0.1, 0.1, 0.4])  # Mostly upward
         
         if self.verbose:
             print(f"Using fallback target position at {fallback_position}")
@@ -2373,11 +2343,15 @@ class ModelUpdateCallback(BaseCallback):
     """
     Callback to update model weights when robots complete episodes.
     All robots contribute to the model updates rather than just the best-performing one.
+    Also handles curriculum learning progression based on performance.
     """
     def __init__(self, verbose=0):
         super(ModelUpdateCallback, self).__init__(verbose)
         self.update_count = 0
         self.robot_contributions = {}  # Track which robots have contributed to the current update
+        self.episode_count = 0
+        self.success_count = 0
+        self.curriculum_check_frequency = 10  # Check for curriculum advancement every N episodes
         
     def _on_step(self):
         """Process model updates from all robots in parallel"""
@@ -2391,6 +2365,7 @@ class ModelUpdateCallback(BaseCallback):
         envs_completed = []
         rewards_achieved = []
         distances_achieved = []
+        target_reached_list = []
         
         # Get all active environments
         vec_env = self.training_env
@@ -2412,6 +2387,15 @@ class ModelUpdateCallback(BaseCallback):
                     
                     # Check if target was reached
                     target_reached = vec_env.infos[i].get('target_reached', False)
+                    target_reached_list.append(target_reached)
+                    
+                    # Track performance for curriculum learning
+                    self.episode_count += 1
+                    if target_reached:
+                        self.success_count += 1
+                        
+                    # Record the episode result for curriculum tracking
+                    record_episode_performance(target_reached)
                     
                     if target_reached:
                         # Target reached - trigger a model update and log it
@@ -2430,15 +2414,24 @@ class ModelUpdateCallback(BaseCallback):
         # If we have completed episodes, update the model
         self.update_count += 1
         
+        # Check if we should advance curriculum
+        if self.episode_count > 0 and self.episode_count % self.curriculum_check_frequency == 0:
+            if check_curriculum_advancement():
+                advance_curriculum_stage()
+        
         # Print information about the update
         if self.verbose > 0:
             avg_reward = np.mean(rewards_achieved) if rewards_achieved else 0.0
             avg_distance = np.mean(distances_achieved) if distances_achieved else float('inf')
+            success_rate = sum(target_reached_list) / len(target_reached_list) if target_reached_list else 0.0
             
             print(f"\n{'='*60}")
             print(f"MODEL UPDATE #{self.update_count}: {len(envs_completed)} robots contributed")
             print(f"Average reward: {avg_reward:.4f}")
             print(f"Average distance: {avg_distance*100:.2f}cm")
+            print(f"Success rate: {success_rate*100:.1f}%")
+            print(f"Curriculum stage: {get_curriculum_stage()} - Cone angle: {get_current_cone_angle():.1f}°")
+            print(f"Overall success rate: {(self.success_count/self.episode_count)*100:.1f}% ({self.success_count}/{self.episode_count})")
             print(f"Updating shared model weights with all robot experiences.")
             print(f"{'='*60}\n")
         
@@ -2608,6 +2601,78 @@ def get_model_version():
     """Get the current model version."""
     global _MODEL_VERSION
     return _MODEL_VERSION
+
+# Curriculum learning functions
+def get_curriculum_stage():
+    """Get the current curriculum stage."""
+    global _CURRICULUM_STAGE
+    return _CURRICULUM_STAGE
+
+def advance_curriculum_stage():
+    """Advance to the next curriculum stage if not at maximum."""
+    global _CURRICULUM_STAGE, _MAX_CURRICULUM_STAGES
+    if _CURRICULUM_STAGE < _MAX_CURRICULUM_STAGES - 1:
+        _CURRICULUM_STAGE += 1
+        print(f"\n{'='*60}")
+        print(f"ADVANCING CURRICULUM TO STAGE {_CURRICULUM_STAGE}")
+        print(f"Target cone angle: {get_current_cone_angle():.1f} degrees")
+        print(f"{'='*60}\n")
+    else:
+        print(f"\n{'='*60}")
+        print(f"CURRICULUM ALREADY AT MAXIMUM STAGE {_CURRICULUM_STAGE}")
+        print(f"{'='*60}\n")
+    return _CURRICULUM_STAGE
+
+def get_current_cone_angle():
+    """Get the current cone angle based on curriculum stage."""
+    global _CURRICULUM_STAGE, _MAX_CURRICULUM_STAGES, _CURRICULUM_CONE_MIN_ANGLE, _CURRICULUM_CONE_MAX_ANGLE
+    
+    # Linear interpolation between min and max angles
+    progress = _CURRICULUM_STAGE / (_MAX_CURRICULUM_STAGES - 1) if _MAX_CURRICULUM_STAGES > 1 else 1.0
+    current_angle = _CURRICULUM_CONE_MIN_ANGLE + progress * (_CURRICULUM_CONE_MAX_ANGLE - _CURRICULUM_CONE_MIN_ANGLE)
+    return current_angle
+
+def record_episode_performance(success):
+    """Record the success/failure of an episode for curriculum advancement."""
+    global _CURRICULUM_PERFORMANCE_HISTORY
+    _CURRICULUM_PERFORMANCE_HISTORY.append(1 if success else 0)
+    
+    # Keep only the most recent history
+    if len(_CURRICULUM_PERFORMANCE_HISTORY) > _CURRICULUM_MIN_EPISODES * 2:
+        _CURRICULUM_PERFORMANCE_HISTORY = _CURRICULUM_PERFORMANCE_HISTORY[-_CURRICULUM_MIN_EPISODES*2:]
+
+def check_curriculum_advancement():
+    """Check if curriculum should advance based on performance plateau detection."""
+    global _CURRICULUM_PERFORMANCE_HISTORY, _CURRICULUM_MIN_EPISODES, _CURRICULUM_WINDOW_SIZE, _CURRICULUM_PLATEAU_THRESHOLD
+    
+    # Need minimum number of episodes before considering advancement
+    if len(_CURRICULUM_PERFORMANCE_HISTORY) < _CURRICULUM_MIN_EPISODES:
+        return False
+    
+    # Use sliding window to detect plateau
+    if len(_CURRICULUM_PERFORMANCE_HISTORY) < _CURRICULUM_WINDOW_SIZE * 2:
+        return False
+    
+    # Get average performance in earlier and later windows
+    earlier_window = _CURRICULUM_PERFORMANCE_HISTORY[-_CURRICULUM_WINDOW_SIZE*2:-_CURRICULUM_WINDOW_SIZE]
+    later_window = _CURRICULUM_PERFORMANCE_HISTORY[-_CURRICULUM_WINDOW_SIZE:]
+    
+    earlier_success_rate = sum(earlier_window) / len(earlier_window)
+    later_success_rate = sum(later_window) / len(later_window)
+    
+    # Calculate improvement
+    improvement = later_success_rate - earlier_success_rate
+    
+    # If performance has plateaued (minimal improvement) and success rate is decent, advance curriculum
+    plateau_detected = abs(improvement) < _CURRICULUM_PLATEAU_THRESHOLD
+    decent_performance = later_success_rate > 0.6  # At least 60% success rate
+    
+    if plateau_detected and decent_performance:
+        print(f"\nPlateau detected: Early success rate: {earlier_success_rate:.2f}, Later success rate: {later_success_rate:.2f}")
+        print(f"Improvement: {improvement:.2f} (threshold: {_CURRICULUM_PLATEAU_THRESHOLD})")
+        return True
+    
+    return False
 
 # Modify the main function to use the ModelUpdateCallback
 def main():
@@ -2779,7 +2844,6 @@ def parse_args():
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output for debugging')
     parser.add_argument('--exploration', type=float, default=0.2, help='Initial exploration rate (higher values = more exploration)')
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
-    # Remove the --disable-bounds-collision argument since bounds collision is now permanently disabled
     args = parser.parse_args()
     return args
 
