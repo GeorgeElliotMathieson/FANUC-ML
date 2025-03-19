@@ -778,11 +778,14 @@ class RobotPositioningEnv(gym.Env):
         if self.verbose:
             print(f"Using workspace size: {self.workspace_size:.3f}m")
         
-        # Initialize episode counter and maximum distance
+        # Initialize episode counter and target boundary variables for curriculum learning
         self.episode_count = 0
-        self.current_max_distance = 0.0
-        self.max_distance_increment = 0.05  # 5cm increment
-        self.max_workspace_distance = self.workspace_size
+        self.consecutive_successful_episodes = 0
+        self.max_target_distance = 0.3  # Start with a smaller boundary (30cm)
+        self.last_episode_successful = False
+        self.target_expansion_threshold = 0.04  # 4cm success threshold
+        self.target_expansion_increment = 0.05  # Expand by 5cm each curriculum level
+        self.curriculum_level = 1
         
         # Initialize step counter
         self.steps = 0
@@ -878,13 +881,57 @@ class RobotPositioningEnv(gym.Env):
         force_new_target = options.get('force_new_target', False)
         keep_robot_position = options.get('keep_robot_position', False)
         
-        # Reset collision counters
-        # self.consecutive_ground_collisions = 0
-        # self.consecutive_bounds_collisions = 0
+        # Increment episode counter (except for first reset)
+        if hasattr(self, 'first_env_reset_done'):
+            self.episode_count += 1
+            
+            # Check if we need to update curriculum progress based on the last episode's performance
+            if hasattr(self, 'best_distance_in_episode'):
+                # Consider episode successful if we got within the target threshold
+                episode_successful = self.best_distance_in_episode <= self.target_expansion_threshold
+                
+                # Track consecutive successful episodes for curriculum advancement
+                if episode_successful:
+                    if self.last_episode_successful:
+                        # Two consecutive successful episodes - advance curriculum!
+                        self.consecutive_successful_episodes += 1
+                        
+                        # Expand the target boundary if it's not at the maximum yet
+                        if self.max_target_distance < self.workspace_size:
+                            # Increase the max target distance
+                            self.max_target_distance = min(
+                                self.max_target_distance + self.target_expansion_increment,
+                                self.workspace_size
+                            )
+                            self.curriculum_level += 1
+                            
+                            if self.verbose:
+                                print(f"\n{'='*60}")
+                                print(f"CURRICULUM LEVEL UP! Now at level {self.curriculum_level}")
+                                print(f"Target boundary expanded to: {self.max_target_distance:.2f}m")
+                                print(f"{'='*60}\n")
+                    
+                    # Set this episode as successful for the next check
+                    self.last_episode_successful = True
+                else:
+                    # Reset the consecutive count if this episode wasn't successful
+                    self.last_episode_successful = False
         
         # Reset collision state tracking
         self.in_ground_collision = False
         self.in_bounds_collision = False
+        
+        # Clear collision notification flag so new collisions will be reported
+        if hasattr(self, 'collision_notified'):
+            del self.collision_notified
+            
+        # Clear curl-up posture notification flag
+        if hasattr(self, 'curl_notified'):
+            del self.curl_notified
+        
+        # Clear last curl factor tracking
+        if hasattr(self, 'last_curl_factor'):
+            del self.last_curl_factor
         
         # Clean up visualization resources
         self._cleanup_visualization()
@@ -907,9 +954,6 @@ class RobotPositioningEnv(gym.Env):
         # Reset previous distance for progress rewards
         if hasattr(self, 'prev_distance'):
             delattr(self, 'prev_distance')
-        
-        # Store the previous episode count
-        prev_episode_count = self.episode_count
         
         # Check if the global target reached flag is set
         # If so, we need to reset it since we're starting a new episode
@@ -979,8 +1023,16 @@ class RobotPositioningEnv(gym.Env):
         # Get current state
         observation = self._get_observation()
         
+        # Calculate and store initial distance to target at the start of the episode
+        state = self.robot._get_state()
+        initial_ee_pos = state[12:15]
+        self.initial_distance_to_target = np.linalg.norm(initial_ee_pos - self.target_position)
+        
+        if self.verbose:
+            print(f"Robot {self.rank}: Initial distance to target: {self.initial_distance_to_target*100:.2f}cm")
+        
         # Return observation and info dict (Gymnasium API)
-        return observation, {}
+        return observation, {'initial_distance': self.initial_distance_to_target}
     
     def step(self, action):
         """
@@ -1134,7 +1186,8 @@ class RobotPositioningEnv(gym.Env):
             # Normalize distance to 0-1 range (1 when at target, 0 when at max distance)
             normalized_distance = 1.0 - min(distance / self.workspace_size, 1.0)
             # Linear scale: directly proportional to normalized distance
-            distance_reward = 2.0 * normalized_distance
+            # Increase the distance reward weight significantly to make target-seeking more important
+            distance_reward = 5.0 * normalized_distance  # Increased from 2.0 to 5.0
             
             # Apply the distance reward
             reward += distance_reward
@@ -1145,24 +1198,69 @@ class RobotPositioningEnv(gym.Env):
             home_distance = np.linalg.norm(current_ee_pos - self.home_position)
             normalized_home_distance = min(home_distance / (self.workspace_size * 0.5), 1.0)
             
-            # Penalize being close to the center (higher penalty when closer to center)
-            center_penalty = 0.5 * (1.0 - normalized_home_distance)
+            # Significantly increase center penalty to discourage curling up behavior
+            # Higher penalty when closer to center
+            center_penalty = 2.0 * (1.0 - normalized_home_distance)  # Increased from 0.5 to 2.0
             
-            # Only apply center penalty when we're not very close to the target
-            if distance > self.accuracy_threshold * 3:
+            # Apply center penalty more aggressively - only avoid if very close to target
+            if distance > self.accuracy_threshold * 2:  # Reduced threshold from 3x to 2x
                 reward -= center_penalty
                 info["center_penalty"] = center_penalty
+                
+                # Add additional penalty for being in a curled-up posture
+                # Check joint angles - are they close to home/rest position?
+                joint_positions = state[:6]  # First 6 values are joint positions
+                
+                # Calculate how far joints are from their zero/rest position
+                joint_activation = np.sum(np.abs(joint_positions)) / 6.0  # Average joint movement
+                
+                # Calculate a normalized curl factor (0 = fully extended, 1 = fully curled)
+                curl_factor = max(0, 1.0 - (joint_activation / 0.4))
+                
+                # If joints aren't moving much (robot is curled up) and we're far from target, penalize
+                if curl_factor > 0.25 and distance > 0.1:  # At least 25% curled and not close to target
+                    # Progressive penalty based on curl severity and distance from target
+                    curl_penalty = 1.5 * curl_factor * (distance / 0.3)  # Scale with curl severity and distance
+                    curl_penalty = min(curl_penalty, 3.0)  # Cap at 3.0 to avoid extreme penalties
+                    
+                    reward -= curl_penalty
+                    info["curl_penalty"] = curl_penalty
+                    info["curl_factor"] = curl_factor
+                    
+                    if self.verbose and (not hasattr(self, 'curl_notified') or 
+                                           (hasattr(self, 'last_curl_factor') and curl_factor > self.last_curl_factor + 0.2)):
+                        print(f"\nRobot {self.rank}: Curled-up posture detected! Applied penalty: {curl_penalty:.2f}")
+                        print(f"Joint activation: {joint_activation:.2f}, Curl factor: {curl_factor:.2f}")
+                        print(f"Distance to target: {distance*100:.2f}cm")
+                        self.curl_notified = True
+                        self.last_curl_factor = curl_factor
+                        
+                        # Add visual warning for curl detection
+                        self._visualize_curl_warning()
             
             # Simple fixed penalty for ground collision
             if ground_collision:
                 reward -= self.ground_collision_penalty  # Use the class variable for consistency
                 info["ground_collision"] = True
             
-            # Penalty for end effector self-collision
+            # Increased penalty for end effector self-collision to strongly discourage this behavior
             if ee_self_collision:
-                # Use the same penalty as ground collision for consistency
-                reward -= self.ground_collision_penalty
+                # More severe penalty for end effector collisions (2x the ground collision penalty)
+                ee_collision_penalty = self.ground_collision_penalty * 2.0
+                reward -= ee_collision_penalty
                 info["ee_self_collision"] = True
+                info["ee_collision_penalty"] = ee_collision_penalty
+                
+                if self.verbose and not hasattr(self, 'collision_notified'):
+                    print(f"\nRobot {self.rank}: End effector collision detected with link {collision_info['ee_collision_links']}")
+                    print(f"Applied penalty: {ee_collision_penalty:.2f}\n")
+                    self.collision_notified = True
+                    
+                    # Visualize the collision if there are colliding links
+                    if collision_info['ee_collision_links']:
+                        # Take the first collision pair
+                        ee_link, other_link = collision_info['ee_collision_links'][0]
+                        self._visualize_collision(ee_link, other_link)
             
             # Check timeout
             if self.steps >= self.timeout_steps:
@@ -1180,6 +1278,34 @@ class RobotPositioningEnv(gym.Env):
             self.best_position_in_episode = current_ee_pos.copy()
             info["best_distance"] = self.best_distance_in_episode * 100  # Convert to cm
             info["best_position"] = self.best_position_in_episode
+            
+            # Log when the robot achieves a distance within the curriculum threshold
+            if distance <= self.target_expansion_threshold and self.verbose:
+                print(f"\nRobot {self.rank}: Achieved curriculum threshold distance: {distance*100:.2f}cm!")
+                print(f"Current curriculum level: {self.curriculum_level}, max target distance: {self.max_target_distance:.2f}m\n")
+        
+        # Check if the robot's best position is better than its initial position
+        # This will be used to determine if model updates should occur
+        position_improved = self.best_distance_in_episode < self.initial_distance_to_target
+        improvement_amount = self.initial_distance_to_target - self.best_distance_in_episode
+        
+        # Add improvement info to the info dictionary
+        info["position_improved"] = position_improved
+        info["improvement_amount"] = improvement_amount * 100  # Convert to cm
+        info["initial_distance"] = self.initial_distance_to_target * 100  # Convert to cm
+        
+        # If the episode is ending, log the improvement information
+        if done and self.verbose:
+            if position_improved:
+                print(f"\nRobot {self.rank}: Position IMPROVED by {improvement_amount*100:.2f}cm")
+                print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
+                print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
+                print(f"  Model weights WILL be updated\n")
+            else:
+                print(f"\nRobot {self.rank}: Position did NOT improve")
+                print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
+                print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
+                print(f"  Model weights will NOT be updated\n")
         
         # Get observation for next step
         observation = self._get_observation()
@@ -1299,7 +1425,7 @@ class RobotPositioningEnv(gym.Env):
         """
         Enhanced collision detection:
         1. Ground plane collisions (as before)
-        2. End effector self-collision detection
+        2. End effector collision with other robot parts
         
         Returns:
             tuple: (ground_collision, ee_self_collision, collision_info)
@@ -1330,6 +1456,7 @@ class RobotPositioningEnv(gym.Env):
         
         # Check for end effector self-collisions
         ee_self_collision = False
+        ee_collision_links = []
         
         # Make sure the robot has the ee_link_id attribute (added in _configure_collision_detection)
         if hasattr(self.robot, 'ee_link_id'):
@@ -1347,8 +1474,11 @@ class RobotPositioningEnv(gym.Env):
             for point in contact_points:
                 if point[1] == robot_id:  # If bodyB is also our robot
                     link_b = point[3]
-                    if link_b != ee_link and link_b != -1:  # Not with itself or the base
+                    # Check if this is another part of the robot, not the end effector itself
+                    # Also exclude the link immediately before end effector which might be in continuous contact
+                    if link_b != ee_link and link_b != ee_link-1 and link_b != -1:  
                         ee_self_collision = True
+                        ee_collision_links.append((ee_link, link_b))
                         break
         
         # Calculate distance from home position (center of workspace)
@@ -1359,6 +1489,7 @@ class RobotPositioningEnv(gym.Env):
             "ground_collision": ground_collision,
             "ground_collision_links": ground_collision_links,
             "ee_self_collision": ee_self_collision,
+            "ee_collision_links": ee_collision_links,
             "ee_position": ee_position,
             "distance_from_home": distance_from_home
         }
@@ -1385,6 +1516,40 @@ class RobotPositioningEnv(gym.Env):
                 except Exception:
                     pass  # Silently ignore errors
             self.trajectory_markers = []
+            
+        # Clean up collision visualization markers
+        if hasattr(self, 'collision_markers') and self.collision_markers:
+            for marker_id in self.collision_markers:
+                try:
+                    p.removeBody(marker_id, physicsClientId=self.robot.client)
+                except Exception:
+                    pass  # Silently ignore errors
+            self.collision_markers = []
+            
+        # Clean up collision line visualization
+        if hasattr(self, 'collision_line') and self.collision_line is not None:
+            try:
+                p.removeUserDebugItem(self.collision_line, physicsClientId=self.robot.client)
+            except Exception:
+                pass  # Silently ignore errors
+            self.collision_line = None
+            
+        # Clean up curl warning markers
+        if hasattr(self, 'curl_warning_markers') and self.curl_warning_markers:
+            for marker_id in self.curl_warning_markers:
+                try:
+                    p.removeBody(marker_id, physicsClientId=self.robot.client)
+                except Exception:
+                    pass  # Silently ignore errors
+            self.curl_warning_markers = []
+            
+        # Clean up curl warning text
+        if hasattr(self, 'curl_warning_text') and self.curl_warning_text is not None:
+            try:
+                p.removeUserDebugItem(self.curl_warning_text, physicsClientId=self.robot.client)
+            except Exception:
+                pass  # Silently ignore errors
+            self.curl_warning_text = None
             
         # Clear the marker creation steps tracking
         if hasattr(self, 'marker_creation_steps'):
@@ -1418,7 +1583,7 @@ class RobotPositioningEnv(gym.Env):
     def _sample_target(self):
         """
         Sample a target position for the robot to reach.
-        Uses the full workspace of the robot, with distances relative to the shoulder position.
+        Uses the curriculum-adjusted workspace of the robot, with distances relative to the shoulder position.
         Ensures targets don't spawn in contact with the robot's base or the ground.
         
         Returns:
@@ -1440,9 +1605,12 @@ class RobotPositioningEnv(gym.Env):
         ])
         
         # Define the range of distances that are reachable
-        # Use the full workspace range from the workspace data
-        min_reach = 0.25  # Increased minimum reach to avoid targets too close to the center
-        max_reach = self.workspace_size   # Maximum reach distance
+        # Use the curriculum-adjusted target distance
+        min_reach = 0.25  # Minimum reach to avoid targets too close to the center
+        max_reach = self.max_target_distance  # Use curriculum-adjusted maximum target distance
+        
+        if self.verbose:
+            print(f"Sampling target with curriculum level {self.curriculum_level}, max distance: {max_reach:.2f}m")
         
         # Define the robot base radius to avoid spawning targets inside or too close to the base
         robot_base_radius = 0.15  # Approximate radius of the robot's base
@@ -1573,6 +1741,140 @@ class RobotPositioningEnv(gym.Env):
         ])
         
         return observation
+
+    def _visualize_collision(self, link_a, link_b):
+        """
+        Visualize the collision between two links by temporarily highlighting them.
+        
+        Args:
+            link_a: First link index involved in collision
+            link_b: Second link index involved in collision
+        """
+        if not self.robot.render:
+            return  # Skip visualization if rendering is disabled
+            
+        # Colors for highlighting the colliding links
+        COLLISION_COLOR_A = [1, 0, 0, 0.7]  # Red with alpha
+        COLLISION_COLOR_B = [1, 0.5, 0, 0.7]  # Orange with alpha
+        
+        # Save the original visual states of the links
+        link_a_visual_state = p.getVisualShapeData(self.robot.robot_id, link_a, physicsClientId=self.client_id)
+        link_b_visual_state = p.getVisualShapeData(self.robot.robot_id, link_b, physicsClientId=self.client_id)
+        
+        # Get the positions of the colliding links
+        link_a_state = p.getLinkState(self.robot.robot_id, link_a, physicsClientId=self.client_id)
+        link_b_state = p.getLinkState(self.robot.robot_id, link_b, physicsClientId=self.client_id)
+        link_a_pos = link_a_state[0]
+        link_b_pos = link_b_state[0]
+        
+        # Create temporary visual markers to highlight collision
+        marker_a = p.createVisualShape(
+            shapeType=p.GEOM_SPHERE,
+            radius=0.05,
+            rgbaColor=COLLISION_COLOR_A,
+            physicsClientId=self.client_id
+        )
+        
+        marker_b = p.createVisualShape(
+            shapeType=p.GEOM_SPHERE,
+            radius=0.05,
+            rgbaColor=COLLISION_COLOR_B,
+            physicsClientId=self.client_id
+        )
+        
+        # Create bodies for the markers (no physics)
+        marker_body_a = p.createMultiBody(
+            baseMass=0,
+            baseCollisionShapeIndex=-1,
+            baseVisualShapeIndex=marker_a,
+            basePosition=link_a_pos,
+            physicsClientId=self.client_id
+        )
+        
+        marker_body_b = p.createMultiBody(
+            baseMass=0,
+            baseCollisionShapeIndex=-1,
+            baseVisualShapeIndex=marker_b,
+            basePosition=link_b_pos,
+            physicsClientId=self.client_id
+        )
+        
+        # Draw a line between the collision points
+        line_id = p.addUserDebugLine(
+            link_a_pos,
+            link_b_pos,
+            lineColorRGB=[1, 0, 0],
+            lineWidth=3.0,
+            lifeTime=0.5,  # 0.5 seconds
+            physicsClientId=self.client_id
+        )
+        
+        # Store markers for cleanup
+        self.collision_markers = [marker_body_a, marker_body_b]
+        self.collision_line = line_id
+        
+        # Log details about the collision
+        if self.verbose:
+            print(f"Visualizing collision between links {link_a} and {link_b}")
+            print(f"Link {link_a} position: {link_a_pos}")
+            print(f"Link {link_b} position: {link_b_pos}")
+            print(f"Distance between links: {np.linalg.norm(np.array(link_a_pos) - np.array(link_b_pos)):.4f}m")
+
+    def _visualize_curl_warning(self):
+        """
+        Creates a visual warning when the robot is detected in a curled-up posture.
+        This helps debug and identify when the robot is exhibiting the unwanted behavior.
+        """
+        # Skip visualization if we're in headless mode
+        if not hasattr(self, 'gui') or not self.gui:
+            return  # Skip visualization if rendering is disabled
+            
+        # Position the warning above the robot
+        warning_pos = self.home_position + np.array([0, 0, 0.6])
+        
+        # Get curl factor if available, otherwise use default message
+        curl_msg = "CURL DETECTED!"
+        if hasattr(self, 'last_curl_factor'):
+            curl_percentage = int(self.last_curl_factor * 100)
+            curl_msg = f"CURL: {curl_percentage}%"
+            
+            # Adjust color based on severity (more red for higher curl factor)
+            r = 1.0
+            g = max(0, 1.0 - self.last_curl_factor)
+            b = 0
+            color = [r, g, b]
+        else:
+            color = [1, 0, 0]  # Default red
+        
+        # Create a warning text
+        text_id = p.addUserDebugText(
+            curl_msg,
+            warning_pos,
+            textColorRGB=color,
+            textSize=1.5,
+            lifeTime=1.0,  # Show for 1 second
+            physicsClientId=self.client_id
+        )
+        
+        # Create a warning sphere with color based on curl severity
+        warning_visual = p.createVisualShape(
+            shapeType=p.GEOM_SPHERE,
+            radius=0.05,
+            rgbaColor=color + [0.7],  # Add alpha channel
+            physicsClientId=self.client_id
+        )
+        
+        warning_body = p.createMultiBody(
+            baseMass=0,
+            baseCollisionShapeIndex=-1,
+            baseVisualShapeIndex=warning_visual,
+            basePosition=warning_pos,
+            physicsClientId=self.client_id
+        )
+        
+        # Store for cleanup
+        self.curl_warning_markers = [warning_body]
+        self.curl_warning_text = text_id
 
 # Custom neural network architecture for the policy with the new requirements
 class CustomActorCriticNetwork(nn.Module):
@@ -2372,12 +2674,13 @@ def get_best_timeout_reward():
 class ModelUpdateCallback(BaseCallback):
     """
     Callback to update model weights when robots complete episodes.
-    All robots contribute to the model updates rather than just the best-performing one.
+    Updates only occur when a robot improves its position compared to the initial position.
     """
     def __init__(self, verbose=0):
         super(ModelUpdateCallback, self).__init__(verbose)
         self.update_count = 0
         self.robot_contributions = {}  # Track which robots have contributed to the current update
+        self.skipped_updates = 0  # Track how many updates were skipped due to no improvement
         
     def _on_step(self):
         """Process model updates from all robots in parallel"""
@@ -2391,6 +2694,8 @@ class ModelUpdateCallback(BaseCallback):
         envs_completed = []
         rewards_achieved = []
         distances_achieved = []
+        improvements = []
+        envs_with_improvement = []
         
         # Get all active environments
         vec_env = self.training_env
@@ -2402,7 +2707,7 @@ class ModelUpdateCallback(BaseCallback):
                 # This environment has completed an episode
                 envs_completed.append(i)
                 
-                # Get the reward and distance achieved
+                # Get the reward, distance, and improvement status
                 if hasattr(vec_env, 'infos') and vec_env.infos[i] is not None:
                     reward = vec_env.infos[i].get('reward', 0.0)
                     rewards_achieved.append(reward)
@@ -2410,11 +2715,20 @@ class ModelUpdateCallback(BaseCallback):
                     distance = vec_env.infos[i].get('distance_cm', float('inf')) / 100.0  # Convert to meters
                     distances_achieved.append(distance)
                     
+                    # Check if robot improved its position
+                    position_improved = vec_env.infos[i].get('position_improved', False)
+                    improvement_amount = vec_env.infos[i].get('improvement_amount', 0.0) / 100.0  # Convert to meters
+                    improvements.append(improvement_amount)
+                    
+                    # Only consider environments that showed improvement
+                    if position_improved:
+                        envs_with_improvement.append(i)
+                    
                     # Check if target was reached
                     target_reached = vec_env.infos[i].get('target_reached', False)
                     
                     if target_reached:
-                        # Target reached - trigger a model update and log it
+                        # Target reached - this should always be an improvement
                         if self.verbose > 0:
                             print(f"\n{'='*60}")
                             print(f"TARGET REACHED by Robot {i}!")
@@ -2426,31 +2740,44 @@ class ModelUpdateCallback(BaseCallback):
         # If no environments completed episodes, return
         if not envs_completed:
             return True
+         
+        # Only update if at least one robot showed improvement
+        if len(envs_with_improvement) > 0:
+            # If we have completed episodes with improvement, update the model
+            self.update_count += 1
             
-        # If we have completed episodes, update the model
-        self.update_count += 1
-        
-        # Print information about the update
-        if self.verbose > 0:
-            avg_reward = np.mean(rewards_achieved) if rewards_achieved else 0.0
-            avg_distance = np.mean(distances_achieved) if distances_achieved else float('inf')
+            # Print information about the update
+            if self.verbose > 0:
+                avg_reward = np.mean(rewards_achieved) if rewards_achieved else 0.0
+                avg_distance = np.mean(distances_achieved) if distances_achieved else float('inf')
+                avg_improvement = np.mean(improvements) if improvements else 0.0
+                
+                print(f"\n{'='*60}")
+                print(f"MODEL UPDATE #{self.update_count}: {len(envs_with_improvement)}/{len(envs_completed)} robots showed improvement")
+                print(f"Average reward: {avg_reward:.4f}")
+                print(f"Average distance: {avg_distance*100:.2f}cm")
+                print(f"Average improvement: {avg_improvement*100:.2f}cm")
+                print(f"Updating shared model weights with experiences from improved robots.")
+                print(f"{'='*60}\n")
             
-            print(f"\n{'='*60}")
-            print(f"MODEL UPDATE #{self.update_count}: {len(envs_completed)} robots contributed")
-            print(f"Average reward: {avg_reward:.4f}")
-            print(f"Average distance: {avg_distance*100:.2f}cm")
-            print(f"Updating shared model weights with all robot experiences.")
-            print(f"{'='*60}\n")
-        
-        # Limit the episode info buffer to prevent memory growth
-        limit_ep_info_buffer(self.model, max_size=100)
-        
-        # Update the shared model with the current model weights from all robots
-        # This ensures all robots contribute to the same version of the model
-        model_version = increment_shared_model_version()
-        
-        if self.verbose > 0:
-            print(f"Updated shared model to version {model_version}")
+            # Limit the episode info buffer to prevent memory growth
+            limit_ep_info_buffer(self.model, max_size=100)
+            
+            # Update the shared model with the current model weights from improved robots
+            model_version = increment_shared_model_version()
+            
+            if self.verbose > 0:
+                print(f"Updated shared model to version {model_version}")
+        else:
+            # No robots showed improvement, skip the update
+            self.skipped_updates += 1
+            
+            if self.verbose > 0:
+                print(f"\n{'='*60}")
+                print(f"MODEL UPDATE SKIPPED #{self.skipped_updates}: No robots showed improvement")
+                print(f"Completed episodes: {len(envs_completed)}")
+                print(f"Not updating model weights to avoid learning bad behaviors")
+                print(f"{'='*60}\n")
         
         # Force target repositioning for all robots by updating the target randomization time
         update_target_randomization_time()
