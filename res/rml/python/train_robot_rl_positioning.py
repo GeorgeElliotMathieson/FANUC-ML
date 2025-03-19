@@ -16,11 +16,13 @@ import traceback
 import json
 import math
 import random  # Add this import for random.choice()
+import matplotlib.pyplot as plt
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple, Union
 # Ignore the linter error for pybullet - it's installed but the linter can't find it
 import pybullet as p  # type: ignore
 from stable_baselines3 import SAC
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
@@ -29,8 +31,6 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_checker import check_env
 import gymnasium as gym
 from gymnasium import spaces
-import matplotlib.pyplot as plt
-from datetime import datetime
 import psutil  # type: ignore
 import warnings
 import logging
@@ -57,12 +57,16 @@ parser.add_argument('--steps', type=int, default=50000, help='Total number of tr
 parser.add_argument('--target-accuracy', type=float, default=0.5, help='Target accuracy in cm')
 parser.add_argument('--debug', action='store_true', help='Enable debug mode with more verbose output')
 parser.add_argument('--load', type=str, default=None, help='Load a pre-trained model to continue training')
+parser.add_argument('--model-path', type=str, default=None, help='Alias for --load, path to load model from')
 parser.add_argument('--eval-only', action='store_true', help='Only run evaluation on a pre-trained model')
 parser.add_argument('--gui', action='store_true', default=True, help='Enable GUI visualization (enabled by default)')
 parser.add_argument('--no-gui', action='store_true', help='Disable GUI visualization (headless mode)')
 parser.add_argument('--viz-speed', type=float, default=0.0, help='Control visualization speed (delay in seconds, 0.0 = real-time with no delay, higher = slower)')
 parser.add_argument('--parallel', type=int, default=2, help='Number of parallel environments (default: 2)')
+parser.add_argument('--robots', type=int, default=4, help='Number of robots to use')
 parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in view), default: True')
+parser.add_argument('--target-randomization', action='store_true', help='Randomize target positions')
+parser.add_argument('--train', action='store_true', help='Train the model (default if not in eval-only mode)')
 parser.add_argument('--workspace-size', type=float, default=0.7, help='Size of the workspace for target positions')
 parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (default: sac)')
 parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate for the optimizer (default: 0.001)')
@@ -697,7 +701,7 @@ class RobotPositioningEnv(gym.Env):
     """
     metadata = {'render.modes': ['human']}
     
-    def __init__(self, gui=True, gui_delay=0.0, workspace_size=0.7, clean_viz=False, viz_speed=0.0, verbose=False, parallel_viz=False, rank=0, offset_x=0.0):
+    def __init__(self, gui=True, gui_delay=0.0, workspace_size=0.7, clean_viz=False, viz_speed=0.0, verbose=False, parallel_viz=False, rank=0, offset_x=0.0, offset_y=0.0):
         """
         Initialize the robot positioning environment
         
@@ -709,8 +713,9 @@ class RobotPositioningEnv(gym.Env):
             viz_speed: Speed of visualization (0.0 for realtime, higher for slow motion)
             verbose: Whether to print verbose output
             parallel_viz: Whether this is a parallel visualization environment
-            rank: Rank of this environment (for parallel environments)
-            offset_x: X offset for the robot (for parallel visualization)
+            rank: The rank of this environment (used for parallel envs)
+            offset_x: X offset for the robot position in the parallel viz mode
+            offset_y: Y offset for the robot position in the parallel viz mode
         """
         # Store arguments
         self.gui = gui
@@ -722,6 +727,7 @@ class RobotPositioningEnv(gym.Env):
         self.parallel_viz = parallel_viz
         self.rank = rank
         self.offset_x = offset_x
+        self.offset_y = offset_y
         
         # Create the PyBullet client first
         self.client_id = get_shared_pybullet_client(render=gui)
@@ -887,6 +893,10 @@ class RobotPositioningEnv(gym.Env):
         if hasattr(self, 'first_env_reset_done'):
             self.episode_count += 1
             
+            # Reset the robot distances at the start of a new episode for robot 0
+            if self.rank == 0:
+                reset_robot_distances()
+                
             # Check if we need to update curriculum progress based on the last episode's performance
             if hasattr(self, 'best_distance_in_episode'):
                 # Consider episode successful if we got within the target threshold
@@ -1183,14 +1193,6 @@ class RobotPositioningEnv(gym.Env):
             reward += distance_reward
             info["distance_reward"] = distance_reward
             
-            # Remove compactness penalty
-            
-            # Remove center penalty
-            
-            # Remove ground collision penalty
-            
-            # Remove end effector self-collision penalty
-            
             # Check timeout
             if self.steps >= self.timeout_steps:
                 done = True
@@ -1208,10 +1210,8 @@ class RobotPositioningEnv(gym.Env):
             info["best_distance"] = self.best_distance_in_episode * 100  # Convert to cm
             info["best_position"] = self.best_position_in_episode
             
-            # Log when the robot achieves a distance within the curriculum threshold
-            if distance <= self.target_expansion_threshold and self.verbose:
-                print(f"\nRobot {self.rank}: Achieved curriculum threshold distance: {distance*100:.2f}cm!")
-                print(f"Current curriculum level: {self.curriculum_level}, max target distance: {self.max_target_distance:.2f}m\n")
+            # Update the global distance tracker (in cm)
+            update_robot_distance(self.rank, self.best_distance_in_episode * 100)
         
         # Check if the robot's best position is better than its initial position
         # This will be used to determine if model updates should occur
@@ -1223,7 +1223,7 @@ class RobotPositioningEnv(gym.Env):
         info["improvement_amount"] = improvement_amount * 100  # Convert to cm
         info["initial_distance"] = self.initial_distance_to_target * 100  # Convert to cm
         
-        # If the episode is ending, log the improvement information
+        # If the episode is ending, log improvement information only if verbose is enabled
         if done and self.verbose:
             if position_improved:
                 print(f"\nRobot {self.rank}: Position IMPROVED by {improvement_amount*100:.2f}cm")
@@ -1268,13 +1268,13 @@ class RobotPositioningEnv(gym.Env):
         robot_pos, robot_orn = p.getBasePositionAndOrientation(self.robot.robot_id, physicsClientId=self.robot.client)
         
         # Apply the offset
-        new_pos = (robot_pos[0] + self.offset_x, robot_pos[1], robot_pos[2])
+        new_pos = (robot_pos[0] + self.offset_x, robot_pos[1] + self.offset_y, robot_pos[2])
         
         # Set the new position
         p.resetBasePositionAndOrientation(self.robot.robot_id, new_pos, robot_orn, physicsClientId=self.robot.client)
         
         if self.verbose:
-            print(f"Applied offset of {self.offset_x} to Robot {self.rank}")
+            print(f"Applied offset of ({self.offset_x}, {self.offset_y}) to Robot {self.rank}")
             print(f"Robot {self.rank} positioned at [{new_pos[0]:.2f}, {new_pos[1]:.2f}, {new_pos[2]:.2f}]")
     
     def _visualize_reachable_workspace(self):
@@ -1951,17 +1951,24 @@ class CustomFeaturesExtractor(BaseFeaturesExtractor):
 
 # Callback for saving models and logging
 class SaveModelCallback(BaseCallback):
+    """
+    Callback for saving a model every `save_freq` steps
+    """
     def __init__(self, save_freq, save_path, verbose=1):
         super(SaveModelCallback, self).__init__(verbose)
         self.save_freq = save_freq
         self.save_path = save_path
-    
-    def _on_step(self):
+        
+    def _init_callback(self) -> None:
+        # Create folder if needed
+        os.makedirs(self.save_path, exist_ok=True)
+        
+    def _on_step(self) -> bool:
         if self.n_calls % self.save_freq == 0:
-            model_path = f"{self.save_path}/model_{self.n_calls}_steps"
+            model_path = os.path.join(self.save_path, f"model_{self.n_calls}")
             self.model.save(model_path)
             if self.verbose > 0:
-                print(f"Model saved to {model_path}")
+                print(f"Saving model to {model_path}")
         return True
 
 # Add this class to monitor and report training progress
@@ -2398,7 +2405,8 @@ def create_multiple_robots_in_same_env(num_robots=3, viz_speed=0.1, verbose=Fals
             viz_speed=viz_speed,
             parallel_viz=True,
             rank=i,
-            offset_x=x_offset
+            offset_x=x_offset,
+            offset_y=y_offset
         )
         
         # Set the scaled timeout steps
@@ -2576,121 +2584,124 @@ def get_best_timeout_reward():
 # Add a ModelUpdateCallback class to handle model weight updates
 class ModelUpdateCallback(BaseCallback):
     """
-    Callback to update model weights when robots complete episodes.
-    Updates only occur when a robot improves its position compared to the initial position.
+    Custom callback for model weight update based on robot performance
     """
-    def __init__(self, verbose=0):
-        super(ModelUpdateCallback, self).__init__(verbose)
-        self.update_count = 0
-        self.robot_contributions = {}  # Track which robots have contributed to the current update
-        self.skipped_updates = 0  # Track how many updates were skipped due to no improvement
+    def __init__(
+        self, 
+        n_robots,
+        n_updates=8, 
+        check_freq=20000, 
+        improvement_margin = 0.1,
+        verbose=0
+    ):
+        super().__init__(verbose)
+        self.n_robots = n_robots
+        self.n_updates = n_updates
+        self.check_freq = check_freq
+        self.improvement_margin = improvement_margin
+        self.verbose = verbose
+        self.experiences = []
+        self.robot_updated = [False] * n_robots
+        self.robot_rank = [i for i in range(n_robots)]
+        self.robot_contributions = [0] * n_robots
+        self.last_print_time = time.time()
+        self.print_interval = 60  # Print every 60 seconds
         
-    def _on_step(self):
-        """Process model updates from all robots in parallel"""
-        
-        # Check if an episode has completed (either by reaching target or timeout)
-        # This is key: instead of having one "best" robot update the model,
-        # we'll collect experiences from all completed episodes
-        
-        # Rather than checking a global update flag, we'll gather updates from
-        # all environments that have completed episodes in this step
-        envs_completed = []
-        rewards_achieved = []
-        distances_achieved = []
-        improvements = []
-        envs_with_improvement = []
-        
-        # Get all active environments
-        vec_env = self.training_env
-        
-        # Check all environments for completed episodes
-        for i in range(vec_env.num_envs):
-            # Check if this environment has completed an episode
-            if hasattr(vec_env, 'dones') and vec_env.dones[i]:
-                # This environment has completed an episode
-                envs_completed.append(i)
+    def _init_callback(self) -> None:
+        # Initialize robot baseline distances
+        self.robot_min_distance = [float('inf')] * self.n_robots
+
+    def _on_step(self) -> bool:
+        # Skip if not at check frequency and no robots reached the target
+        if (self.num_timesteps % self.check_freq != 0 and 
+            not any(info.get('target_reached', False) for info in self.locals['infos'])):
+            
+            # Periodic printing (every 60 seconds)
+            current_time = time.time()
+            if current_time - self.last_print_time >= self.print_interval:
+                self.last_print_time = current_time
+                update_timesteps(self.num_timesteps)
                 
-                # Get the reward, distance, and improvement status
-                if hasattr(vec_env, 'infos') and vec_env.infos[i] is not None:
-                    reward = vec_env.infos[i].get('reward', 0.0)
-                    rewards_achieved.append(reward)
-                    
-                    distance = vec_env.infos[i].get('distance_cm', float('inf')) / 100.0  # Convert to meters
-                    distances_achieved.append(distance)
-                    
-                    # Check if robot improved its position
-                    position_improved = vec_env.infos[i].get('position_improved', False)
-                    improvement_amount = vec_env.infos[i].get('improvement_amount', 0.0) / 100.0  # Convert to meters
-                    improvements.append(improvement_amount)
-                    
-                    # Only consider environments that showed improvement
-                    if position_improved:
-                        envs_with_improvement.append(i)
-                    
-                    # Check if target was reached
-                    target_reached = vec_env.infos[i].get('target_reached', False)
-                    
-                    if target_reached:
-                        # Target reached - this should always be an improvement
-                        if self.verbose > 0:
-                            print(f"\n{'='*60}")
-                            print(f"TARGET REACHED by Robot {i}!")
-                            print(f"Distance to target: {distance*100:.2f}cm")
-                            print(f"Reward: {reward}")
-                            print(f"Robot {i} has reached the target and contributed to model update.")
-                            print(f"{'='*60}\n")
+                # Collect current distances for all robots
+                for robot_id, info in enumerate(self.locals['infos']):
+                    if 'distance_from_target' in info:
+                        distance = info['distance_from_target'] * 100  # Convert to cm
+                        update_robot_distance(robot_id, distance)
                 
-        # If no environments completed episodes, return
-        if not envs_completed:
+                # Print the current status 
+                print(f"\nSteps: {self.num_timesteps} | Current robot distances:")
+                print_ranked_distances()
+                
             return True
-         
-        # Only update if at least one robot showed improvement
-        if len(envs_with_improvement) > 0:
-            # If we have completed episodes with improvement, update the model
-            self.update_count += 1
+
+        # Update the global timesteps counter
+        update_timesteps(self.num_timesteps)
             
-            # Print information about the update
-            if self.verbose > 0:
-                avg_reward = np.mean(rewards_achieved) if rewards_achieved else 0.0
-                avg_distance = np.mean(distances_achieved) if distances_achieved else float('inf')
-                avg_improvement = np.mean(improvements) if improvements else 0.0
+        # Check if any robots reached the target
+        for robot_id, info in enumerate(self.locals['infos']):
+            # Check if this robot reached the target
+            if info.get('target_reached', False):
+                # Only process once per episode per robot
+                if robot_id == 0:  # Use robot 0 to avoid duplicate counting
+                    episode_num = increment_episode_count()
+                    print_ranked_distances(episode_num)
+                    reset_robot_distances()
+                    
+                    # Update metrics when episode completes
+                    episode_reward = info.get('episode_reward', 0.0)
+                    episode_length = info.get('episode_length', 0)
+                    final_distance = info.get('distance_from_target', 0.0) * 100  # Convert to cm
+                    update_training_metrics(episode_reward, episode_length, final_distance)
+                return True
                 
-                print(f"\n{'='*60}")
-                print(f"MODEL UPDATE #{self.update_count}: {len(envs_with_improvement)}/{len(envs_completed)} robots showed improvement")
-                print(f"Average reward: {avg_reward:.4f}")
-                print(f"Average distance: {avg_distance*100:.2f}cm")
-                print(f"Average improvement: {avg_improvement*100:.2f}cm")
-                print(f"Updating shared model weights with experiences from improved robots.")
-                print(f"{'='*60}\n")
-            
-            # Limit the episode info buffer to prevent memory growth
-            limit_ep_info_buffer(self.model, max_size=100)
-            
-            # Update the shared model with the current model weights from improved robots
-            model_version = increment_shared_model_version()
-            
-            if self.verbose > 0:
-                print(f"Updated shared model to version {model_version}")
-        else:
-            # No robots showed improvement, skip the update
-            self.skipped_updates += 1
-            
-            if self.verbose > 0:
-                print(f"\n{'='*60}")
-                print(f"MODEL UPDATE SKIPPED #{self.skipped_updates}: No robots showed improvement")
-                print(f"Completed episodes: {len(envs_completed)}")
-                print(f"Not updating model weights to avoid learning bad behaviors")
-                print(f"{'='*60}\n")
+            # Update distance for this robot
+            if 'distance_from_target' in info:
+                distance = info['distance_from_target'] * 100  # Convert to cm
+                update_robot_distance(robot_id, distance)
+                
+                # Check if this is a new minimum distance for this robot
+                if distance < self.robot_min_distance[robot_id] - self.improvement_margin:
+                    # Record contribution to model improvement
+                    self.robot_min_distance[robot_id] = distance
+                    self.robot_contributions[robot_id] += 1
+                    self.robot_updated[robot_id] = True
+                    
+                    # Collect experiences for model update
+                    latest_experience = {
+                        'obs': self.locals['new_obs'][robot_id],
+                        'actions': self.locals['actions'][robot_id],
+                        'rewards': self.locals['rewards'][robot_id],
+                        'dones': self.locals['dones'][robot_id],
+                        'infos': info,
+                        'robot_id': robot_id
+                    }
+                    self.experiences.append(latest_experience)
         
-        # Force target repositioning for all robots by updating the target randomization time
-        update_target_randomization_time()
-        
-        # Reset the best timeout tracking for the next round
-        reset_best_timeout_tracking()
-        
-        # Force garbage collection to free up memory
-        force_garbage_collection()
-        
+        # If at check frequency, process all collected experiences for model update
+        if self.num_timesteps % self.check_freq == 0:
+            if any(self.robot_updated):
+                # We have improvements to update the model with
+                n_updates = min(self.n_updates, len(self.experiences))
+                if n_updates > 0 and self.verbose > 0:
+                    print(f"Updating model with {n_updates} experiences")
+                
+                # Train on the collected experiences
+                for i in range(n_updates):
+                    if i < len(self.experiences):
+                        exp = self.experiences[i]
+                        # Process the experience here (depends on your RL implementation)
+                        # This is a placeholder - actual update logic would use the model's train method
+                 
+                # Reset for next round
+                self.experiences = []
+                self.robot_updated = [False] * self.n_robots
+             
+                if self.verbose > 0:
+                    # Only print contributions in verbose mode
+                    contributions = [f"Robot {i}: {count}" for i, count in enumerate(self.robot_contributions) if count > 0]
+                    if contributions:
+                        print(f"Robot contributions to model updates: {', '.join(contributions)}")
+         
         return True
 
 # Global variables for workspace data
@@ -2839,190 +2850,337 @@ def get_model_version():
     global _MODEL_VERSION
     return _MODEL_VERSION
 
-# Modify the main function to use the ModelUpdateCallback
+# Add a global dictionary to track robot distances
+_ROBOT_DISTANCES = {}
+_EPISODE_COUNT = 0
+_TOTAL_TIMESTEPS = 0
+_LAST_PRINT_TIME = 0
+
+# Global tracking variables for metrics
+_REWARD_HISTORY = []
+_EPISODE_LENGTH_HISTORY = []
+_DISTANCE_HISTORY = []
+
+def update_robot_distance(robot_rank, distance):
+    """Update the stored distance for a robot"""
+    global _ROBOT_DISTANCES
+    _ROBOT_DISTANCES[robot_rank] = distance
+
+def reset_robot_distances():
+    """Reset the stored robot distances"""
+    global _ROBOT_DISTANCES
+    _ROBOT_DISTANCES = {}
+
+def increment_episode_count():
+    """Increment the global episode counter"""
+    global _EPISODE_COUNT
+    _EPISODE_COUNT += 1
+    return _EPISODE_COUNT
+
+def update_timesteps(timesteps):
+    """Update the total timesteps counter"""
+    global _TOTAL_TIMESTEPS
+    _TOTAL_TIMESTEPS = timesteps
+
+def print_ranked_distances(episode_num=None):
+    """Print the robot distances ranked from closest to furthest"""
+    global _ROBOT_DISTANCES, _EPISODE_COUNT, _TOTAL_TIMESTEPS, _LAST_PRINT_TIME
+    
+    # Use provided episode number or global counter
+    if episode_num is None:
+        episode_num = _EPISODE_COUNT
+    
+    # Format episode info
+    current_time = time.time()
+    time_str = ""
+    if _LAST_PRINT_TIME > 0:
+        elapsed_time = current_time - _LAST_PRINT_TIME
+        time_str = f" | {elapsed_time:.1f}s"
+    _LAST_PRINT_TIME = current_time
+    
+    episode_str = f"Episode {episode_num} | Steps: {_TOTAL_TIMESTEPS}{time_str} | "
+    
+    if not _ROBOT_DISTANCES:
+        print(f"{episode_str}No robot distances available yet")
+        return
+        
+    # Sort robots by distance (closest first)
+    sorted_robots = sorted(_ROBOT_DISTANCES.items(), key=lambda x: x[1])
+    
+    # Format distances
+    distances_str = ", ".join([f"Robot {rank}: {distance:.2f}cm" for rank, distance in sorted_robots])
+    
+    # Print the clean, simple output
+    print(f"{episode_str}Distances (closest to furthest): {distances_str}")
+
+def update_training_metrics(reward, episode_length, distance=None):
+    """Update the training metrics history"""
+    global _REWARD_HISTORY, _EPISODE_LENGTH_HISTORY, _DISTANCE_HISTORY
+    _REWARD_HISTORY.append(reward)
+    _EPISODE_LENGTH_HISTORY.append(episode_length)
+    if distance is not None:
+        _DISTANCE_HISTORY.append(distance)
+
+def plot_training_metrics(output_path):
+    """Plot training metrics and save to file"""
+    plt.figure(figsize=(12, 8))
+    
+    # Plot episode reward
+    plt.subplot(2, 1, 1)
+    plt.title('Training Progress')
+    plt.plot(_REWARD_HISTORY, label='Episode Reward')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.legend()
+    
+    # Plot episode length and distance
+    plt.subplot(2, 1, 2)
+    plt.plot(_EPISODE_LENGTH_HISTORY, label='Episode Length (steps)')
+    
+    if _DISTANCE_HISTORY:
+        plt.plot(_DISTANCE_HISTORY, label='Final Distance (cm)')
+    
+    plt.xlabel('Episode')
+    plt.ylabel('Value')
+    plt.legend()
+    
+    # Save the figure
+    plt.tight_layout()
+    plt.savefig(output_path)
+    print(f"Training metrics saved to {output_path}")
+
 def main():
-    """Main function for training the robot."""
+    """Main training loop entrypoint"""
+    # Set up logging
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    
     # Parse command line arguments
     args = parse_args()
     
+    # Ensure backward compatibility attributes exist
+    if not hasattr(args, 'load'):
+        args.load = None
+        
+    if not hasattr(args, 'model_path'):
+        args.model_path = None
+    
+    # For backward compatibility
+    if args.model_path is None and args.load is not None:
+        args.model_path = args.load
+    
+    # Ensure required attributes
+    if not hasattr(args, 'target_randomization'):
+        args.target_randomization = False
+        
+    if not hasattr(args, 'clean_viz'):
+        args.clean_viz = False
+        
+    if not hasattr(args, 'disable_bounds_collision'):
+        args.disable_bounds_collision = False
+        
+    if not hasattr(args, 'robots'):
+        args.robots = args.parallel
+        
+    if not hasattr(args, 'learning_starts'):
+        args.learning_starts = 10000
+    
+    if not hasattr(args, 'save_freq'):
+        args.save_freq = 5000
+    
+    if not hasattr(args, 'save_dir'):
+        args.save_dir = './models'
+    
+    # If not explicitly set, training is the default mode unless eval_only is specified
+    if not hasattr(args, 'train'):
+        args.train = not args.eval_only
+    
+    # Print hardware info if debug is enabled
+    if args.debug or args.verbose:
+        print_hardware_info(args)
+    
     # Set random seed for reproducibility
     if args.seed is not None:
+        print(f"Setting random seed to {args.seed}")
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(args.seed)
-            torch.cuda.manual_seed_all(args.seed)
+        set_random_seed(args.seed)
     
-    # Print hardware information
-    print_hardware_info(args)
+    # Get workspace data
+    workspace_data = load_workspace_data(verbose=args.verbose)
     
-    # Print a message about bounds collision being disabled
-    print(f"\nWorkspace bounds collision is permanently disabled in this version")
+    # Number of robots to use - for backward compatibility
+    n_robots = args.robots if hasattr(args, 'robots') else args.parallel
     
-    # Ensure gui is enabled if viz_speed > 0
-    if args.viz_speed > 0.0:
-        args.gui = True
-        print(f"Setting GUI mode to True because viz_speed > 0")
+    # Create the environment
+    env = create_robot_env(
+        n_robots=n_robots, 
+        target_randomization=args.target_randomization if hasattr(args, 'target_randomization') else False,
+        workspace_size=args.workspace_size,
+        gui=args.gui,
+        viz_speed=args.viz_speed,
+        parallel_viz=args.parallel_viz,
+        clean_viz=args.clean_viz if hasattr(args, 'clean_viz') else False,
+        disable_bounds_collision=args.disable_bounds_collision if hasattr(args, 'disable_bounds_collision') else False,
+        log_dir=log_dir
+    )
+    
+    # Wrap environment for stable baselines compatibility
+    if not isinstance(env, DummyVecEnv):
+        env = RLWrapper(env)
+        # Normalize observations for SAC
+        env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0)
+    
+    # Define the model
+    device = "cuda" if args.use_cuda and torch.cuda.is_available() else "cpu"
+    if args.debug or args.verbose:
+        print(f"Using {device} for training")
+    
+    model = SAC(
+        "MlpPolicy", 
+        env, 
+        verbose=1 if args.verbose else 0,
+        learning_rate=args.learning_rate,
+        buffer_size=args.buffer_size,
+        batch_size=args.batch_size,
+        train_freq=args.train_freq,
+        gradient_steps=args.gradient_steps,
+        learning_starts=args.learning_starts,
+        ent_coef="auto",
+        tensorboard_log=log_dir,
+        device=device
+    )
+    
+    # Load model if specified
+    model_path = None
+    if hasattr(args, 'model_path') and args.model_path is not None:
+        model_path = args.model_path
+    elif hasattr(args, 'load') and args.load is not None:
+        model_path = args.load
         
-    # Load workspace data
-    load_workspace_data(verbose=True)
+    if model_path is not None and os.path.exists(model_path):
+        print(f"Loading model from {model_path}")
+        model = SAC.load(model_path, env=env)
     
-    # Create environments
-    if args.parallel_viz and args.gui:
-        print(f"Using {args.parallel} robots in the same environment with visualization")
-        envs = create_multiple_robots_in_same_env(
-            num_robots=args.parallel,
-            viz_speed=args.viz_speed,
-            verbose=args.verbose
+    # Create a custom callback
+    model_update_callback = ModelUpdateCallback(
+        n_robots=n_robots,
+        n_updates=8,
+        check_freq=20000,
+        verbose=1 if args.verbose else 0
+    )
+    
+    # Add save callback if save frequency is specified
+    callbacks = [model_update_callback]
+    if hasattr(args, 'save_freq') and args.save_freq > 0:
+        save_callback = SaveModelCallback(
+            save_freq=args.save_freq, 
+            save_path=args.save_dir,
+            verbose=1 if args.verbose else 0
         )
-    else:
-        # For visualization without parallel-viz, use a single environment
-        if args.gui and not args.parallel_viz:
-            print("Using a single environment with visualization")
-            args.parallel = 1
-        elif args.gui and args.parallel_viz:
-            print(f"Using {args.parallel} environments with parallel visualization")
-            
-        # Create environments using the standard method
-        envs = create_envs(
-            num_envs=args.parallel,
-            viz_speed=args.viz_speed if args.gui else 0.0,
-            parallel_viz=args.parallel_viz,
-            eval_env=args.eval_only
-            # disable_bounds_collision parameter removed as it's permanently disabled
-        )
-    
-    # Wrap environments with VecEnv
-    if args.parallel > 1:
-        # Use DummyVecEnv for multiple environments to avoid subprocess issues
-        vec_env = DummyVecEnv([lambda env=env: env for env in envs])
-    else:
-        # Use DummyVecEnv for a single environment
-        vec_env = DummyVecEnv([lambda: envs[0]])
-    
-    # Create the model
-    if args.load:
-        print(f"Loading model from {args.load}")
-        model = SAC.load(args.load, env=vec_env)
-    else:
-        print("Creating new SAC model")
-        model = SAC(
-            "MlpPolicy",
-            vec_env,
-            learning_rate=args.learning_rate,
-            verbose=1,
-            device="cuda" if args.use_cuda and torch.cuda.is_available() else "cpu"
-        )
-    
-    # Initialize the shared model
-    set_shared_model(model)
+        callbacks.append(save_callback)
     
     # Evaluation mode
     if args.eval_only:
         print(f"Evaluating model for {args.eval_episodes} episodes")
         mean_reward, std_reward = evaluate_policy(
             model, 
-            vec_env, 
+            env, 
             n_eval_episodes=args.eval_episodes,
             deterministic=True
         )
         print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
-        vec_env.close()
-        return
+        env.close()
+        return 0
     
-    # Create the model update callback
-    model_update_callback = ModelUpdateCallback(verbose=1)
-    
-    # Force target repositioning at the beginning of training
-    # This ensures all robots get new targets right from the start
-    set_target_reached_flag()
-    update_target_randomization_time()
-    if args.verbose:
-        print("Forcing initial target repositioning for all robots")
-    
-    # Training mode
-    print(f"Training for {args.steps} steps")
-    print("When any robot reaches the target with 1mm precision:")
-    print("1. Model weights will be updated from that successful run")
-    print("2. All robots will reset and start a new run with the updated model")
-    print("\nIf no robot reaches the target within the time limit:")
-    print("1. The robot that achieved the best accuracy will be used for model updates")
-    print("2. Model weights will only be updated if the best distance is within 5cm of the target")
-    print("3. All robots will reset and start a new run with the updated model")
-    
-    print("\nCollision detection:")
-    print("1. Ground collisions are detected and penalized")
-    print("2. End effector self-collisions are detected and penalized")
-    print("3. Other robot parts can clip through each other (simplified physical model)")
-    
-    model.learn(total_timesteps=args.steps, callback=model_update_callback)
-    
-    # Save the model
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_dir = f"./models/{args.algorithm}_{timestamp}"
-    os.makedirs(model_dir, exist_ok=True)
-    model_path = f"{model_dir}/final_model"
-    model.save(model_path)
-    print(f"Model saved to {model_path}")
-    
-    # Plot training metrics
-    if hasattr(model, "ep_info_buffer") and len(model.ep_info_buffer) > 0:
-        plot_dir = "./plots"
-        os.makedirs(plot_dir, exist_ok=True)
-        plot_path = f"{plot_dir}/{args.algorithm}_{timestamp}_metrics.png"
-        plot_training_metrics(model, plot_path)
-        print(f"Training metrics saved to {plot_path}")
+    # Training mode - unless specifically in eval_only mode
+    if not args.eval_only:
+        print(f"Training for {args.steps} steps with {n_robots} robots")
         
-        # Also save a copy in the model directory
-        progress_plot_path = f"{model_dir}/training_progress.png"
-        plot_training_metrics(model, progress_plot_path)
-        print(f"Training progress plot saved to {progress_plot_path}")
-    else:
-        print("Not enough data to plot")
+        # Use CallbackList for multiple callbacks
+        callback = CallbackList(callbacks)
+        
+        # Train the model
+        model.learn(
+            total_timesteps=args.steps,
+            callback=callback
+        )
+        
+        # Save the model
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_dir = os.path.join(args.save_dir, f"{args.algorithm}_{timestamp}")
+        os.makedirs(model_dir, exist_ok=True)
+        model_path = os.path.join(model_dir, "final_model")
+        model.save(model_path)
+        print(f"Model saved to {model_path}")
+        
+        # Plot training metrics
+        plot_path = os.path.join(model_dir, "training_metrics.png")
+        plot_training_metrics(plot_path)
+        print(f"Training metrics saved to {plot_path}")
     
     # Close the environment
-    vec_env.close()
+    env.close()
+    
+    return 0
 
 def parse_args():
     """Parse command line arguments."""
-    # Create argument parser
     parser = argparse.ArgumentParser(description='Train a robot arm for precise end effector positioning')
-    parser.add_argument('--steps', type=int, default=999999999, help='Total number of training steps')
-    parser.add_argument('--target-accuracy', type=float, default=0.5, help='Target accuracy in cm')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode with more verbose output')
-    parser.add_argument('--load', type=str, default=None, help='Load a pre-trained model to continue training')
+    
+    # Environment settings
+    parser.add_argument('--robots', type=int, default=4, help='Number of robots to use')
+    parser.add_argument('--parallel', type=int, default=4, help='Number of parallel environments (default: 4)')
+    parser.add_argument('--target-randomization', action='store_true', help='Randomize target positions')
+    parser.add_argument('--workspace-size', type=float, default=0.7, help='Size of the workspace for target positions')
+    parser.add_argument('--disable-bounds-collision', action='store_true', help='Disable workspace boundary collisions')
+    
+    # Training settings
+    parser.add_argument('--train', action='store_true', help='Train the model')
+    parser.add_argument('--steps', type=int, default=1000000, help='Number of timesteps to train for')
+    parser.add_argument('--model-path', '--load', type=str, default=None, help='Path to load model from')
     parser.add_argument('--save-dir', type=str, default='./models', help='Directory to save models to')
+    parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
+    
+    # Model hyperparameters
+    parser.add_argument('--learning-rate', type=float, default=0.0003, help='Learning rate')
+    parser.add_argument('--buffer-size', type=int, default=1000000, help='Replay buffer size')
+    parser.add_argument('--batch-size', type=int, default=256, help='Batch size for training')
+    parser.add_argument('--train-freq', type=int, default=1, help='Training frequency')
+    parser.add_argument('--gradient-steps', type=int, default=1, help='Gradient steps per update')
+    parser.add_argument('--learning-starts', type=int, default=10000, help='Learning starts after this many steps')
+    parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (default: sac)')
+    
+    # Evaluation settings
     parser.add_argument('--eval-only', action='store_true', help='Only run evaluation on a pre-trained model')
+    parser.add_argument('--eval-episodes', type=int, default=5, help='Number of episodes for evaluation')
+    
+    # Visualization settings
     parser.add_argument('--gui', action='store_true', default=True, help='Enable GUI visualization (enabled by default)')
     parser.add_argument('--no-gui', action='store_true', help='Disable GUI visualization (headless mode)')
-    parser.add_argument('--parallel', type=int, default=2, help='Number of parallel environments (default: 2)')
-    parser.add_argument('--parallel-viz', action='store_true', default=True, help='Enable parallel visualization (multiple robots in same view), default: True')
-    parser.add_argument('--workspace-size', type=float, default=0.7, help='Size of the workspace for target positions')
-    parser.add_argument('--algorithm', type=str, default='sac', choices=['sac'], help='RL algorithm to use (default: sac)')
-    parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate for the optimizer (default: 0.001)')
-    parser.add_argument('--batch-size', type=int, default=256, help='Batch size for updates (default: 256, balanced for learning)')
-    parser.add_argument('--buffer-size', type=int, default=1000000, help='Replay buffer size for SAC (default: 1M, larger for better stability)')
-    parser.add_argument('--train-freq', type=int, default=1, help='Update frequency for SAC (default: 1, update every step)')
-    parser.add_argument('--gradient-steps', type=int, default=1, help='Gradient steps per update for SAC (default: 1, balanced learning)')
-    parser.add_argument('--eval-freq', type=int, default=2000, help='Evaluation frequency in steps')
-    parser.add_argument('--eval-episodes', type=int, default=5, help='Number of episodes for evaluation')
-    parser.add_argument('--save-freq', type=int, default=5000, help='Model saving frequency in steps')
     parser.add_argument('--clean-viz', action='store_true', help='Enable clean visualization with zoomed-in view of the robot')
-    parser.add_argument('--eval-viz', action='store_true', help='Enable visualization for evaluation only')
-    parser.add_argument('--high-lr', action='store_true', help='Use a higher learning rate (1e-3) for faster learning')
-    parser.add_argument('--viz-speed', type=float, default=0.0, help='Control visualization speed (delay in seconds, 0.0 = real-time with no delay, higher = slower)')
+    parser.add_argument('--parallel-viz', action='store_true', default=False, help='Enable parallel visualization (multiple robots in same view)')
+    parser.add_argument('--viz-speed', type=float, default=0.0, help='Control visualization speed (delay in seconds)')
+    
+    # Debug and performance settings
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode with more verbose output')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output for debugging')
     parser.add_argument('--cuda', dest='use_cuda', action='store_true', help='Use CUDA for training if available')
     parser.add_argument('--cpu', dest='use_cuda', action='store_false', help='Use CPU for training even if CUDA is available')
-    parser.add_argument('--optimize-training', action='store_true', help='Enable optimized training settings for faster learning', default=True)
-    parser.add_argument('--verbose', action='store_true', help='Enable verbose output for debugging')
-    parser.add_argument('--exploration', type=float, default=0.2, help='Initial exploration rate (higher values = more exploration)')
-    parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
-    parser.add_argument('--disable-bounds-collision', action='store_true', help='Disable workspace boundary collisions')
+    
     args = parser.parse_args()
     
     # Handle gui/no-gui conflict
     if args.no_gui:
         args.gui = False
+        
+    # Ensure compatibility with our refactored code
+    if not hasattr(args, 'train'):
+        args.train = not args.eval_only
+        
+    # For backward compatibility
+    if not hasattr(args, 'model_path') and hasattr(args, 'load'):
+        args.model_path = args.load
     
     return args
 
@@ -3091,6 +3249,90 @@ def force_garbage_collection():
         print(f"Memory usage after GC: {memory_mb:.1f} MB")
     except ImportError:
         pass  # Silently ignore if psutil is not available
+
+class RLWrapper(gym.Wrapper):
+    """Wrapper for gymnasium compatibility with stable-baselines3"""
+    def __init__(self, env):
+        super().__init__(env)
+        self.env = env
+        
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        # Convert to SB3 format (obs, reward, terminated, truncated, info)
+        return obs, reward, done, False, info
+        
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        # Convert to SB3 format (obs, info)
+        return obs, {}
+
+def create_robot_env(n_robots, target_randomization, workspace_size=0.7, 
+                  gui=True, viz_speed=0.0, parallel_viz=False, clean_viz=False,
+                  disable_bounds_collision=False, log_dir=None):
+    """Create a robot environment for RL training"""
+    # For compatibility with existing code, use the RobotPositioningEnv directly
+    if 'RobotPositioningEnv' in globals():
+        # Create environment creation functions
+        env_fns = []
+        
+        # Calculate grid layout - try to arrange robots in a square grid
+        grid_size = int(np.ceil(np.sqrt(n_robots)))
+        spacing = 1.5  # Spacing between robots
+        
+        for i in range(n_robots):
+            def make_env(rank=i):
+                def _init():
+                    # Calculate grid position
+                    if parallel_viz:
+                        row = rank // grid_size
+                        col = rank % grid_size
+                        # Center the grid
+                        offset_x = (col - (grid_size-1)/2) * spacing
+                        offset_y = (row - (grid_size-1)/2) * spacing
+                    else:
+                        offset_x = 0
+                        offset_y = 0
+                    
+                    env = RobotPositioningEnv(
+                        gui=gui, 
+                        gui_delay=viz_speed,
+                        workspace_size=workspace_size,
+                        clean_viz=clean_viz,
+                        viz_speed=viz_speed,
+                        verbose=False,
+                        parallel_viz=parallel_viz,
+                        rank=rank,
+                        offset_x=offset_x,
+                        offset_y=offset_y if parallel_viz else 0
+                    )
+                    
+                    if log_dir:
+                        env = Monitor(env, os.path.join(log_dir, f"robot_{rank}"))
+                    
+                    return env
+                return _init
+            
+            env_fns.append(make_env(i))
+        
+        # Use DummyVecEnv to vectorize environments
+        return DummyVecEnv(env_fns)
+    else:
+        # Fallback to generic environment import if RobotPositioningEnv not in scope
+        try:
+            from gym_robot_arm.envs import RobotArmEnv
+            
+            env = RobotArmEnv(
+                n_robots=n_robots,
+                target_randomization=target_randomization,
+                render_mode="rgb_array" if log_dir else None
+            )
+            
+            if log_dir:
+                env = Monitor(env, log_dir)
+                
+            return env
+        except ImportError:
+            raise ImportError("Could not import robot environment. Make sure gym_robot_arm is installed.")
 
 if __name__ == "__main__":
     main()
