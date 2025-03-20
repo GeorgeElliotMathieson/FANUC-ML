@@ -806,6 +806,14 @@ class RobotPositioningEnv(gym.Env):
         # Initialize previous action
         self.previous_action = np.zeros(6)  # Changed from 12 to 6 (only motor power/direction)
         
+        # Initialize history for observation space
+        # We'll store observations from previous steps
+        self.observation_history = []
+        # Initialize with empty observations for the first few steps
+        empty_observation = np.zeros(18)  # Current observation size
+        for _ in range(3):  # Three previous steps
+            self.observation_history.append(empty_observation)
+        
         # Initialize target randomization time
         self.last_target_randomization_time = get_last_target_randomization_time()
         
@@ -814,22 +822,29 @@ class RobotPositioningEnv(gym.Env):
         # -100 = full power in one direction
         # 0 = not moving at all
         # 100 = full power in the other direction
+        # Use float64 for maximum precision in action values
         self.action_space = spaces.Box(
             low=-100.0,
             high=100.0,
             shape=(6,),  # 6 values representing power/direction for the 6 motors
-            dtype=np.float32
+            dtype=np.float32  # Keep as float32 for compatibility but preserve precision in calculations
         )
         
         # Define observation space for the new requirements
         # The observation includes:
-        # - Previous outputs (6 values, -100 to 100)
-        # - Current joint angles (6 values, 0 to 100% of usable range)
-        # - Current vector length to target (1 value, in mm)
-        # - Relative position vector to target (3 values, normalized)
-        # - Previous distance to target (1 value, in mm)
-        # - Progress in last step (1 value, -1.0 to 1.0)
-        low_obs = np.array(
+        # - Current observation (18 values):
+        #   - Previous outputs (6 values, -100 to 100)
+        #   - Current joint angles (6 values, 0 to 100% of usable range)
+        #   - Current vector length to target (1 value, in mm)
+        #   - Relative position vector to target (3 values, normalized)
+        #   - Previous distance to target (1 value, in mm)
+        #   - Progress in last step (1 value, -1.0 to 1.0)
+        # - Observation from t-1 (18 values)
+        # - Observation from t-2 (18 values)
+        # - Observation from t-3 (18 values)
+        
+        # Define lower bounds for all components
+        low_obs_current = np.array(
             [-100.0] * 6 +  # Previous outputs
             [0.0] * 6 +     # Joint angles
             [0.0] +         # Distance to target
@@ -837,7 +852,17 @@ class RobotPositioningEnv(gym.Env):
             [0.0] +         # Previous distance to target
             [-1.0]          # Progress in last step (negative = moving away)
         )
-        high_obs = np.array(
+        
+        # Use the same bounds for historical observations
+        low_obs = np.concatenate([
+            low_obs_current,          # Current observation (t)
+            low_obs_current,          # Previous observation (t-1)
+            low_obs_current,          # Previous observation (t-2)
+            low_obs_current           # Previous observation (t-3)
+        ])
+        
+        # Define upper bounds for all components
+        high_obs_current = np.array(
             [100.0] * 6 +   # Previous outputs
             [100.0] * 6 +   # Joint angles
             [2000.0] +      # Distance to target (max 2 meters in mm)
@@ -845,11 +870,20 @@ class RobotPositioningEnv(gym.Env):
             [2000.0] +      # Previous distance to target (max 2 meters in mm)
             [1.0]           # Progress in last step (positive = getting closer)
         )
+        
+        # Use the same bounds for historical observations
+        high_obs = np.concatenate([
+            high_obs_current,         # Current observation (t)
+            high_obs_current,         # Previous observation (t-1)
+            high_obs_current,         # Previous observation (t-2)
+            high_obs_current          # Previous observation (t-3)
+        ])
+        
         self.observation_space = spaces.Box(
             low=low_obs,
             high=high_obs,
-            shape=(18,),  # 6 + 6 + 1 + 3 + 1 + 1 = 18 values
-            dtype=np.float32
+            shape=(18*4,),  # 18 values for current + 18 values for each of 3 previous steps
+            dtype=np.float32  # Keep as float32 for compatibility but preserve precision in calculations
         )
         
         # Initialize previous action with zeros (for the 6 motors)
@@ -887,6 +921,15 @@ class RobotPositioningEnv(gym.Env):
         Returns:
             tuple: (observation, info)
         """
+        # Reset observation history with empty observations
+        empty_observation = np.zeros(18, dtype=np.float64)  # Current observation size
+        self.observation_history = [
+            empty_observation.copy(),  # t-3
+            empty_observation.copy(),  # t-2
+            empty_observation.copy()   # t-1
+        ]
+            
+        # Continue with normal reset...
         # Set seed if provided
         if seed is not None:
             self.seed(seed)
@@ -1170,9 +1213,14 @@ class RobotPositioningEnv(gym.Env):
         # 4. Regress = increase in distance to target (negative = moving away)
         # 5. Rewards and penalties are capped at specified limits
         
-        # Set reward/penalty caps
+        # Set reward/penalty caps with higher precision
         REWARD_CAP = 1.0
         PENALTY_CAP = -1.0
+        
+        # Precision factor for small movements (enhances sensitivity to small changes)
+        # This helps detect and reward very small improvements that might be significant
+        PRECISION_FACTOR = 1.25  # Slightly amplify small changes
+        SMALL_MOVEMENT_THRESHOLD = 0.001  # 1mm in meters
         
         # Check if we've reached the target
         target_reached = distance <= self.accuracy_threshold
@@ -1186,6 +1234,11 @@ class RobotPositioningEnv(gym.Env):
             # Calculate raw progress (positive = getting closer, negative = moving away)
             raw_progress = prev_distance - distance
             
+            # Apply precision factor to small movements
+            if abs(raw_progress) < SMALL_MOVEMENT_THRESHOLD:
+                # For very small movements, enhance the sensitivity while preserving the sign
+                raw_progress = raw_progress * PRECISION_FACTOR
+            
             # Calculate the relative progress as a percentage of the previous distance
             # This makes the reward proportional to how much closer we got relative to where we were
             if prev_distance > 0:  # Avoid division by zero
@@ -1193,19 +1246,21 @@ class RobotPositioningEnv(gym.Env):
             else:
                 relative_progress = 0.0
                 
-            # Scale the relative progress to the reward/penalty caps
+            # Scale the relative progress to the reward/penalty caps with full precision
             if relative_progress >= 0:
                 # Positive progress (getting closer)
+                # Use the raw relative_progress value without rounding to preserve precision
                 reward = min(relative_progress, 1.0) * REWARD_CAP
             else:
                 # Negative progress (moving away)
+                # Use the raw relative_progress value without rounding to preserve precision
                 reward = max(relative_progress, -1.0) * abs(PENALTY_CAP)  # Ensure penalty is negative
             
             # Record if progress was made (for monitoring purposes)
             made_progress = (raw_progress > 0)
             info["made_progress"] = made_progress
-            info["raw_progress"] = raw_progress  # Store raw progress in meters
-            info["relative_progress"] = relative_progress  # Store as percentage
+            info["raw_progress"] = raw_progress  # Store raw progress in meters with full precision
+            info["relative_progress"] = relative_progress  # Store as percentage with full precision
         else:
             # Handle the case where distances are not valid
             raw_progress = 0.0
@@ -1216,7 +1271,7 @@ class RobotPositioningEnv(gym.Env):
             info["raw_progress"] = 0.0
             info["relative_progress"] = 0.0
             if self.verbose:
-                print(f"Warning: Invalid distance values detected. prev_distance={prev_distance}, distance={distance}")
+                print(f"Warning: Invalid distance values detected. prev_distance={prev_distance:.8f}, distance={distance:.8f}")
         
         # Update previous distance for next step's progress calculation
         self.previous_distance = distance
@@ -1670,63 +1725,89 @@ class RobotPositioningEnv(gym.Env):
         # Extract joint positions
         joint_positions = state[:self.robot.dof*2:2]  # Extract joint positions
         
-        # Normalize joint positions to 0 to 100 range based on joint limits (percentage within usable range)
+        # Normalize joint positions with higher precision
+        # Instead of 0-100 range, use full floating point precision in 0-1 range,
+        # then scale to the observation space range (0-100)
         normalized_joint_positions = []
         for i, pos in enumerate(joint_positions):
             if i in self.robot.joint_limits:
                 limit_low, limit_high = self.robot.joint_limits[i]
-                # Normalize to 0-1 range
-                norm_pos = (pos - limit_low) / (limit_high - limit_low)
-                # Scale to 0 to 100 range (percentage)
+                # Calculate available range
+                range_size = limit_high - limit_low
+                
+                # Normalize with full floating-point precision (no rounding)
+                # This preserves small changes in joint positions
+                norm_pos = (pos - limit_low) / range_size
+                
+                # Scale to 0 to 100 range while preserving precision
                 norm_pos = norm_pos * 100.0
+                
                 # Cap extreme values to prevent numerical instability
+                # but maintain precision within the valid range
                 norm_pos = max(min(norm_pos, 100.0), 0.0)
                 normalized_joint_positions.append(norm_pos)
             else:
                 # For joints without limits, use a default normalized position
                 normalized_joint_positions.append(50.0)  # Middle of range
         
-        # Convert to numpy array
-        normalized_joint_positions = np.array(normalized_joint_positions)
+        # Convert to numpy array with explicit float64 type for maximum precision
+        normalized_joint_positions = np.array(normalized_joint_positions, dtype=np.float64)
         
         # Extract end effector position
         ee_position = state[12:15]
         
-        # Calculate relative position (target - ee)
+        # Calculate relative position (target - ee) with full precision
         relative_position = self.target_position - ee_position
         
-        # Calculate distance to target (vector length between end effector and target in mm)
+        # Calculate distance to target with full precision
         distance_to_target = np.linalg.norm(relative_position) * 1000.0  # Convert to mm
         
-        # Normalize the direction vector to the target
-        if distance_to_target > 0:
-            normalized_direction = relative_position / (distance_to_target / 1000.0)  # Normalize using meters
+        # Normalize the direction vector to the target with high precision
+        if distance_to_target > 1e-10:  # Avoid division by very small numbers
+            # Use distance in meters for normalization to maintain precision
+            normalized_direction = relative_position / (distance_to_target / 1000.0)
         else:
             normalized_direction = np.zeros(3)  # If we're at the target, direction is zero
             
-        # Calculate progress in the last step (if available)
+        # Calculate progress in the last step (if available) with full precision
         progress_in_last_step = 0.0
         previous_distance_mm = 0.0
         
         if hasattr(self, 'previous_distance') and self.previous_distance is not None:
             previous_distance_mm = self.previous_distance * 1000.0  # Convert to mm
             
-            # Calculate relative progress (-1.0 to 1.0)
-            if self.previous_distance > 0:
+            # Calculate relative progress (-1.0 to 1.0) with full precision
+            if self.previous_distance > 1e-10:  # Safer threshold for division
                 raw_progress = self.previous_distance - np.linalg.norm(relative_position)
+                # Preserve full precision in the calculation
                 progress_in_last_step = np.clip(raw_progress / self.previous_distance, -1.0, 1.0)
             
-        # Combine all observations into a single array according to new requirements
-        observation = np.concatenate([
+        # Create current observation
+        current_observation = np.concatenate([
             self.previous_action,         # Previous outputs (-100 to 100 for each motor)
             normalized_joint_positions,   # Current joint angles (0 to 100% for each joint)
             [distance_to_target],         # Current vector length to target (in mm)
             normalized_direction,         # Normalized direction vector to target
             [previous_distance_mm],       # Previous distance to target (in mm)
             [progress_in_last_step]       # Progress made in the last step (-1 to 1)
-        ])
+        ]).astype(np.float64)  # Use float64 for internal calculations
         
-        return observation
+        # Update observation history
+        # Add the current observation to the history queue
+        self.observation_history.pop(0)  # Remove oldest observation
+        self.observation_history.append(current_observation)  # Add newest observation
+        
+        # Combine current observation with historical observations
+        # Order: [current_obs, obs_t-1, obs_t-2, obs_t-3]
+        # Note: The history already contains the last 3 observations in chronological order
+        full_observation = np.concatenate([
+            current_observation,  # Current observation (t)
+            self.observation_history[2],  # t-1 observation
+            self.observation_history[1],  # t-2 observation
+            self.observation_history[0]   # t-3 observation
+        ]).astype(np.float32)  # Convert to float32 for compatibility with Gymnasium
+        
+        return full_observation
 
     def _visualize_collision(self, link_a, link_b):
         """
@@ -1992,46 +2073,144 @@ class ScaleLayer(nn.Module):
 
 # Custom features extractor for the policy
 class CustomFeaturesExtractor(BaseFeaturesExtractor):
-    def __init__(self, observation_space, features_dim=128):
-        super(CustomFeaturesExtractor, self).__init__(observation_space, features_dim)
+    """
+    Custom features extractor for the learning task.
+    This extracts separate features for each component of the observation space.
+    """
+    def __init__(self, observation_space: gym.spaces.Box):
+        """
+        Initialize the features extractor.
         
-        # Input size from observation space
-        # The observation includes:
-        # - Previous outputs (6 values, -100 to 100)
-        # - Current joint angles (6 values, 0 to 100)
-        # - Current vector length to target (1 value, in mm)
-        # - Normalized direction vector to target (3 values, -1 to 1)
-        # - Previous distance to target (1 value, in mm)
-        # - Progress in last step (1 value, -1 to 1)
-        n_input = int(np.prod(observation_space.shape))
+        Args:
+            observation_space: The observation space of the environment
+        """
+        # Total combined features: 128
+        super().__init__(observation_space, features_dim=256)
         
-        # Much larger network architecture with more layers and width
-        self.net = nn.Sequential(
-            nn.Linear(n_input, 1024),  # Increased from 256 to 1024
+        # Get the size of a single observation
+        single_obs_size = 18  # Single observation size
+        
+        # Define individual feature extractors
+        # Previous action feature extractor (6 values)
+        self.previous_action_extractor = nn.Sequential(
+            ScaleLayer(-100.0, 100.0, -1.0, 1.0),  # Scale to -1, 1
+            nn.Linear(6, 32),
             nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 2048),  # Added new layer with increased width
-            nn.ReLU(),
-            nn.BatchNorm1d(2048),
-            nn.Linear(2048, 1536),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(1536),
-            nn.Linear(1536, 1024),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 512),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 256),  # Increased from direct 128 to going through 256
-            nn.ReLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, features_dim),  # Output dimension unchanged
-            nn.ReLU(),
-            nn.BatchNorm1d(features_dim)
+            nn.Linear(32, 32),
+            nn.ReLU()
         )
-    
-    def forward(self, observations):
-        return self.net(observations)
+        
+        # Joint angle feature extractor (6 values)
+        self.joint_angle_extractor = nn.Sequential(
+            ScaleLayer(0.0, 100.0, 0.0, 1.0),  # Scale to 0, 1
+            nn.Linear(6, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.ReLU()
+        )
+        
+        # Target distance extractor (1 value)
+        self.target_distance_extractor = nn.Sequential(
+            ScaleLayer(0.0, 2000.0, 0.0, 1.0),  # Scale to 0, 1
+            nn.Linear(1, 16),
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU()
+        )
+        
+        # Target direction extractor (3 values)
+        self.target_direction_extractor = nn.Sequential(
+            nn.Linear(3, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.ReLU()
+        )
+        
+        # Previous distance extractor (1 value)
+        self.previous_distance_extractor = nn.Sequential(
+            ScaleLayer(0.0, 2000.0, 0.0, 1.0),  # Scale to 0, 1
+            nn.Linear(1, 16),
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU()
+        )
+        
+        # Progress extractor (1 value)
+        self.progress_extractor = nn.Sequential(
+            nn.Linear(1, 16),  # Already in -1, 1 range
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU()
+        )
+        
+        # History integration layer (processes current + historical observations)
+        # Input is the combined features from all 4 timesteps
+        # 144 = 4 timesteps × (32 + 32 + 16 + 32 + 16 + 16) features
+        self.history_integrator = nn.Sequential(
+            nn.Linear(144, 192),
+            nn.ReLU(),
+            nn.Linear(192, 256),
+            nn.ReLU()
+        )
+        
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        """
+        Extract features from observations.
+        
+        Args:
+            observations: Batch of observations
+            
+        Returns:
+            torch.Tensor: Extracted features
+        """
+        batch_size = observations.shape[0]
+        
+        # Split the observations into current and historical parts
+        # Each full observation has 72 values (18 × 4 timesteps)
+        observations_reshaped = observations.view(batch_size, 4, 18)
+        
+        # Process each timestep's observation
+        all_features = []
+        
+        for t in range(4):  # Process all 4 timesteps (current + 3 historical)
+            # Get observation for this timestep
+            obs_t = observations_reshaped[:, t, :]
+            
+            # Split the observation into its components
+            prev_action = obs_t[:, :6]
+            joint_angles = obs_t[:, 6:12]
+            target_distance = obs_t[:, 12:13]
+            target_direction = obs_t[:, 13:16]
+            previous_distance = obs_t[:, 16:17]
+            progress = obs_t[:, 17:18]
+            
+            # Extract features for each component
+            prev_action_features = self.previous_action_extractor(prev_action)
+            joint_angle_features = self.joint_angle_extractor(joint_angles)
+            target_distance_features = self.target_distance_extractor(target_distance)
+            target_direction_features = self.target_direction_extractor(target_direction)
+            previous_distance_features = self.previous_distance_extractor(previous_distance)
+            progress_features = self.progress_extractor(progress)
+            
+            # Combine all features for this timestep
+            combined_features = torch.cat([
+                prev_action_features,
+                joint_angle_features,
+                target_distance_features,
+                target_direction_features,
+                previous_distance_features,
+                progress_features
+            ], dim=1)
+            
+            all_features.append(combined_features)
+        
+        # Concatenate features from all timesteps
+        all_timesteps_features = torch.cat(all_features, dim=1)
+        
+        # Integrate historical information
+        integrated_features = self.history_integrator(all_timesteps_features)
+        
+        return integrated_features
 
 # Callback for saving models and logging
 class SaveModelCallback(BaseCallback):
