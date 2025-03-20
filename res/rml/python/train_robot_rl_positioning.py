@@ -942,7 +942,7 @@ class RobotPositioningEnv(gym.Env):
         self.total_reward_in_episode = 0.0
         
         # Reset best position tracking
-        self.best_distance_in_episode = float('inf')
+        self.best_distance_in_episode = float('inf')  # Ensure it's explicitly a float
         self.best_position_in_episode = None
         
         # Reset previous distance for progress rewards
@@ -1141,55 +1141,47 @@ class RobotPositioningEnv(gym.Env):
         ground_collision, ee_self_collision, collision_info = self._detect_collisions()
         info["collision_info"] = collision_info
         
-        # Simplified reward system - only distance-based rewards
+        # Balanced reward system with better learning gradients
         # Base reward is 0
-        reward = 0
+        reward = 0.0
         
         # Check if we've reached the target
         if distance <= self.accuracy_threshold:
             # Target reached! Maximum reward
-            reward = 20.0  # Keeping the target reached reward
+            reward = 5.0  # Reduced from 10.0 for better scaling with other rewards
             done = True
             info["target_reached"] = True
         else:
             # Not at target yet
-            
-            # Calculate progress compared to previous step
-            if hasattr(self, 'prev_distance'):
-                # Progress is positive if we got closer to the target
-                progress = self.prev_distance - distance
+            if distance < self.best_distance_in_episode:
+                # Calculate improvement (how much better than previous best)
+                improvement = self.best_distance_in_episode - distance
                 
-                # Add a linear progress reward component
-                # Fixed scale factor regardless of distance
-                progress_scale = 10.0
-                progress_reward = progress * progress_scale
+                # Scale the reward based on the relative improvement
+                # This creates a smooth gradient - bigger improvements get bigger rewards
+                rel_improvement = improvement / self.best_distance_in_episode  # Relative improvement
                 
-                # Only reward positive progress to avoid exploits
-                if progress > 0:
-                    reward += progress_reward
-                    info["progress_reward"] = progress_reward
-            
-            # Store current distance for next step
-            self.prev_distance = distance
-            
-            # Linear distance reward instead of exponential
-            # The closer to target, the higher the reward
-            # Normalize distance to 0-1 range (1 when at target, 0 when at max distance)
-            normalized_distance = 1.0 - min(distance / self.workspace_size, 1.0)
-            # Linear scale: directly proportional to normalized distance
-            distance_reward = 2.0 * normalized_distance
-            
-            # Apply the distance reward
-            reward += distance_reward
-            info["distance_reward"] = distance_reward
-            
-            # Remove compactness penalty
-            
-            # Remove center penalty
-            
-            # Remove ground collision penalty
-            
-            # Remove end effector self-collision penalty
+                # Scale the reward - larger improvements get proportionally larger rewards
+                # Cap at 2.0 to avoid extreme values, with a minimum of 0.1 for any improvement
+                reward = max(0.1, min(2.0, 10.0 * rel_improvement))
+                
+                info["improvement_cm"] = improvement * 100  # Convert to cm
+                info["relative_improvement"] = rel_improvement
+                
+                # Update best distance
+                self.best_distance_in_episode = distance
+                self.best_position_in_episode = current_ee_pos.copy()
+                
+                # Log when the robot achieves a distance within the curriculum threshold
+                if distance <= self.target_expansion_threshold and self.verbose:
+                    print(f"\nRobot {self.rank}: Achieved curriculum threshold distance: {distance*100:.2f}cm!")
+                    print(f"Current curriculum level: {self.curriculum_level}, max target distance: {self.max_target_distance:.2f}m\n")
+            else:
+                # No improvement - penalty depends on how close to best
+                # Smaller penalty when already close to best, larger when far away
+                # This encourages exploration when stuck at a plateau
+                penalty_scale = min(1.0, (distance - self.best_distance_in_episode) / (self.workspace_size / 4))
+                reward = -0.05 * (1.0 + penalty_scale)  # Penalty between -0.05 and -0.1
             
             # Check timeout
             if self.steps >= self.timeout_steps:
@@ -1200,18 +1192,8 @@ class RobotPositioningEnv(gym.Env):
         
         # Store reward and distance info
         info["reward"] = reward
-        
-        # Track best position achieved during the episode
-        if distance < self.best_distance_in_episode:
-            self.best_distance_in_episode = distance
-            self.best_position_in_episode = current_ee_pos.copy()
-            info["best_distance"] = self.best_distance_in_episode * 100  # Convert to cm
-            info["best_position"] = self.best_position_in_episode
-            
-            # Log when the robot achieves a distance within the curriculum threshold
-            if distance <= self.target_expansion_threshold and self.verbose:
-                print(f"\nRobot {self.rank}: Achieved curriculum threshold distance: {distance*100:.2f}cm!")
-                print(f"Current curriculum level: {self.curriculum_level}, max target distance: {self.max_target_distance:.2f}m\n")
+        info["distance"] = distance
+        info["best_distance"] = self.best_distance_in_episode
         
         # Check if the robot's best position is better than its initial position
         # This will be used to determine if model updates should occur
