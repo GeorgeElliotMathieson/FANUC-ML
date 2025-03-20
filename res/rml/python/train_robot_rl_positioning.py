@@ -1901,21 +1901,6 @@ class CustomFeaturesExtractor(BaseFeaturesExtractor):
     def forward(self, observations):
         return self.net(observations)
 
-# Callback for saving models and logging
-class SaveModelCallback(BaseCallback):
-    def __init__(self, save_freq, save_path, verbose=1):
-        super(SaveModelCallback, self).__init__(verbose)
-        self.save_freq = save_freq
-        self.save_path = save_path
-    
-    def _on_step(self):
-        if self.n_calls % self.save_freq == 0:
-            model_path = f"{self.save_path}/model_{self.n_calls}_steps"
-            self.model.save(model_path)
-            if self.verbose > 0:
-                print(f"Model saved to {model_path}")
-        return True
-
 # Define a wrapper class for adding delay to GUI rendering
 class DelayedGUIEnv(gym.Wrapper):
     """
@@ -2140,36 +2125,8 @@ def create_multiple_robots_in_same_env(num_robots=3, viz_speed=0.1, verbose=Fals
     
     return envs
 
-# Add global variables to track when model weights should be updated
-_MODEL_UPDATE_NEEDED = False
-_MODEL_UPDATE_ROBOT_RANK = -1  # Store which robot triggered the update
-_SHARED_MODEL_VERSION = 0  # Track the shared model version
-
-# Function to set the model update flag
-def set_model_update_flag(robot_rank=0):
-    """Set the flag to indicate that model weights should be updated."""
-    global _MODEL_UPDATE_NEEDED, _MODEL_UPDATE_ROBOT_RANK
-    _MODEL_UPDATE_NEEDED = True
-    _MODEL_UPDATE_ROBOT_RANK = robot_rank
-
-# Function to check if model update is needed
-def is_model_update_needed():
-    """Check if model weights should be updated."""
-    global _MODEL_UPDATE_NEEDED
-    return _MODEL_UPDATE_NEEDED
-
-# Function to get the robot rank that triggered the update
-def get_model_update_robot_rank():
-    """Get the rank of the robot that triggered the model update."""
-    global _MODEL_UPDATE_ROBOT_RANK
-    return _MODEL_UPDATE_ROBOT_RANK
-
-# Function to reset the model update flag
-def reset_model_update_flag():
-    """Reset the flag after model weights have been updated."""
-    global _MODEL_UPDATE_NEEDED, _MODEL_UPDATE_ROBOT_RANK
-    _MODEL_UPDATE_NEEDED = False
-    _MODEL_UPDATE_ROBOT_RANK = -1
+# Track the shared model version
+_SHARED_MODEL_VERSION = 0
 
 # Function to increment the shared model version
 def increment_shared_model_version():
@@ -2218,69 +2175,6 @@ def get_target_randomization_time():
     """Get the global target randomization time."""
     global _TARGET_RANDOMIZATION_TIME
     return _TARGET_RANDOMIZATION_TIME
-
-# Global variables for timeout tracking that we want to remove
-_BEST_TIMEOUT_DISTANCE = float('inf')
-_BEST_TIMEOUT_ROBOT_RANK = -1
-_BEST_TIMEOUT_REWARD = float('-inf')
-
-# Function to reset the best timeout tracking
-def reset_best_timeout_tracking():
-    """Reset the global best timeout tracking variables."""
-    global _BEST_TIMEOUT_DISTANCE, _BEST_TIMEOUT_ROBOT_RANK, _BEST_TIMEOUT_REWARD
-    _BEST_TIMEOUT_DISTANCE = float('inf')
-    _BEST_TIMEOUT_ROBOT_RANK = -1
-    _BEST_TIMEOUT_REWARD = float('-inf')
-
-# Function to update the best timeout tracking
-def update_best_timeout_tracking(distance, robot_rank, total_reward=None):
-    """
-    Update the global best timeout tracking variables based on the total reward.
-    If total_reward is provided, it will be used as the primary metric.
-    Otherwise, the distance will be used as before.
-    
-    Args:
-        distance: The distance achieved by the robot
-        robot_rank: The rank of the robot
-        total_reward: The total reward accumulated by the robot during the episode
-        
-    Returns:
-        bool: True if this robot is now the best, False otherwise
-    """
-    global _BEST_TIMEOUT_DISTANCE, _BEST_TIMEOUT_ROBOT_RANK, _BEST_TIMEOUT_REWARD
-    
-    # If total_reward is provided, use it as the primary metric
-    if total_reward is not None:
-        if total_reward > _BEST_TIMEOUT_REWARD:
-            _BEST_TIMEOUT_REWARD = total_reward
-            _BEST_TIMEOUT_DISTANCE = distance  # Still track the distance for reference
-            _BEST_TIMEOUT_ROBOT_RANK = robot_rank
-            return True
-    # Otherwise, use distance as before
-    elif distance < _BEST_TIMEOUT_DISTANCE:
-        _BEST_TIMEOUT_DISTANCE = distance
-        _BEST_TIMEOUT_ROBOT_RANK = robot_rank
-        return True
-    
-    return False
-
-# Function to get the best timeout distance
-def get_best_timeout_distance():
-    """Get the best distance achieved during timeout."""
-    global _BEST_TIMEOUT_DISTANCE
-    return _BEST_TIMEOUT_DISTANCE
-
-# Function to get the best timeout robot rank
-def get_best_timeout_robot_rank():
-    """Get the rank of the robot that achieved the best distance during timeout."""
-    global _BEST_TIMEOUT_ROBOT_RANK
-    return _BEST_TIMEOUT_ROBOT_RANK
-
-# Function to get the best timeout reward
-def get_best_timeout_reward():
-    """Get the best reward achieved during timeout."""
-    global _BEST_TIMEOUT_REWARD
-    return _BEST_TIMEOUT_REWARD
 
 # Add a ModelUpdateCallback class to handle model weight updates
 class ModelUpdateCallback(BaseCallback):
