@@ -780,10 +780,10 @@ class RobotPositioningEnv(gym.Env):
         # Initialize episode counter and target boundary variables for curriculum learning
         self.episode_count = 0
         self.consecutive_successful_episodes = 0
-        self.max_target_distance = 0.3  # Start with a smaller boundary (30cm)
+        self.max_target_distance = 0.35  # Initial maximum target distance
         self.last_episode_successful = False
-        self.target_expansion_threshold = 0.04  # 4cm success threshold
-        self.target_expansion_increment = 0.05  # Expand by 5cm each curriculum level
+        self.target_expansion_threshold = 0.15  # Distance threshold for curriculum advancement
+        self.target_expansion_increment = 0.05  # How much to expand per curriculum level
         self.curriculum_level = 1
         
         # Initialize step counter
@@ -886,8 +886,15 @@ class RobotPositioningEnv(gym.Env):
             
             # Check if we need to update curriculum progress based on the last episode's performance
             if hasattr(self, 'best_distance_in_episode'):
-                # Consider episode successful if we got within the target threshold
-                episode_successful = self.best_distance_in_episode <= self.target_expansion_threshold
+                # Consider episode successful if we got close enough to the target
+                # Gradual success threshold allows for a smoother curriculum progression
+                # Make success threshold a percentage of the current max target distance
+                current_success_threshold = min(
+                    self.target_expansion_threshold,  # Cap at max threshold
+                    self.max_target_distance * 0.4    # 40% of current max distance
+                )
+                
+                episode_successful = self.best_distance_in_episode <= current_success_threshold
                 
                 # Track consecutive successful episodes for curriculum advancement
                 if episode_successful:
@@ -895,26 +902,55 @@ class RobotPositioningEnv(gym.Env):
                         # Two consecutive successful episodes - advance curriculum!
                         self.consecutive_successful_episodes += 1
                         
-                        # Expand the target boundary if it's not at the maximum yet
-                        if self.max_target_distance < self.workspace_size:
-                            # Increase the max target distance
-                            self.max_target_distance = min(
-                                self.max_target_distance + self.target_expansion_increment,
-                                self.workspace_size
-                            )
-                            self.curriculum_level += 1
+                        # After more consecutive successes at higher curriculum levels,
+                        # we require more consistency before advancing
+                        advancement_threshold = 2  # Base requirement: 2 consecutive successes
+                        
+                        # For higher curriculum levels, require more consistent performance
+                        if self.curriculum_level > 3:
+                            advancement_threshold = 3
+                        if self.curriculum_level > 6:
+                            advancement_threshold = 4
                             
-                            if self.verbose:
-                                print(f"\n{'='*60}")
-                                print(f"CURRICULUM LEVEL UP! Now at level {self.curriculum_level}")
-                                print(f"Target boundary expanded to: {self.max_target_distance:.2f}m")
-                                print(f"{'='*60}\n")
+                        # Check if we've met the threshold for advancement
+                        if self.consecutive_successful_episodes >= advancement_threshold:
+                            # Expand the target boundary if it's not at the maximum yet
+                            if self.max_target_distance < self.workspace_size:
+                                # Calculate the new target distance with an increment that scales
+                                # Smaller increments at higher curriculum levels
+                                scaling_factor = max(0.5, 1.0 - (self.curriculum_level * 0.05))
+                                current_increment = self.target_expansion_increment * scaling_factor
+                                
+                                # Increase the max target distance
+                                self.max_target_distance = min(
+                                    self.max_target_distance + current_increment,
+                                    self.workspace_size
+                                )
+                                self.curriculum_level += 1
+                                
+                                # Reset consecutive counter after advancement
+                                self.consecutive_successful_episodes = 0
+                                
+                                if self.verbose:
+                                    print(f"\n{'='*60}")
+                                    print(f"CURRICULUM LEVEL UP! Now at level {self.curriculum_level}")
+                                    print(f"Target boundary expanded to: {self.max_target_distance:.2f}m")
+                                    print(f"Success threshold: {current_success_threshold:.2f}m")
+                                    print(f"{'='*60}\n")
                     
                     # Set this episode as successful for the next check
                     self.last_episode_successful = True
                 else:
                     # Reset the consecutive count if this episode wasn't successful
                     self.last_episode_successful = False
+                    
+                    # Don't reset consecutive count fully for higher curriculum levels
+                    # This provides more stability in training
+                    if self.curriculum_level > 4 and self.consecutive_successful_episodes > 0:
+                        # Just decrement instead of resetting to zero
+                        self.consecutive_successful_episodes = max(0, self.consecutive_successful_episodes - 1)
+                    else:
+                        self.consecutive_successful_episodes = 0
         
         # Reset collision state tracking
         self.in_ground_collision = False
@@ -1138,41 +1174,90 @@ class RobotPositioningEnv(gym.Env):
         ground_collision, ee_self_collision, collision_info = self._detect_collisions()
         info["collision_info"] = collision_info
         
-        # Balanced reward system with better learning gradients
+        # Enhanced reward system to encourage workspace exploration
         # Base reward is 0
         reward = 0.0
         
+        # Get the distance from target to center (shoulder position) to measure difficulty
+        robot_base_pos, _ = p.getBasePositionAndOrientation(
+            self.robot.robot_id, 
+            physicsClientId=self.robot.client
+        )
+        shoulder_height = 0.33
+        shoulder_position = np.array([
+            robot_base_pos[0],
+            robot_base_pos[1],
+            robot_base_pos[2] + shoulder_height
+        ])
+        
+        # Calculate distance from target to center/shoulder (higher = more difficult)
+        target_to_center_dist = np.linalg.norm(self.target_position - shoulder_position)
+        
+        # Normalize the target difficulty (0 to 1)
+        # Use 0.25 as min reach and workspace_size as max reach
+        normalized_difficulty = min(1.0, max(0.0, (target_to_center_dist - 0.25) / (self.workspace_size - 0.25)))
+        
         # Check if we've reached the target
         if distance <= self.accuracy_threshold:
-            # Target reached! Maximum reward
-            reward = 5.0  # Reduced from 10.0 for better scaling with other rewards
+            # Target reached! Reward scales with difficulty
+            # Base reward is 5.0, additional reward up to 5.0 based on difficulty
+            difficulty_bonus = 5.0 * normalized_difficulty
+            reward = 5.0 + difficulty_bonus
+            
+            # For difficult targets (>80% of workspace size), add extra bonus
+            if normalized_difficulty > 0.8:
+                reward += 3.0  # Additional incentive for reaching difficult targets
+                
             done = True
             info["target_reached"] = True
+            info["difficulty"] = normalized_difficulty
         else:
             # Not at target yet
             if distance < self.best_distance_in_episode:
                 # Calculate improvement (how much better than previous best)
                 improvement = self.best_distance_in_episode - distance
                 
+                # Base reward for any improvement
+                base_improvement_reward = 0.2
+                
+                # Calculate distance-scaled improvement reward
+                # Further from center = more reward for the same improvement
+                # This encourages exploration of the entire workspace
+                scaled_improvement = improvement * (1.0 + normalized_difficulty)
+                
                 # Scale the reward based on the relative improvement
-                # This creates a smooth gradient - bigger improvements get bigger rewards
-                rel_improvement = improvement / self.best_distance_in_episode  # Relative improvement
+                rel_improvement = improvement / self.best_distance_in_episode
                 
-                # Scale the reward - larger improvements get proportionally larger rewards
-                # Cap at 2.0 to avoid extreme values, with a minimum of 0.1 for any improvement
-                reward = max(0.1, min(2.0, 10.0 * rel_improvement))
+                # Final improvement reward calculation:
+                # - Base reward for any improvement
+                # - Scaled reward based on difficulty and relative improvement
+                # - Higher cap for difficult targets
+                max_reward_cap = 2.0 + (1.5 * normalized_difficulty)
+                improvement_reward = base_improvement_reward + min(max_reward_cap, 8.0 * rel_improvement * (1.0 + normalized_difficulty))
                 
+                reward = improvement_reward
                 info["improvement_cm"] = improvement * 100  # Convert to cm
+                info["target_difficulty"] = normalized_difficulty
                 
                 # Update best distance
                 self.best_distance_in_episode = distance
                 self.best_position_in_episode = current_ee_pos.copy()
             else:
-                # No improvement - penalty depends on how close to best
-                # Smaller penalty when already close to best, larger when far away
-                # This encourages exploration when stuck at a plateau
-                penalty_scale = min(1.0, (distance - self.best_distance_in_episode) / (self.workspace_size / 4))
-                reward = -0.05 * (1.0 + penalty_scale)  # Penalty between -0.05 and -0.1
+                # No improvement - adjust penalties to encourage exploration
+                # Smaller penalty for difficult targets to encourage attempts
+                base_penalty = -0.05
+                
+                # Reduce penalty for difficult targets (up to 50% reduction)
+                penalty_reduction = normalized_difficulty * 0.5
+                
+                # Calculate how far we are from best position relative to workspace
+                distance_from_best_ratio = min(1.0, (distance - self.best_distance_in_episode) / (self.workspace_size / 4))
+                
+                # Higher penalty for moving way off track, but reduced for difficult targets
+                penalty = base_penalty * (1.0 + distance_from_best_ratio) * (1.0 - penalty_reduction)
+                
+                # Cap minimum penalty to prevent excessive punishment
+                reward = max(-0.15, penalty)
             
             # Check timeout
             if self.steps >= self.timeout_steps:
@@ -1184,6 +1269,7 @@ class RobotPositioningEnv(gym.Env):
         # Store reward and distance info
         info["reward"] = reward
         info["distance"] = distance
+        info["target_to_center_dist"] = target_to_center_dist
         
         # Get observation for next step
         observation = self._get_observation()
@@ -1485,8 +1571,9 @@ class RobotPositioningEnv(gym.Env):
         max_attempts = 100
         
         # Choose a sampling strategy - bias towards outer regions of workspace
-        sampling_strategy = np.random.choice(['uniform', 'outer_bias', 'structured'], 
-                                            p=[0.2, 0.5, 0.3])
+        # Increase probability of outer_bias and structured strategies
+        sampling_strategy = np.random.choice(['uniform', 'outer_bias', 'structured', 'edge_focused'], 
+                                           p=[0.1, 0.4, 0.3, 0.2])
         
         for _ in range(max_attempts):
             # Different sampling strategies to create more variety
@@ -1500,9 +1587,19 @@ class RobotPositioningEnv(gym.Env):
                 # Bias towards outer regions of workspace using beta distribution
                 theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
                 phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
-                # Beta distribution with alpha=1, beta=0.7 biases towards higher values (outer radius)
-                normalized_distance = np.random.beta(1.0, 0.7)  
+                # Beta distribution with alpha=0.8, beta=0.5 creates stronger bias towards outer radius
+                normalized_distance = np.random.beta(0.8, 0.5)  
                 distance = min_reach + normalized_distance * (max_reach - min_reach)
+                
+            elif sampling_strategy == 'edge_focused':
+                # Generate targets specifically at the edges of the workspace
+                # This ensures the model learns to reach the most difficult positions
+                theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
+                phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
+                
+                # Distance is biased heavily towards max reach (85-100% of max reach)
+                edge_factor = 0.85 + (0.15 * np.random.random())
+                distance = edge_factor * max_reach
                 
             else:  # 'structured'
                 # Generate targets at specific segments of the workspace
@@ -1513,8 +1610,9 @@ class RobotPositioningEnv(gym.Env):
                 phi_segment = (segment % 4) * (np.pi/2) + np.random.uniform(-np.pi/4, np.pi/4)
                 theta_segment = np.pi/3 if segment < 4 else 2*np.pi/3 + np.random.uniform(-np.pi/6, np.pi/6)
                 
-                # Use maximum reach for structured targets to encourage reaching
-                distance = np.random.uniform(0.6 * max_reach, max_reach)
+                # Use a more varied distance distribution for structured targets
+                distance_factor = np.random.choice([0.5, 0.7, 0.9], p=[0.2, 0.3, 0.5])
+                distance = distance_factor * max_reach
                 
                 theta = theta_segment
                 phi = phi_segment
