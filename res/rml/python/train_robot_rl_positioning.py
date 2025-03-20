@@ -6,8 +6,6 @@
 import os
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import argparse
 import time
 import multiprocessing
@@ -23,7 +21,6 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_checker import check_env
@@ -1730,176 +1727,6 @@ class RobotPositioningEnv(gym.Env):
         normalized_compactness = max(0.0, 1.0 - (average_distance / (self.workspace_size * 0.5)))
         
         return normalized_compactness
-
-# Custom neural network architecture for the policy with the new requirements
-class CustomActorCriticNetwork(nn.Module):
-    def __init__(self, feature_dim):
-        super(CustomActorCriticNetwork, self).__init__()
-        
-        # Input dimension: 
-        # - Previous outputs (6 values, -100 to 100)
-        # - Current joint angles (6 values, 0 to 100)
-        # - Current vector length to target (1 value, in mm)
-        input_dim = 13  # 6 (previous outputs) + 6 (joint angles) + 1 (distance)
-        
-        # Massively larger shared feature extractor with more layers and width
-        self.shared_net = nn.Sequential(
-            nn.Linear(input_dim, 1024),  # Increased from 512 to 1024
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 2048),  # Increased from 512 to 2048
-            nn.ReLU(),
-            nn.BatchNorm1d(2048),
-            nn.Linear(2048, 2048),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(2048),
-            nn.Linear(2048, 1536),  # Increased from 384 to 1536
-            nn.ReLU(),
-            nn.BatchNorm1d(1536),
-            nn.Linear(1536, 1024),  # Increased from 256 to 1024
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 768),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(768),
-            nn.Linear(768, 512),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, feature_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(feature_dim)
-        )
-        
-        # Larger actor network (policy) with more layers
-        self.actor_net = nn.Sequential(
-            nn.Linear(feature_dim, 1024),  # Increased from 256 to 1024
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 768),  # Increased from 192 to 768
-            nn.ReLU(),
-            nn.BatchNorm1d(768),
-            nn.Linear(768, 512),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 384),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(384),
-            nn.Linear(384, 256),  # Increased from 128 to 256
-            nn.ReLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 128),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            nn.Linear(128, 64),  # Keep the final layer at 64 to match output layers
-            nn.ReLU(),
-            nn.BatchNorm1d(64)
-        )
-        
-        # Larger critic network (value function) with more layers
-        self.critic_net = nn.Sequential(
-            nn.Linear(feature_dim, 1024),  # Increased from 256 to 1024
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 768),  # Increased from 192 to 768
-            nn.ReLU(),
-            nn.BatchNorm1d(768),
-            nn.Linear(768, 512),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 384),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(384),
-            nn.Linear(384, 256),  # Increased from 128 to 256
-            nn.ReLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 128),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            nn.Linear(128, 64),  # Keep the final layer at 64 to match output layers
-            nn.ReLU(),
-            nn.BatchNorm1d(64)
-        )
-        
-        # Output layer: power and direction of each motor (-100 to 100)
-        # -100 = full power in one direction
-        # 0 = not moving at all
-        # 100 = full power in the other direction
-        self.mean_layer = nn.Sequential(
-            nn.Linear(64, 6),  # 6 outputs (one per motor)
-            nn.Tanh(),         # Outputs between -1 and 1
-            ScaleLayer(-100.0, 100.0)  # Scale to -100 to 100 range
-        )
-        
-        # Log standard deviation layer (for stochastic policy)
-        self.log_std_layer = nn.Linear(64, 6)  # 6 outputs to match mean layer
-        
-        # Value layer
-        self.value_layer = nn.Sequential(
-            nn.Linear(64, 1)
-        )
-    
-    def forward(self, x):
-        features = self.shared_net(x)
-        
-        # Actor
-        actor_features = self.actor_net(features)
-        mean = self.mean_layer(actor_features)  # Outputs 6 values between -100 and 100
-        log_std = self.log_std_layer(actor_features)  # Outputs 6 log std values
-        
-        # Critic
-        critic_features = self.critic_net(features)
-        value = self.value_layer(critic_features)
-        
-        return mean, log_std, value
-
-# Custom scaling layer to transform values from one range to another
-class ScaleLayer(nn.Module):
-    def __init__(self, min_val, max_val):
-        super(ScaleLayer, self).__init__()
-        self.min_val = min_val
-        self.max_val = max_val
-        
-    def forward(self, x):
-        # Input is assumed to be between -1 and 1 (from tanh)
-        # Scale to min_val to max_val using full floating-point precision
-        # No rounding or clipping to preserve full precision
-        return x * (self.max_val - self.min_val) / 2 + (self.max_val + self.min_val) / 2
-
-# Custom features extractor for the policy
-class CustomFeaturesExtractor(BaseFeaturesExtractor):
-    def __init__(self, observation_space, features_dim=128):
-        super(CustomFeaturesExtractor, self).__init__(observation_space, features_dim)
-        
-        # Input size from observation space
-        n_input = int(np.prod(observation_space.shape))
-        
-        # Much larger network architecture with more layers and width
-        self.net = nn.Sequential(
-            nn.Linear(n_input, 1024),  # Increased from 256 to 1024
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 2048),  # Added new layer with increased width
-            nn.ReLU(),
-            nn.BatchNorm1d(2048),
-            nn.Linear(2048, 1536),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(1536),
-            nn.Linear(1536, 1024),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 512),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 256),  # Increased from direct 128 to going through 256
-            nn.ReLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, features_dim),  # Output dimension unchanged
-            nn.ReLU(),
-            nn.BatchNorm1d(features_dim)
-        )
-    
-    def forward(self, observations):
-        return self.net(observations)
 
 # Define a wrapper class for adding delay to GUI rendering
 class DelayedGUIEnv(gym.Wrapper):
