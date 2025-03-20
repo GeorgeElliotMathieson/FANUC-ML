@@ -826,20 +826,29 @@ class RobotPositioningEnv(gym.Env):
         # - Previous outputs (6 values, -100 to 100)
         # - Current joint angles (6 values, 0 to 100% of usable range)
         # - Current vector length to target (1 value, in mm)
+        # - Relative position vector to target (3 values, normalized)
+        # - Previous distance to target (1 value, in mm)
+        # - Progress in last step (1 value, -1.0 to 1.0)
         low_obs = np.array(
             [-100.0] * 6 +  # Previous outputs
-            [0.0] * 6 +    # Joint angles
-            [0.0]          # Distance to target
+            [0.0] * 6 +     # Joint angles
+            [0.0] +         # Distance to target
+            [-1.0] * 3 +    # Normalized direction vector to target
+            [0.0] +         # Previous distance to target
+            [-1.0]          # Progress in last step (negative = moving away)
         )
         high_obs = np.array(
-            [100.0] * 6 +  # Previous outputs
-            [100.0] * 6 +  # Joint angles
-            [2000.0]       # Distance to target (max 2 meters in mm)
+            [100.0] * 6 +   # Previous outputs
+            [100.0] * 6 +   # Joint angles
+            [2000.0] +      # Distance to target (max 2 meters in mm)
+            [1.0] * 3 +     # Normalized direction vector to target
+            [2000.0] +      # Previous distance to target (max 2 meters in mm)
+            [1.0]           # Progress in last step (positive = getting closer)
         )
         self.observation_space = spaces.Box(
             low=low_obs,
             high=high_obs,
-            shape=(13,),  # 6 + 6 + 1 = 13 values
+            shape=(18,),  # 6 + 6 + 1 + 3 + 1 + 1 = 18 values
             dtype=np.float32
         )
         
@@ -1689,11 +1698,32 @@ class RobotPositioningEnv(gym.Env):
         # Calculate distance to target (vector length between end effector and target in mm)
         distance_to_target = np.linalg.norm(relative_position) * 1000.0  # Convert to mm
         
+        # Normalize the direction vector to the target
+        if distance_to_target > 0:
+            normalized_direction = relative_position / (distance_to_target / 1000.0)  # Normalize using meters
+        else:
+            normalized_direction = np.zeros(3)  # If we're at the target, direction is zero
+            
+        # Calculate progress in the last step (if available)
+        progress_in_last_step = 0.0
+        previous_distance_mm = 0.0
+        
+        if hasattr(self, 'previous_distance') and self.previous_distance is not None:
+            previous_distance_mm = self.previous_distance * 1000.0  # Convert to mm
+            
+            # Calculate relative progress (-1.0 to 1.0)
+            if self.previous_distance > 0:
+                raw_progress = self.previous_distance - np.linalg.norm(relative_position)
+                progress_in_last_step = np.clip(raw_progress / self.previous_distance, -1.0, 1.0)
+            
         # Combine all observations into a single array according to new requirements
         observation = np.concatenate([
             self.previous_action,         # Previous outputs (-100 to 100 for each motor)
             normalized_joint_positions,   # Current joint angles (0 to 100% for each joint)
-            [distance_to_target]          # Current vector length to target (in mm)
+            [distance_to_target],         # Current vector length to target (in mm)
+            normalized_direction,         # Normalized direction vector to target
+            [previous_distance_mm],       # Previous distance to target (in mm)
+            [progress_in_last_step]       # Progress made in the last step (-1 to 1)
         ])
         
         return observation
@@ -1832,7 +1862,10 @@ class CustomActorCriticNetwork(nn.Module):
         # - Previous outputs (6 values, -100 to 100)
         # - Current joint angles (6 values, 0 to 100)
         # - Current vector length to target (1 value, in mm)
-        input_dim = 13  # 6 (previous outputs) + 6 (joint angles) + 1 (distance)
+        # - Normalized direction vector to target (3 values, -1 to 1)
+        # - Previous distance to target (1 value, in mm)
+        # - Progress in last step (1 value, -1 to 1)
+        input_dim = 18  # 6 + 6 + 1 + 3 + 1 + 1 = 18 values
         
         # Massively larger shared feature extractor with more layers and width
         self.shared_net = nn.Sequential(
@@ -1963,6 +1996,13 @@ class CustomFeaturesExtractor(BaseFeaturesExtractor):
         super(CustomFeaturesExtractor, self).__init__(observation_space, features_dim)
         
         # Input size from observation space
+        # The observation includes:
+        # - Previous outputs (6 values, -100 to 100)
+        # - Current joint angles (6 values, 0 to 100)
+        # - Current vector length to target (1 value, in mm)
+        # - Normalized direction vector to target (3 values, -1 to 1)
+        # - Previous distance to target (1 value, in mm)
+        # - Progress in last step (1 value, -1 to 1)
         n_input = int(np.prod(observation_space.shape))
         
         # Much larger network architecture with more layers and width
