@@ -797,7 +797,7 @@ class RobotPositioningEnv(gym.Env):
         self.steps = 0
         
         # Initialize best position tracking
-        self.best_distance_in_episode = float('inf')
+        self.best_distance_in_episode = float('inf')  # Ensure it's explicitly a float
         self.best_position_in_episode = None
         
         # Initialize total reward tracking for the episode
@@ -949,9 +949,8 @@ class RobotPositioningEnv(gym.Env):
         self.best_distance_in_episode = float('inf')  # Ensure it's explicitly a float
         self.best_position_in_episode = None
         
-        # Reset previous distance for progress rewards
-        if hasattr(self, 'prev_distance'):
-            delattr(self, 'prev_distance')
+        # Reset previous distance for reward calculation
+        self.previous_distance = float('inf')  # Initialize to infinity so first improvement is positive
         
         # Check if the global target reached flag is set
         # If so, we need to reset it since we're starting a new episode
@@ -1137,56 +1136,84 @@ class RobotPositioningEnv(gym.Env):
         # Calculate distance to target (in meters)
         distance = np.linalg.norm(current_ee_pos - self.target_position)
         
+        # Calculate distance from workspace center (robot's shoulder)
+        distance_from_center = np.linalg.norm(current_ee_pos - self.home_position)
+        
         # Create an info dictionary to store additional information
         info = {}
         info["distance_cm"] = distance * 100  # Keep this in cm for easier reading
+        info["distance_from_center_cm"] = distance_from_center * 100  # Distance from workspace center
         
         # Check for collisions - ground and end effector self-collisions
         ground_collision, ee_self_collision, collision_info = self._detect_collisions()
         info["collision_info"] = collision_info
         
-        # Balanced reward system with better learning gradients
-        # Base reward is 0
-        reward = 0.0
+        # PROGRESS-BASED REWARD APPROACH:
+        # 1. Track progress towards target in each step
+        # 2. Positive reward for progress, negative for moving away
+        # 3. Include exploration bonus based on distance from center
         
         # Check if we've reached the target
-        if distance <= self.accuracy_threshold:
+        target_reached = distance <= self.accuracy_threshold
+        info["target_reached"] = target_reached
+        
+        if target_reached:
             # Target reached! Maximum reward
-            reward = 5.0  # Reduced from 10.0 for better scaling with other rewards
+            reward = 5.0  # Fixed reward for reaching target
             done = True
-            info["target_reached"] = True
+            info["made_progress"] = True  # Consider reaching target as progress
+            info["progress"] = 1.0  # Maximum progress
         else:
-            # Not at target yet
+            # Not at target yet - calculate progress-based reward
+            
+            # Calculate progress as the change in distance to target
+            prev_distance = self.previous_distance
+            progress = prev_distance - distance  # Positive = getting closer
+            
+            # Progress should be a normalized value (divide by workspace size)
+            normalized_progress = progress / self.workspace_size
+            
+            # Record if progress was made (for model update decisions)
+            made_progress = (progress > 0)
+            info["made_progress"] = made_progress
+            info["progress"] = normalized_progress  # Store normalized progress
+            
+            # Base reward component based on progress
+            if made_progress:
+                # Positive reward for getting closer to target
+                # Scale by workspace size to normalize the reward
+                progress_reward = progress / (self.workspace_size * 0.1)  # Scale factor for reasonable reward size
+                
+                # Cap progress reward to avoid extreme values
+                progress_reward = min(1.0, progress_reward)
+            else:
+                # Negative reward for moving away from target
+                # Make negative reward proportional to how much worse it got
+                # But cap it to prevent extreme values
+                progress_reward = max(-1.0, -abs(progress) / (self.workspace_size * 0.1))
+            
+            # Exploration bonus - reward being away from the center
+            # Scale to a smaller value to keep it as a bonus
+            exploration_bonus = 0.1 * (distance_from_center / self.workspace_size)
+            
+            # Combine rewards (mainly driven by progress)
+            reward = progress_reward + exploration_bonus
+            
+            # Update previous distance for next step's progress calculation
+            self.previous_distance = distance
+            
+            # Update best distance if this is closer than before
             if distance < self.best_distance_in_episode:
-                # Calculate improvement (how much better than previous best)
-                improvement = self.best_distance_in_episode - distance
-                
-                # Scale the reward based on the relative improvement
-                # This creates a smooth gradient - bigger improvements get bigger rewards
-                if self.best_distance_in_episode > 0.001:  # Prevent division by zero
-                    rel_improvement = improvement / self.best_distance_in_episode  # Relative improvement
-                else:
-                    rel_improvement = 1.0  # Default to 100% improvement if best distance is near zero
-                
-                # Ensure rel_improvement is not NaN
-                if np.isnan(rel_improvement):
-                    rel_improvement = 1.0  # Fallback value
-                
-                # Scale the reward - larger improvements get proportionally larger rewards
-                # Cap at 2.0 to avoid extreme values, with a minimum of 0.1 for any improvement
-                reward = max(0.1, min(2.0, 10.0 * rel_improvement))
-                
-                info["improvement_cm"] = improvement * 100  # Convert to cm
-                
-                # Update best distance
                 self.best_distance_in_episode = distance
                 self.best_position_in_episode = current_ee_pos.copy()
-            else:
-                # No improvement - penalty depends on how close to best
-                # Smaller penalty when already close to best, larger when far away
-                # This encourages exploration when stuck at a plateau
-                penalty_scale = min(1.0, (distance - self.best_distance_in_episode) / (self.workspace_size / 4))
-                reward = -0.05 * (1.0 + penalty_scale)  # Penalty between -0.05 and -0.1
+                
+                # Add significant progress milestone tracking
+                if self.best_distance_in_episode < 0.5 * self.initial_distance_to_target:
+                    info["significant_milestone"] = "50% closer to target"
+                elif self.best_distance_in_episode < 0.25 * self.initial_distance_to_target:
+                    info["significant_milestone"] = "75% closer to target"
+                elif self.best_distance_in_episode < 0.1 * self.initial_distance_to_target:
+                    info["significant_milestone"] = "90% closer to target"
             
             # Check timeout
             if self.steps >= self.timeout_steps:
@@ -1195,36 +1222,52 @@ class RobotPositioningEnv(gym.Env):
             else:
                 done = False
         
-        # Store reward and distance info
+        # Store detailed reward and distance info for analysis
         info["reward"] = reward
-        info["distance"] = distance
+        info["distance"] = distance  # In meters (for consistent units in model update)
         info["best_distance"] = self.best_distance_in_episode
+        info["distance_from_center"] = distance_from_center
+        info["normalized_distance"] = distance / self.workspace_size  # Normalize distance
         
         # Check if the robot's best position is better than its initial position
         # This will be used to determine if model updates should occur
         position_improved = self.best_distance_in_episode < self.initial_distance_to_target
         improvement_amount = self.initial_distance_to_target - self.best_distance_in_episode
+        relative_improvement = improvement_amount / self.initial_distance_to_target if self.initial_distance_to_target > 0 else 0
         
         # Add improvement info to the info dictionary
         info["position_improved"] = position_improved
-        info["improvement_amount"] = improvement_amount * 100  # Convert to cm
-        info["initial_distance"] = self.initial_distance_to_target * 100  # Convert to cm
+        info["improvement_amount"] = improvement_amount * 100  # Convert to cm for readability
+        info["relative_improvement"] = relative_improvement  # As percentage of initial distance
+        info["initial_distance"] = self.initial_distance_to_target * 100  # Convert to cm for readability
         
         # If the episode is ending, log the improvement information
         if done and self.verbose:
-            if position_improved:
-                print(f"\nRobot {self.rank}: Position IMPROVED by {improvement_amount*100:.2f}cm")
+            if target_reached:
+                print(f"\n{'='*60}")
+                print(f"TARGET REACHED by Robot {self.rank}!")
+                print(f"Distance to target: {distance*100:.2f}cm")
+                print(f"Steps taken: {self.steps}/{self.timeout_steps}")
+                print(f"{'='*60}\n")
+            elif position_improved:
+                print(f"\nRobot {self.rank}: Position IMPROVED by {improvement_amount*100:.2f}cm ({relative_improvement*100:.1f}%)")
                 print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
                 print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
+                print(f"  Steps taken: {self.steps}/{self.timeout_steps}")
                 print(f"  Model weights WILL be updated\n")
             else:
                 print(f"\nRobot {self.rank}: Position did NOT improve")
                 print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
                 print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
+                print(f"  Steps taken: {self.steps}/{self.timeout_steps}")
                 print(f"  Model weights will NOT be updated\n")
         
         # Get observation for next step
         observation = self._get_observation()
+        
+        # Add the total accumulated reward to the info dictionary
+        self.total_reward_in_episode += reward
+        info["total_reward"] = self.total_reward_in_episode
         
         return observation, reward, done, False, info
     
@@ -2563,117 +2606,89 @@ def get_best_timeout_reward():
 # Add a ModelUpdateCallback class to handle model weight updates
 class ModelUpdateCallback(BaseCallback):
     """
-    Callback to update model weights when robots complete episodes.
-    Updates only occur when a robot improves its position compared to the initial position.
+    Callback to update model weights on a regular basis and ensure all robots
+    operate independently with the latest shared model.
     """
     def __init__(self, verbose=0):
         super(ModelUpdateCallback, self).__init__(verbose)
         self.update_count = 0
-        self.robot_contributions = {}  # Track which robots have contributed to the current update
-        self.skipped_updates = 0  # Track how many updates were skipped due to no improvement
+        self.last_update_step = 0  # Track when the last update happened
         
     def _on_step(self):
-        """Process model updates from all robots in parallel"""
+        """Process model updates based on a regular schedule"""
+        # Update model weights at a fixed frequency
+        update_frequency = 1000  # Update frequency in steps
         
-        # Check if an episode has completed (either by reaching target or timeout)
-        # This is key: instead of having one "best" robot update the model,
-        # we'll collect experiences from all completed episodes
-        
-        # Rather than checking a global update flag, we'll gather updates from
-        # all environments that have completed episodes in this step
-        envs_completed = []
-        rewards_achieved = []
-        distances_achieved = []
-        improvements = []
-        envs_with_improvement = []
+        current_step = self.num_timesteps
+        if current_step - self.last_update_step < update_frequency:
+            return True
+            
+        # Update the model regardless of progress
+        self.update_count += 1
+        self.last_update_step = current_step
         
         # Get all active environments
         vec_env = self.training_env
         
-        # Check all environments for completed episodes
+        # Collect metrics about the current state of training
+        robot_distances = []
+        robot_rewards = []
+        robots_with_progress = []
+        
+        # Check all environments for statistics purposes only
         for i in range(vec_env.num_envs):
-            # Check if this environment has completed an episode
-            if hasattr(vec_env, 'dones') and vec_env.dones[i]:
-                # This environment has completed an episode
-                envs_completed.append(i)
+            if hasattr(vec_env, 'infos') and vec_env.infos[i] is not None:
+                # Collect metrics for reporting
+                made_progress = vec_env.infos[i].get('made_progress', False)
+                distance = vec_env.infos[i].get('distance', float('inf'))
+                reward = vec_env.infos[i].get('reward', 0.0)
                 
-                # Get the reward, distance, and improvement status
-                if hasattr(vec_env, 'infos') and vec_env.infos[i] is not None:
-                    reward = vec_env.infos[i].get('reward', 0.0)
-                    rewards_achieved.append(reward)
-                    
-                    distance = vec_env.infos[i].get('distance_cm', float('inf')) / 100.0  # Convert to meters
-                    distances_achieved.append(distance)
-                    
-                    # Check if robot improved its position
-                    position_improved = vec_env.infos[i].get('position_improved', False)
-                    improvement_amount = vec_env.infos[i].get('improvement_amount', 0.0) / 100.0  # Convert to meters
-                    improvements.append(improvement_amount)
-                    
-                    # Only consider environments that showed improvement
-                    if position_improved:
-                        envs_with_improvement.append(i)
-                    
-                    # Check if target was reached
-                    target_reached = vec_env.infos[i].get('target_reached', False)
-                    
-                    if target_reached:
-                        # Target reached - this should always be an improvement
-                        if self.verbose > 0:
-                            print(f"\n{'='*60}")
-                            print(f"TARGET REACHED by Robot {i}!")
-                            print(f"Distance to target: {distance*100:.2f}cm")
-                            print(f"Reward: {reward}")
-                            print(f"Robot {i} has reached the target and contributed to model update.")
-                            print(f"{'='*60}\n")
+                if made_progress:
+                    robots_with_progress.append(i)
                 
-        # If no environments completed episodes, return
-        if not envs_completed:
-            return True
-         
-        # Only update if at least one robot showed improvement
-        if len(envs_with_improvement) > 0:
-            # If we have completed episodes with improvement, update the model
-            self.update_count += 1
-            
-            # Print information about the update
-            if self.verbose > 0:
-                avg_reward = np.mean(rewards_achieved) if rewards_achieved else 0.0
-                avg_distance = np.mean(distances_achieved) if distances_achieved else float('inf')
-                avg_improvement = np.mean(improvements) if improvements else 0.0
+                robot_distances.append(distance)
+                robot_rewards.append(reward)
                 
-                print(f"\n{'='*60}")
-                print(f"MODEL UPDATE #{self.update_count}: {len(envs_with_improvement)}/{len(envs_completed)} robots showed improvement")
-                print(f"Average reward: {avg_reward:.4f}")
-                print(f"Average distance: {avg_distance*100:.2f}cm")
-                print(f"Average improvement: {avg_improvement*100:.2f}cm")
-                print(f"Updating shared model weights with experiences from improved robots.")
-                print(f"{'='*60}\n")
-            
-            # Limit the episode info buffer to prevent memory growth
-            limit_ep_info_buffer(self.model, max_size=100)
-            
-            # Update the shared model with the current model weights from improved robots
-            model_version = increment_shared_model_version()
-            
-            if self.verbose > 0:
-                print(f"Updated shared model to version {model_version}")
-        else:
-            # No robots showed improvement, skip the update
-            self.skipped_updates += 1
-            
-            if self.verbose > 0:
-                print(f"\n{'='*60}")
-                print(f"MODEL UPDATE SKIPPED #{self.skipped_updates}: No robots showed improvement")
-                print(f"Completed episodes: {len(envs_completed)}")
-                print(f"Not updating model weights to avoid learning bad behaviors")
-                print(f"{'='*60}\n")
+                # Check if target was reached (for reporting only)
+                target_reached = vec_env.infos[i].get('target_reached', False)
+                if target_reached and self.verbose > 0:
+                    print(f"\n{'='*60}")
+                    print(f"TARGET REACHED by Robot {i}!")
+                    print(f"Distance to target: {distance*100:.2f}cm")
+                    print(f"Robot {i} has reached the target.")
+                    print(f"{'='*60}\n")
         
-        # Force target repositioning for all robots by updating the target randomization time
-        update_target_randomization_time()
+        # Print information about the update
+        if self.verbose > 0:
+            avg_distance = np.mean(robot_distances) if robot_distances else float('inf')
+            avg_reward = np.mean(robot_rewards) if robot_rewards else 0.0
+            progress_ratio = len(robots_with_progress) / vec_env.num_envs if vec_env.num_envs > 0 else 0
+            
+            print(f"\n{'='*60}")
+            print(f"MODEL UPDATE #{self.update_count} at step {current_step}")
+            print(f"Robots showing progress: {len(robots_with_progress)}/{vec_env.num_envs} ({progress_ratio:.2f})")
+            print(f"Average distance: {avg_distance*100:.2f}cm")
+            print(f"Average reward: {avg_reward:.4f}")
+            print(f"Updating shared model weights to latest experiences.")
+            print(f"{'='*60}\n")
         
-        # Reset the best timeout tracking for the next round
-        reset_best_timeout_tracking()
+        # Limit the episode info buffer to prevent memory growth
+        limit_ep_info_buffer(self.model, max_size=100)
+        
+        # Update the shared model with the current model weights
+        model_version = increment_shared_model_version()
+        
+        if self.verbose > 0:
+            print(f"Updated shared model to version {model_version}")
+        
+        # Check if it's time to reposition targets
+        # Reposition targets periodically to encourage exploration
+        target_update_frequency = 5000  # Frequency for target repositioning
+        if current_step % target_update_frequency == 0:
+            # Force target repositioning for all robots by updating the target randomization time
+            update_target_randomization_time()
+            if self.verbose > 0:
+                print(f"Repositioning targets for all robots at step {current_step}")
         
         return True
 
