@@ -6,6 +6,8 @@
 import os
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import argparse
 import time
 import multiprocessing
@@ -14,6 +16,7 @@ import traceback
 import json
 import math
 import random  # Add this import for random.choice()
+import warnings  # Add this import for warning suppression
 from typing import Dict, List, Optional, Any, Tuple, Union
 # Ignore the linter error for pybullet - it's installed but the linter can't find it
 import pybullet as p  # type: ignore
@@ -21,11 +24,13 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_checker import check_env
 import gymnasium as gym
 from gymnasium import spaces
+import matplotlib.pyplot as plt
 from datetime import datetime
 import psutil  # type: ignore
 import warnings
@@ -36,12 +41,14 @@ import pybullet_data  # Add this import
 
 # Import utility functions from pybullet_utils
 from pybullet_utils import (
-    get_pybullet_client,
     configure_visualization,
     visualize_target,
     visualize_ee_position,
     visualize_target_line
 )
+
+# Suppress specific warnings related to division by zero in the reward calculation
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='invalid value encountered in scalar divide')
 
 # Ensure output directories exist
 os.makedirs("./models", exist_ok=True)
@@ -780,10 +787,10 @@ class RobotPositioningEnv(gym.Env):
         # Initialize episode counter and target boundary variables for curriculum learning
         self.episode_count = 0
         self.consecutive_successful_episodes = 0
-        self.max_target_distance = 0.35  # Initial maximum target distance
+        self.max_target_distance = 0.3  # Start with a smaller boundary (30cm)
         self.last_episode_successful = False
-        self.target_expansion_threshold = 0.15  # Distance threshold for curriculum advancement
-        self.target_expansion_increment = 0.05  # How much to expand per curriculum level
+        self.target_expansion_threshold = 0.04  # 4cm success threshold
+        self.target_expansion_increment = 0.05  # Expand by 5cm each curriculum level
         self.curriculum_level = 1
         
         # Initialize step counter
@@ -886,15 +893,8 @@ class RobotPositioningEnv(gym.Env):
             
             # Check if we need to update curriculum progress based on the last episode's performance
             if hasattr(self, 'best_distance_in_episode'):
-                # Consider episode successful if we got close enough to the target
-                # Gradual success threshold allows for a smoother curriculum progression
-                # Make success threshold a percentage of the current max target distance
-                current_success_threshold = min(
-                    self.target_expansion_threshold,  # Cap at max threshold
-                    self.max_target_distance * 0.4    # 40% of current max distance
-                )
-                
-                episode_successful = self.best_distance_in_episode <= current_success_threshold
+                # Consider episode successful if we got within the target threshold
+                episode_successful = self.best_distance_in_episode <= self.target_expansion_threshold
                 
                 # Track consecutive successful episodes for curriculum advancement
                 if episode_successful:
@@ -902,55 +902,26 @@ class RobotPositioningEnv(gym.Env):
                         # Two consecutive successful episodes - advance curriculum!
                         self.consecutive_successful_episodes += 1
                         
-                        # After more consecutive successes at higher curriculum levels,
-                        # we require more consistency before advancing
-                        advancement_threshold = 2  # Base requirement: 2 consecutive successes
-                        
-                        # For higher curriculum levels, require more consistent performance
-                        if self.curriculum_level > 3:
-                            advancement_threshold = 3
-                        if self.curriculum_level > 6:
-                            advancement_threshold = 4
+                        # Expand the target boundary if it's not at the maximum yet
+                        if self.max_target_distance < self.workspace_size:
+                            # Increase the max target distance
+                            self.max_target_distance = min(
+                                self.max_target_distance + self.target_expansion_increment,
+                                self.workspace_size
+                            )
+                            self.curriculum_level += 1
                             
-                        # Check if we've met the threshold for advancement
-                        if self.consecutive_successful_episodes >= advancement_threshold:
-                            # Expand the target boundary if it's not at the maximum yet
-                            if self.max_target_distance < self.workspace_size:
-                                # Calculate the new target distance with an increment that scales
-                                # Smaller increments at higher curriculum levels
-                                scaling_factor = max(0.5, 1.0 - (self.curriculum_level * 0.05))
-                                current_increment = self.target_expansion_increment * scaling_factor
-                                
-                                # Increase the max target distance
-                                self.max_target_distance = min(
-                                    self.max_target_distance + current_increment,
-                                    self.workspace_size
-                                )
-                                self.curriculum_level += 1
-                                
-                                # Reset consecutive counter after advancement
-                                self.consecutive_successful_episodes = 0
-                                
-                                if self.verbose:
-                                    print(f"\n{'='*60}")
-                                    print(f"CURRICULUM LEVEL UP! Now at level {self.curriculum_level}")
-                                    print(f"Target boundary expanded to: {self.max_target_distance:.2f}m")
-                                    print(f"Success threshold: {current_success_threshold:.2f}m")
-                                    print(f"{'='*60}\n")
+                            if self.verbose:
+                                print(f"\n{'='*60}")
+                                print(f"CURRICULUM LEVEL UP! Now at level {self.curriculum_level}")
+                                print(f"Target boundary expanded to: {self.max_target_distance:.2f}m")
+                                print(f"{'='*60}\n")
                     
                     # Set this episode as successful for the next check
                     self.last_episode_successful = True
                 else:
                     # Reset the consecutive count if this episode wasn't successful
                     self.last_episode_successful = False
-                    
-                    # Don't reset consecutive count fully for higher curriculum levels
-                    # This provides more stability in training
-                    if self.curriculum_level > 4 and self.consecutive_successful_episodes > 0:
-                        # Just decrement instead of resetting to zero
-                        self.consecutive_successful_episodes = max(0, self.consecutive_successful_episodes - 1)
-                    else:
-                        self.consecutive_successful_episodes = 0
         
         # Reset collision state tracking
         self.in_ground_collision = False
@@ -1174,90 +1145,48 @@ class RobotPositioningEnv(gym.Env):
         ground_collision, ee_self_collision, collision_info = self._detect_collisions()
         info["collision_info"] = collision_info
         
-        # Enhanced reward system to encourage workspace exploration
+        # Balanced reward system with better learning gradients
         # Base reward is 0
         reward = 0.0
         
-        # Get the distance from target to center (shoulder position) to measure difficulty
-        robot_base_pos, _ = p.getBasePositionAndOrientation(
-            self.robot.robot_id, 
-            physicsClientId=self.robot.client
-        )
-        shoulder_height = 0.33
-        shoulder_position = np.array([
-            robot_base_pos[0],
-            robot_base_pos[1],
-            robot_base_pos[2] + shoulder_height
-        ])
-        
-        # Calculate distance from target to center/shoulder (higher = more difficult)
-        target_to_center_dist = np.linalg.norm(self.target_position - shoulder_position)
-        
-        # Normalize the target difficulty (0 to 1)
-        # Use 0.25 as min reach and workspace_size as max reach
-        normalized_difficulty = min(1.0, max(0.0, (target_to_center_dist - 0.25) / (self.workspace_size - 0.25)))
-        
         # Check if we've reached the target
         if distance <= self.accuracy_threshold:
-            # Target reached! Reward scales with difficulty
-            # Base reward is 5.0, additional reward up to 5.0 based on difficulty
-            difficulty_bonus = 5.0 * normalized_difficulty
-            reward = 5.0 + difficulty_bonus
-            
-            # For difficult targets (>80% of workspace size), add extra bonus
-            if normalized_difficulty > 0.8:
-                reward += 3.0  # Additional incentive for reaching difficult targets
-                
+            # Target reached! Maximum reward
+            reward = 5.0  # Reduced from 10.0 for better scaling with other rewards
             done = True
             info["target_reached"] = True
-            info["difficulty"] = normalized_difficulty
         else:
             # Not at target yet
             if distance < self.best_distance_in_episode:
                 # Calculate improvement (how much better than previous best)
                 improvement = self.best_distance_in_episode - distance
                 
-                # Base reward for any improvement
-                base_improvement_reward = 0.2
-                
-                # Calculate distance-scaled improvement reward
-                # Further from center = more reward for the same improvement
-                # This encourages exploration of the entire workspace
-                scaled_improvement = improvement * (1.0 + normalized_difficulty)
-                
                 # Scale the reward based on the relative improvement
-                rel_improvement = improvement / self.best_distance_in_episode
+                # This creates a smooth gradient - bigger improvements get bigger rewards
+                if self.best_distance_in_episode > 0.001:  # Prevent division by zero
+                    rel_improvement = improvement / self.best_distance_in_episode  # Relative improvement
+                else:
+                    rel_improvement = 1.0  # Default to 100% improvement if best distance is near zero
                 
-                # Final improvement reward calculation:
-                # - Base reward for any improvement
-                # - Scaled reward based on difficulty and relative improvement
-                # - Higher cap for difficult targets
-                max_reward_cap = 2.0 + (1.5 * normalized_difficulty)
-                improvement_reward = base_improvement_reward + min(max_reward_cap, 8.0 * rel_improvement * (1.0 + normalized_difficulty))
+                # Ensure rel_improvement is not NaN
+                if np.isnan(rel_improvement):
+                    rel_improvement = 1.0  # Fallback value
                 
-                reward = improvement_reward
+                # Scale the reward - larger improvements get proportionally larger rewards
+                # Cap at 2.0 to avoid extreme values, with a minimum of 0.1 for any improvement
+                reward = max(0.1, min(2.0, 10.0 * rel_improvement))
+                
                 info["improvement_cm"] = improvement * 100  # Convert to cm
-                info["target_difficulty"] = normalized_difficulty
                 
                 # Update best distance
                 self.best_distance_in_episode = distance
                 self.best_position_in_episode = current_ee_pos.copy()
             else:
-                # No improvement - adjust penalties to encourage exploration
-                # Smaller penalty for difficult targets to encourage attempts
-                base_penalty = -0.05
-                
-                # Reduce penalty for difficult targets (up to 50% reduction)
-                penalty_reduction = normalized_difficulty * 0.5
-                
-                # Calculate how far we are from best position relative to workspace
-                distance_from_best_ratio = min(1.0, (distance - self.best_distance_in_episode) / (self.workspace_size / 4))
-                
-                # Higher penalty for moving way off track, but reduced for difficult targets
-                penalty = base_penalty * (1.0 + distance_from_best_ratio) * (1.0 - penalty_reduction)
-                
-                # Cap minimum penalty to prevent excessive punishment
-                reward = max(-0.15, penalty)
+                # No improvement - penalty depends on how close to best
+                # Smaller penalty when already close to best, larger when far away
+                # This encourages exploration when stuck at a plateau
+                penalty_scale = min(1.0, (distance - self.best_distance_in_episode) / (self.workspace_size / 4))
+                reward = -0.05 * (1.0 + penalty_scale)  # Penalty between -0.05 and -0.1
             
             # Check timeout
             if self.steps >= self.timeout_steps:
@@ -1269,7 +1198,30 @@ class RobotPositioningEnv(gym.Env):
         # Store reward and distance info
         info["reward"] = reward
         info["distance"] = distance
-        info["target_to_center_dist"] = target_to_center_dist
+        info["best_distance"] = self.best_distance_in_episode
+        
+        # Check if the robot's best position is better than its initial position
+        # This will be used to determine if model updates should occur
+        position_improved = self.best_distance_in_episode < self.initial_distance_to_target
+        improvement_amount = self.initial_distance_to_target - self.best_distance_in_episode
+        
+        # Add improvement info to the info dictionary
+        info["position_improved"] = position_improved
+        info["improvement_amount"] = improvement_amount * 100  # Convert to cm
+        info["initial_distance"] = self.initial_distance_to_target * 100  # Convert to cm
+        
+        # If the episode is ending, log the improvement information
+        if done and self.verbose:
+            if position_improved:
+                print(f"\nRobot {self.rank}: Position IMPROVED by {improvement_amount*100:.2f}cm")
+                print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
+                print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
+                print(f"  Model weights WILL be updated\n")
+            else:
+                print(f"\nRobot {self.rank}: Position did NOT improve")
+                print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
+                print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
+                print(f"  Model weights will NOT be updated\n")
         
         # Get observation for next step
         observation = self._get_observation()
@@ -1571,9 +1523,8 @@ class RobotPositioningEnv(gym.Env):
         max_attempts = 100
         
         # Choose a sampling strategy - bias towards outer regions of workspace
-        # Increase probability of outer_bias and structured strategies
-        sampling_strategy = np.random.choice(['uniform', 'outer_bias', 'structured', 'edge_focused'], 
-                                           p=[0.1, 0.4, 0.3, 0.2])
+        sampling_strategy = np.random.choice(['uniform', 'outer_bias', 'structured'], 
+                                            p=[0.2, 0.5, 0.3])
         
         for _ in range(max_attempts):
             # Different sampling strategies to create more variety
@@ -1587,19 +1538,9 @@ class RobotPositioningEnv(gym.Env):
                 # Bias towards outer regions of workspace using beta distribution
                 theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
                 phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
-                # Beta distribution with alpha=0.8, beta=0.5 creates stronger bias towards outer radius
-                normalized_distance = np.random.beta(0.8, 0.5)  
+                # Beta distribution with alpha=1, beta=0.7 biases towards higher values (outer radius)
+                normalized_distance = np.random.beta(1.0, 0.7)  
                 distance = min_reach + normalized_distance * (max_reach - min_reach)
-                
-            elif sampling_strategy == 'edge_focused':
-                # Generate targets specifically at the edges of the workspace
-                # This ensures the model learns to reach the most difficult positions
-                theta = np.random.uniform(0, np.pi)  # Polar angle from Z axis (0 to pi)
-                phi = np.random.uniform(0, 2 * np.pi)  # Azimuthal angle (0 to 2pi)
-                
-                # Distance is biased heavily towards max reach (85-100% of max reach)
-                edge_factor = 0.85 + (0.15 * np.random.random())
-                distance = edge_factor * max_reach
                 
             else:  # 'structured'
                 # Generate targets at specific segments of the workspace
@@ -1610,9 +1551,8 @@ class RobotPositioningEnv(gym.Env):
                 phi_segment = (segment % 4) * (np.pi/2) + np.random.uniform(-np.pi/4, np.pi/4)
                 theta_segment = np.pi/3 if segment < 4 else 2*np.pi/3 + np.random.uniform(-np.pi/6, np.pi/6)
                 
-                # Use a more varied distance distribution for structured targets
-                distance_factor = np.random.choice([0.5, 0.7, 0.9], p=[0.2, 0.3, 0.5])
-                distance = distance_factor * max_reach
+                # Use maximum reach for structured targets to encourage reaching
+                distance = np.random.uniform(0.6 * max_reach, max_reach)
                 
                 theta = theta_segment
                 phi = phi_segment
@@ -1825,6 +1765,434 @@ class RobotPositioningEnv(gym.Env):
         normalized_compactness = max(0.0, 1.0 - (average_distance / (self.workspace_size * 0.5)))
         
         return normalized_compactness
+
+# Custom neural network architecture for the policy with the new requirements
+class CustomActorCriticNetwork(nn.Module):
+    def __init__(self, feature_dim):
+        super(CustomActorCriticNetwork, self).__init__()
+        
+        # Input dimension: 
+        # - Previous outputs (6 values, -100 to 100)
+        # - Current joint angles (6 values, 0 to 100)
+        # - Current vector length to target (1 value, in mm)
+        input_dim = 13  # 6 (previous outputs) + 6 (joint angles) + 1 (distance)
+        
+        # Massively larger shared feature extractor with more layers and width
+        self.shared_net = nn.Sequential(
+            nn.Linear(input_dim, 1024),  # Increased from 512 to 1024
+            nn.ReLU(),
+            nn.BatchNorm1d(1024),
+            nn.Linear(1024, 2048),  # Increased from 512 to 2048
+            nn.ReLU(),
+            nn.BatchNorm1d(2048),
+            nn.Linear(2048, 2048),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(2048),
+            nn.Linear(2048, 1536),  # Increased from 384 to 1536
+            nn.ReLU(),
+            nn.BatchNorm1d(1536),
+            nn.Linear(1536, 1024),  # Increased from 256 to 1024
+            nn.ReLU(),
+            nn.BatchNorm1d(1024),
+            nn.Linear(1024, 768),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(768),
+            nn.Linear(768, 512),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, feature_dim),
+            nn.ReLU(),
+            nn.BatchNorm1d(feature_dim)
+        )
+        
+        # Larger actor network (policy) with more layers
+        self.actor_net = nn.Sequential(
+            nn.Linear(feature_dim, 1024),  # Increased from 256 to 1024
+            nn.ReLU(),
+            nn.BatchNorm1d(1024),
+            nn.Linear(1024, 768),  # Increased from 192 to 768
+            nn.ReLU(),
+            nn.BatchNorm1d(768),
+            nn.Linear(768, 512),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, 384),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(384),
+            nn.Linear(384, 256),  # Increased from 128 to 256
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Linear(256, 128),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.Linear(128, 64),  # Keep the final layer at 64 to match output layers
+            nn.ReLU(),
+            nn.BatchNorm1d(64)
+        )
+        
+        # Larger critic network (value function) with more layers
+        self.critic_net = nn.Sequential(
+            nn.Linear(feature_dim, 1024),  # Increased from 256 to 1024
+            nn.ReLU(),
+            nn.BatchNorm1d(1024),
+            nn.Linear(1024, 768),  # Increased from 192 to 768
+            nn.ReLU(),
+            nn.BatchNorm1d(768),
+            nn.Linear(768, 512),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, 384),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(384),
+            nn.Linear(384, 256),  # Increased from 128 to 256
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Linear(256, 128),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.Linear(128, 64),  # Keep the final layer at 64 to match output layers
+            nn.ReLU(),
+            nn.BatchNorm1d(64)
+        )
+        
+        # Output layer: power and direction of each motor (-100 to 100)
+        # -100 = full power in one direction
+        # 0 = not moving at all
+        # 100 = full power in the other direction
+        self.mean_layer = nn.Sequential(
+            nn.Linear(64, 6),  # 6 outputs (one per motor)
+            nn.Tanh(),         # Outputs between -1 and 1
+            ScaleLayer(-100.0, 100.0)  # Scale to -100 to 100 range
+        )
+        
+        # Log standard deviation layer (for stochastic policy)
+        self.log_std_layer = nn.Linear(64, 6)  # 6 outputs to match mean layer
+        
+        # Value layer
+        self.value_layer = nn.Sequential(
+            nn.Linear(64, 1)
+        )
+    
+    def forward(self, x):
+        features = self.shared_net(x)
+        
+        # Actor
+        actor_features = self.actor_net(features)
+        mean = self.mean_layer(actor_features)  # Outputs 6 values between -100 and 100
+        log_std = self.log_std_layer(actor_features)  # Outputs 6 log std values
+        
+        # Critic
+        critic_features = self.critic_net(features)
+        value = self.value_layer(critic_features)
+        
+        return mean, log_std, value
+
+# Custom scaling layer to transform values from one range to another
+class ScaleLayer(nn.Module):
+    def __init__(self, min_val, max_val):
+        super(ScaleLayer, self).__init__()
+        self.min_val = min_val
+        self.max_val = max_val
+        
+    def forward(self, x):
+        # Input is assumed to be between -1 and 1 (from tanh)
+        # Scale to min_val to max_val using full floating-point precision
+        # No rounding or clipping to preserve full precision
+        return x * (self.max_val - self.min_val) / 2 + (self.max_val + self.min_val) / 2
+
+# Custom features extractor for the policy
+class CustomFeaturesExtractor(BaseFeaturesExtractor):
+    def __init__(self, observation_space, features_dim=128):
+        super(CustomFeaturesExtractor, self).__init__(observation_space, features_dim)
+        
+        # Input size from observation space
+        n_input = int(np.prod(observation_space.shape))
+        
+        # Much larger network architecture with more layers and width
+        self.net = nn.Sequential(
+            nn.Linear(n_input, 1024),  # Increased from 256 to 1024
+            nn.ReLU(),
+            nn.BatchNorm1d(1024),
+            nn.Linear(1024, 2048),  # Added new layer with increased width
+            nn.ReLU(),
+            nn.BatchNorm1d(2048),
+            nn.Linear(2048, 1536),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(1536),
+            nn.Linear(1536, 1024),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(1024),
+            nn.Linear(1024, 512),  # Added new layer
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, 256),  # Increased from direct 128 to going through 256
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Linear(256, features_dim),  # Output dimension unchanged
+            nn.ReLU(),
+            nn.BatchNorm1d(features_dim)
+        )
+    
+    def forward(self, observations):
+        return self.net(observations)
+
+# Callback for saving models and logging
+class SaveModelCallback(BaseCallback):
+    def __init__(self, save_freq, save_path, verbose=1):
+        super(SaveModelCallback, self).__init__(verbose)
+        self.save_freq = save_freq
+        self.save_path = save_path
+    
+    def _on_step(self):
+        if self.n_calls % self.save_freq == 0:
+            model_path = f"{self.save_path}/model_{self.n_calls}_steps"
+            self.model.save(model_path)
+            if self.verbose > 0:
+                print(f"Model saved to {model_path}")
+        return True
+
+# Add this class to monitor and report training progress
+class TrainingMonitorCallback(BaseCallback):
+    """
+    Callback for monitoring training progress and logging metrics.
+    All metrics are standardized to be within the 0 to 1 range.
+    """
+    
+    def __init__(self, log_interval=250, verbose=1):
+        super(TrainingMonitorCallback, self).__init__(verbose)
+        self.log_interval = log_interval
+        
+        # Initialize lists to store metrics
+        self.timesteps = []
+        self.mean_rewards = []
+        self.mean_lengths = []
+        self.success_rates = []
+        self.mean_distances = []
+        self.normalized_distances = []  # Add normalized distances
+        self.normalized_rewards = []    # Add normalized rewards
+        
+        # Initialize episode counter and metrics
+        self.episode_count = 0
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.episode_distances = []
+        self.episode_norm_distances = []  # Add normalized distances
+        self.episode_successes = []
+        
+        # Initialize the last log time
+        self.last_log_time = time.time()
+    
+    def _init_callback(self) -> None:
+        # Initialize the timesteps list with 0 and mean_rewards with initial value
+        # This ensures we have at least one data point for plotting
+        self.timesteps.append(0)
+        self.mean_rewards.append(0.0)
+        self.mean_lengths.append(0.0)
+        self.success_rates.append(0.0)
+        self.mean_distances.append(1.0)  # Start at maximum distance (worst case)
+        self.normalized_distances.append(1.0)  # Start at 1.0 (worst case)
+        self.normalized_rewards.append(0.0)    # Start at 0.0 (worst case)
+    
+    def _on_step(self) -> bool:
+        # Get the current environment
+        env = self.training_env.envs[0]
+        
+        # Check if an episode has ended
+        if hasattr(env, 'dones') and any(env.dones):
+            # Increment episode counter
+            self.episode_count += 1
+            
+            # Get the episode reward
+            episode_reward = env.rewards[0]
+            self.episode_rewards.append(episode_reward)
+            
+            # Get the episode length
+            episode_length = env.episode_lengths[0]
+            self.episode_lengths.append(episode_length)
+            
+            # Get the final distance to target (if available)
+            if hasattr(env, 'infos') and env.infos[0] is not None:
+                if 'distance_cm' in env.infos[0]:
+                    distance = env.infos[0]['distance_cm'] / 100.0  # Convert back to meters
+                    self.episode_distances.append(distance)
+                
+                # Get normalized distance if available
+                if 'normalized_distance' in env.infos[0]:
+                    norm_distance = env.infos[0]['normalized_distance']
+                    self.episode_norm_distances.append(norm_distance)
+                
+                # Check if the episode was successful
+                if 'target_reached' in env.infos[0] and env.infos[0]['target_reached']:
+                    self.episode_successes.append(1.0)
+                else:
+                    self.episode_successes.append(0.0)
+            
+            # Log metrics at the specified interval
+            if self.episode_count % self.log_interval == 0:
+                # Calculate mean metrics
+                mean_reward = np.mean(self.episode_rewards[-self.log_interval:])
+                mean_length = np.mean(self.episode_lengths[-self.log_interval:])
+                success_rate = np.mean(self.episode_successes[-self.log_interval:])
+                
+                # Calculate mean distance if available
+                mean_distance = 1.0
+                if len(self.episode_distances) > 0:
+                    mean_distance = np.mean(self.episode_distances[-self.log_interval:])
+                
+                # Calculate mean normalized distance if available
+                mean_norm_distance = 1.0
+                if len(self.episode_norm_distances) > 0:
+                    mean_norm_distance = np.mean(self.episode_norm_distances[-self.log_interval:])
+                
+                # Normalize mean reward to 0-1 range
+                # Assuming rewards are already normalized in the reward function
+                normalized_reward = np.clip(mean_reward, 0.0, 1.0)
+                
+                # Store metrics for plotting
+                self.timesteps.append(self.num_timesteps)
+                self.mean_rewards.append(mean_reward)
+                self.mean_lengths.append(mean_length / 100.0)  # Normalize to 0-1 range (assuming max 100 steps)
+                self.success_rates.append(success_rate)
+                self.mean_distances.append(mean_distance)
+                self.normalized_distances.append(mean_norm_distance)
+                self.normalized_rewards.append(normalized_reward)
+                
+                # Calculate time elapsed since last log
+                current_time = time.time()
+                time_elapsed = current_time - self.last_log_time
+                self.last_log_time = current_time
+                
+                # Log metrics
+                if self.verbose > 0:
+                    print(f"Timestep: {self.num_timesteps}")
+                    print(f"Episodes: {self.episode_count}")
+                    print(f"Mean reward: {mean_reward:.4f} (normalized: {normalized_reward:.4f})")
+                    print(f"Mean episode length: {mean_length:.2f} steps (normalized: {mean_length/100.0:.4f})")
+                    print(f"Success rate: {success_rate*100:.2f}%")
+                    print(f"Mean distance to target: {mean_distance*100:.2f}cm (normalized: {mean_norm_distance:.4f})")
+                    print(f"Time elapsed: {time_elapsed:.2f}s")
+                    print("-----------------------------------")
+        
+        return True
+    
+    def plot_training_progress(self, save_path):
+        """Plot training progress metrics, all normalized to 0-1 range."""
+        if len(self.timesteps) <= 1:
+            print("Not enough data to plot training progress")
+            return
+        
+        # Create figure with multiple subplots
+        fig, axs = plt.subplots(3, 2, figsize=(15, 12))
+        
+        # Plot normalized rewards
+        axs[0, 0].plot(self.timesteps, self.normalized_rewards)
+        axs[0, 0].set_title('Normalized Rewards (0-1)')
+        axs[0, 0].set_xlabel('Timesteps')
+        axs[0, 0].set_ylabel('Reward')
+        axs[0, 0].grid(True)
+        
+        # Plot success rate
+        axs[0, 1].plot(self.timesteps, self.success_rates)
+        axs[0, 1].set_title('Success Rate (0-1)')
+        axs[0, 1].set_xlabel('Timesteps')
+        axs[0, 1].set_ylabel('Success Rate')
+        axs[0, 1].grid(True)
+        
+        # Plot normalized episode lengths
+        axs[1, 0].plot(self.timesteps, [length/100.0 for length in self.mean_lengths])
+        axs[1, 0].set_title('Normalized Episode Length (0-1)')
+        axs[1, 0].set_xlabel('Timesteps')
+        axs[1, 0].set_ylabel('Length')
+        axs[1, 0].grid(True)
+        
+        # Plot normalized distances
+        axs[1, 1].plot(self.timesteps, self.normalized_distances)
+        axs[1, 1].set_title('Normalized Distance to Target (0-1)')
+        axs[1, 1].set_xlabel('Timesteps')
+        axs[1, 1].set_ylabel('Distance')
+        axs[1, 1].grid(True)
+        
+        # Plot all metrics together (normalized)
+        axs[2, 0].plot(self.timesteps, self.normalized_rewards, label='Reward')
+        axs[2, 0].plot(self.timesteps, self.success_rates, label='Success')
+        axs[2, 0].plot(self.timesteps, [length/100.0 for length in self.mean_lengths], label='Length')
+        axs[2, 0].plot(self.timesteps, self.normalized_distances, label='Distance')
+        axs[2, 0].set_title('All Metrics (Normalized 0-1)')
+        axs[2, 0].set_xlabel('Timesteps')
+        axs[2, 0].set_ylabel('Value')
+        axs[2, 0].legend()
+        axs[2, 0].grid(True)
+        
+        # Plot raw rewards (for reference)
+        axs[2, 1].plot(self.timesteps, self.mean_rewards)
+        axs[2, 1].set_title('Raw Rewards')
+        axs[2, 1].set_xlabel('Timesteps')
+        axs[2, 1].set_ylabel('Reward')
+        axs[2, 1].grid(True)
+        
+        # Adjust layout and save
+        plt.tight_layout()
+        plt.savefig(save_path)
+        plt.close()
+
+# Function to plot training metrics
+def plot_training_metrics(model, save_path):
+    """
+    Plot training metrics from the model's episode info buffer.
+    
+    Args:
+        model: The trained model with episode info buffer
+        save_path: Path to save the plot
+    """
+    try:
+        import matplotlib.pyplot as plt
+        
+        # Extract episode rewards and lengths
+        ep_rewards = [ep_info["r"] for ep_info in model.ep_info_buffer]
+        ep_lengths = [ep_info["l"] for ep_info in model.ep_info_buffer]
+        
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+        
+        # Plot episode rewards
+        ax1.plot(ep_rewards, label='Episode Reward')
+        ax1.set_ylabel('Reward')
+        ax1.set_title('Training Progress')
+        ax1.legend()
+        ax1.grid(True)
+        
+        # Plot episode lengths
+        ax2.plot(ep_lengths, label='Episode Length', color='orange')
+        ax2.set_xlabel('Episode')
+        ax2.set_ylabel('Length (steps)')
+        ax2.legend()
+        ax2.grid(True)
+        
+        # Add a rolling average to both plots
+        if len(ep_rewards) > 10:
+            window_size = min(10, len(ep_rewards) // 5)
+            rewards_avg = np.convolve(ep_rewards, np.ones(window_size)/window_size, mode='valid')
+            lengths_avg = np.convolve(ep_lengths, np.ones(window_size)/window_size, mode='valid')
+            
+            # Pad the beginning of the rolling average to match the original data length
+            padding = len(ep_rewards) - len(rewards_avg)
+            rewards_avg = np.pad(rewards_avg, (padding, 0), 'edge')
+            lengths_avg = np.pad(lengths_avg, (padding, 0), 'edge')
+            
+            ax1.plot(rewards_avg, label=f'{window_size}-Episode Avg', linestyle='--', color='red')
+            ax2.plot(lengths_avg, label=f'{window_size}-Episode Avg', linestyle='--', color='red')
+            ax1.legend()
+            ax2.legend()
+        
+        # Adjust layout and save
+        plt.tight_layout()
+        plt.savefig(save_path)
+        plt.close()
+        
+    except ImportError:
+        print("matplotlib not installed, skipping plot generation")
+    except Exception as e:
+        print(f"Error generating plot: {e}")
 
 # Define a wrapper class for adding delay to GUI rendering
 class DelayedGUIEnv(gym.Wrapper):
@@ -2050,8 +2418,36 @@ def create_multiple_robots_in_same_env(num_robots=3, viz_speed=0.1, verbose=Fals
     
     return envs
 
-# Track the shared model version
-_SHARED_MODEL_VERSION = 0
+# Add global variables to track when model weights should be updated
+_MODEL_UPDATE_NEEDED = False
+_MODEL_UPDATE_ROBOT_RANK = -1  # Store which robot triggered the update
+_SHARED_MODEL_VERSION = 0  # Track the shared model version
+
+# Function to set the model update flag
+def set_model_update_flag(robot_rank=0):
+    """Set the flag to indicate that model weights should be updated."""
+    global _MODEL_UPDATE_NEEDED, _MODEL_UPDATE_ROBOT_RANK
+    _MODEL_UPDATE_NEEDED = True
+    _MODEL_UPDATE_ROBOT_RANK = robot_rank
+
+# Function to check if model update is needed
+def is_model_update_needed():
+    """Check if model weights should be updated."""
+    global _MODEL_UPDATE_NEEDED
+    return _MODEL_UPDATE_NEEDED
+
+# Function to get the robot rank that triggered the update
+def get_model_update_robot_rank():
+    """Get the rank of the robot that triggered the model update."""
+    global _MODEL_UPDATE_ROBOT_RANK
+    return _MODEL_UPDATE_ROBOT_RANK
+
+# Function to reset the model update flag
+def reset_model_update_flag():
+    """Reset the flag after model weights have been updated."""
+    global _MODEL_UPDATE_NEEDED, _MODEL_UPDATE_ROBOT_RANK
+    _MODEL_UPDATE_NEEDED = False
+    _MODEL_UPDATE_ROBOT_RANK = -1
 
 # Function to increment the shared model version
 def increment_shared_model_version():
@@ -2101,33 +2497,184 @@ def get_target_randomization_time():
     global _TARGET_RANDOMIZATION_TIME
     return _TARGET_RANDOMIZATION_TIME
 
+# Add global variables to track the best-performing robot during timeout
+_BEST_TIMEOUT_DISTANCE = float('inf')
+_BEST_TIMEOUT_ROBOT_RANK = -1
+_BEST_TIMEOUT_REWARD = float('-inf')  # Initialize to negative infinity for reward maximization
+
+# Function to reset the best timeout tracking
+def reset_best_timeout_tracking():
+    """Reset the global best timeout tracking variables."""
+    global _BEST_TIMEOUT_DISTANCE, _BEST_TIMEOUT_ROBOT_RANK, _BEST_TIMEOUT_REWARD
+    _BEST_TIMEOUT_DISTANCE = float('inf')
+    _BEST_TIMEOUT_ROBOT_RANK = -1
+    _BEST_TIMEOUT_REWARD = float('-inf')
+
+# Function to update the best timeout tracking
+def update_best_timeout_tracking(distance, robot_rank, total_reward=None):
+    """
+    Update the global best timeout tracking variables based on the total reward.
+    If total_reward is provided, it will be used as the primary metric.
+    Otherwise, the distance will be used as before.
+    
+    Args:
+        distance: The distance achieved by the robot
+        robot_rank: The rank of the robot
+        total_reward: The total reward accumulated by the robot during the episode
+        
+    Returns:
+        bool: True if this robot is now the best, False otherwise
+    """
+    global _BEST_TIMEOUT_DISTANCE, _BEST_TIMEOUT_ROBOT_RANK, _BEST_TIMEOUT_REWARD
+    
+    # If total_reward is provided, use it as the primary metric
+    if total_reward is not None:
+        if total_reward > _BEST_TIMEOUT_REWARD:
+            _BEST_TIMEOUT_REWARD = total_reward
+            _BEST_TIMEOUT_DISTANCE = distance  # Still track the distance for reference
+            _BEST_TIMEOUT_ROBOT_RANK = robot_rank
+            return True
+    # Otherwise, use distance as before
+    elif distance < _BEST_TIMEOUT_DISTANCE:
+        _BEST_TIMEOUT_DISTANCE = distance
+        _BEST_TIMEOUT_ROBOT_RANK = robot_rank
+        return True
+    
+    return False
+
+# Function to get the best timeout distance
+def get_best_timeout_distance():
+    """Get the best distance achieved during timeout."""
+    global _BEST_TIMEOUT_DISTANCE
+    return _BEST_TIMEOUT_DISTANCE
+
+# Function to get the best timeout robot rank
+def get_best_timeout_robot_rank():
+    """Get the rank of the robot that achieved the best distance during timeout."""
+    global _BEST_TIMEOUT_ROBOT_RANK
+    return _BEST_TIMEOUT_ROBOT_RANK
+
+# Function to get the best timeout reward
+def get_best_timeout_reward():
+    """Get the best reward achieved during timeout."""
+    global _BEST_TIMEOUT_REWARD
+    return _BEST_TIMEOUT_REWARD
+
 # Add a ModelUpdateCallback class to handle model weight updates
 class ModelUpdateCallback(BaseCallback):
     """
-    Callback to update the model weights periodically.
+    Callback to update model weights when robots complete episodes.
+    Updates only occur when a robot improves its position compared to the initial position.
     """
     def __init__(self, verbose=0):
         super(ModelUpdateCallback, self).__init__(verbose)
         self.update_count = 0
-        self.last_update_step = 0
-        self.update_interval = 1000  # Update every 1000 steps
-
+        self.robot_contributions = {}  # Track which robots have contributed to the current update
+        self.skipped_updates = 0  # Track how many updates were skipped due to no improvement
+        
     def _on_step(self):
-        current_step = self.num_timesteps
-        if current_step - self.last_update_step >= self.update_interval:
-            # Update the shared model
-            set_shared_model(self.model)
-            increment_shared_model_version()
-            self.last_update_step = current_step
+        """Process model updates from all robots in parallel"""
+        
+        # Check if an episode has completed (either by reaching target or timeout)
+        # This is key: instead of having one "best" robot update the model,
+        # we'll collect experiences from all completed episodes
+        
+        # Rather than checking a global update flag, we'll gather updates from
+        # all environments that have completed episodes in this step
+        envs_completed = []
+        rewards_achieved = []
+        distances_achieved = []
+        improvements = []
+        envs_with_improvement = []
+        
+        # Get all active environments
+        vec_env = self.training_env
+        
+        # Check all environments for completed episodes
+        for i in range(vec_env.num_envs):
+            # Check if this environment has completed an episode
+            if hasattr(vec_env, 'dones') and vec_env.dones[i]:
+                # This environment has completed an episode
+                envs_completed.append(i)
+                
+                # Get the reward, distance, and improvement status
+                if hasattr(vec_env, 'infos') and vec_env.infos[i] is not None:
+                    reward = vec_env.infos[i].get('reward', 0.0)
+                    rewards_achieved.append(reward)
+                    
+                    distance = vec_env.infos[i].get('distance_cm', float('inf')) / 100.0  # Convert to meters
+                    distances_achieved.append(distance)
+                    
+                    # Check if robot improved its position
+                    position_improved = vec_env.infos[i].get('position_improved', False)
+                    improvement_amount = vec_env.infos[i].get('improvement_amount', 0.0) / 100.0  # Convert to meters
+                    improvements.append(improvement_amount)
+                    
+                    # Only consider environments that showed improvement
+                    if position_improved:
+                        envs_with_improvement.append(i)
+                    
+                    # Check if target was reached
+                    target_reached = vec_env.infos[i].get('target_reached', False)
+                    
+                    if target_reached:
+                        # Target reached - this should always be an improvement
+                        if self.verbose > 0:
+                            print(f"\n{'='*60}")
+                            print(f"TARGET REACHED by Robot {i}!")
+                            print(f"Distance to target: {distance*100:.2f}cm")
+                            print(f"Reward: {reward}")
+                            print(f"Robot {i} has reached the target and contributed to model update.")
+                            print(f"{'='*60}\n")
+                
+        # If no environments completed episodes, return
+        if not envs_completed:
+            return True
+         
+        # Only update if at least one robot showed improvement
+        if len(envs_with_improvement) > 0:
+            # If we have completed episodes with improvement, update the model
             self.update_count += 1
+            
+            # Print information about the update
+            if self.verbose > 0:
+                avg_reward = np.mean(rewards_achieved) if rewards_achieved else 0.0
+                avg_distance = np.mean(distances_achieved) if distances_achieved else float('inf')
+                avg_improvement = np.mean(improvements) if improvements else 0.0
+                
+                print(f"\n{'='*60}")
+                print(f"MODEL UPDATE #{self.update_count}: {len(envs_with_improvement)}/{len(envs_completed)} robots showed improvement")
+                print(f"Average reward: {avg_reward:.4f}")
+                print(f"Average distance: {avg_distance*100:.2f}cm")
+                print(f"Average improvement: {avg_improvement*100:.2f}cm")
+                print(f"Updating shared model weights with experiences from improved robots.")
+                print(f"{'='*60}\n")
             
             # Limit the episode info buffer to prevent memory growth
             limit_ep_info_buffer(self.model, max_size=100)
             
-            # Force target repositioning by updating the target randomization time
-            update_target_randomization_time()
+            # Update the shared model with the current model weights from improved robots
+            model_version = increment_shared_model_version()
             
-            return True
+            if self.verbose > 0:
+                print(f"Updated shared model to version {model_version}")
+        else:
+            # No robots showed improvement, skip the update
+            self.skipped_updates += 1
+            
+            if self.verbose > 0:
+                print(f"\n{'='*60}")
+                print(f"MODEL UPDATE SKIPPED #{self.skipped_updates}: No robots showed improvement")
+                print(f"Completed episodes: {len(envs_completed)}")
+                print(f"Not updating model weights to avoid learning bad behaviors")
+                print(f"{'='*60}\n")
+        
+        # Force target repositioning for all robots by updating the target randomization time
+        update_target_randomization_time()
+        
+        # Reset the best timeout tracking for the next round
+        reset_best_timeout_tracking()
+        
         return True
 
 # Global variables for workspace data
@@ -2256,27 +2803,25 @@ def find_nearest_position(target_position, max_samples=1000):
     return positions[min_idx], joint_configs[min_idx], distances[min_idx]
 
 # Global variables for model sharing
-_SHARED_MODEL: Optional[SAC] = None
-_SHARED_MODEL_VERSION: int = 0
-_TARGET_RANDOMIZATION_TIME: float = 0.0
-_TARGET_REACHED_FLAG: bool = False
+_SHARED_MODEL: Optional[Any] = None
+_MODEL_VERSION = 0
 
 def set_shared_model(model):
     """Set the shared model that all robots will use."""
-    global _SHARED_MODEL, _SHARED_MODEL_VERSION
+    global _SHARED_MODEL, _MODEL_VERSION
     _SHARED_MODEL = model
-    _SHARED_MODEL_VERSION += 1
-    return _SHARED_MODEL_VERSION
+    _MODEL_VERSION += 1
+    return _MODEL_VERSION
 
 def get_shared_model():
-    """Get the shared model that all robots will use."""
+    """Get the shared model that all robots are using."""
     global _SHARED_MODEL
     return _SHARED_MODEL
 
 def get_model_version():
     """Get the current model version."""
-    global _SHARED_MODEL_VERSION
-    return _SHARED_MODEL_VERSION
+    global _MODEL_VERSION
+    return _MODEL_VERSION
 
 # Modify the main function to use the ModelUpdateCallback
 def main():
@@ -2370,6 +2915,19 @@ def main():
     model.save(model_path)
     print(f"Model saved to {model_path}")
     
+    # Plot training metrics
+    if hasattr(model, "ep_info_buffer") and len(model.ep_info_buffer) > 0:
+        plot_dir = "./plots"
+        os.makedirs(plot_dir, exist_ok=True)
+        plot_path = f"{plot_dir}/{args.algorithm}_{timestamp}_metrics.png"
+        plot_training_metrics(model, plot_path)
+        print(f"Training metrics saved to {plot_path}")
+        
+        # Also save a copy in the model directory
+        progress_plot_path = f"{model_dir}/training_progress.png"
+        plot_training_metrics(model, progress_plot_path)
+        print(f"Training progress plot saved to {progress_plot_path}")
+    
     # Close the environment
     vec_env.close()
 
@@ -2411,6 +2969,24 @@ def limit_ep_info_buffer(model, max_size=100):
         # Keep only the most recent episodes
         model.ep_info_buffer = model.ep_info_buffer[-max_size:]
 
+import gc  # Add garbage collection module
+
+def force_garbage_collection():
+    """
+    Force garbage collection to free up memory.
+    Call this periodically during training to prevent memory leaks.
+    """
+    gc.collect()
+    
+    # Try to get memory info if psutil is available
+    try:
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / (1024 * 1024)
+        print(f"Memory usage after GC: {memory_mb:.1f} MB")
+    except ImportError:
+        pass  # Silently ignore if psutil is not available
+
 if __name__ == "__main__":
     main()
-
