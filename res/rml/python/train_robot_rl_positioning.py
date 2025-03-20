@@ -40,6 +40,7 @@ import pybullet_data  # Add this import
 
 # Import utility functions from pybullet_utils
 from pybullet_utils import (
+    get_pybullet_client,
     configure_visualization,
     visualize_target,
     visualize_ee_position,
@@ -1187,30 +1188,6 @@ class RobotPositioningEnv(gym.Env):
         # Store reward and distance info
         info["reward"] = reward
         info["distance"] = distance
-        info["best_distance"] = self.best_distance_in_episode
-        
-        # Check if the robot's best position is better than its initial position
-        # This will be used to determine if model updates should occur
-        position_improved = self.best_distance_in_episode < self.initial_distance_to_target
-        improvement_amount = self.initial_distance_to_target - self.best_distance_in_episode
-        
-        # Add improvement info to the info dictionary
-        info["position_improved"] = position_improved
-        info["improvement_amount"] = improvement_amount * 100  # Convert to cm
-        info["initial_distance"] = self.initial_distance_to_target * 100  # Convert to cm
-        
-        # If the episode is ending, log the improvement information
-        if done and self.verbose:
-            if position_improved:
-                print(f"\nRobot {self.rank}: Position IMPROVED by {improvement_amount*100:.2f}cm")
-                print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
-                print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
-                print(f"  Model weights WILL be updated\n")
-            else:
-                print(f"\nRobot {self.rank}: Position did NOT improve")
-                print(f"  Initial distance: {self.initial_distance_to_target*100:.2f}cm")
-                print(f"  Best distance: {self.best_distance_in_episode*100:.2f}cm")
-                print(f"  Model weights will NOT be updated\n")
         
         # Get observation for next step
         observation = self._get_observation()
@@ -2552,51 +2529,51 @@ def get_best_timeout_reward():
 # Add a ModelUpdateCallback class to handle model weight updates
 class ModelUpdateCallback(BaseCallback):
     """
-    Callback to update model weights when robots complete episodes.
-    Updates only occur when a robot improves its position compared to the initial position.
+    Callback to update the model weights from successful robots.
     """
     def __init__(self, verbose=0):
         super(ModelUpdateCallback, self).__init__(verbose)
         self.update_count = 0
-        self.robot_contributions = {}  # Track which robots have contributed to the current update
-        self.skipped_updates = 0  # Track how many updates were skipped due to no improvement
-        
+        self.skipped_updates = 0
+
     def _on_step(self):
-        """Process model updates from all robots in parallel"""
-        
-        # Check if an episode has completed (either by reaching target or timeout)
-        # This is key: instead of having one "best" robot update the model,
-        # we'll collect experiences from all completed episodes
-        
-        # Rather than checking a global update flag, we'll gather updates from
-        # all environments that have completed episodes in this step
+        # Get the current episode statuses for all environments
+        # Need to get from the vec_env.infos attribute since the ep_info_buffer may not be updated yet
+        if not hasattr(self.model, "vec_env") or not hasattr(self.model.vec_env, "infos"):
+            return True
+            
+        # Get information about completed episodes
         envs_completed = []
+        envs_with_improvement = []
         rewards_achieved = []
         distances_achieved = []
         improvements = []
-        envs_with_improvement = []
-        
-        # Get all active environments
-        vec_env = self.training_env
-        
-        # Check all environments for completed episodes
-        for i in range(vec_env.num_envs):
-            # Check if this environment has completed an episode
-            if hasattr(vec_env, 'dones') and vec_env.dones[i]:
-                # This environment has completed an episode
-                envs_completed.append(i)
+            
+        # Check each environment for completed episodes
+        for i in range(len(self.model.vec_env.infos)):
+            # Check if this environment completed an episode
+            episode_done = False
                 
-                # Get the reward, distance, and improvement status
-                if hasattr(vec_env, 'infos') and vec_env.infos[i] is not None:
-                    reward = vec_env.infos[i].get('reward', 0.0)
+            if hasattr(self.model, "ep_info_buffer") and len(self.model.ep_info_buffer) > 0:
+                # Check if the latest episode info belongs to this environment
+                for ep_info in reversed(self.model.ep_info_buffer):
+                    if ep_info.get("env_id", -1) == i:
+                        episode_done = True
+                        envs_completed.append(i)
+                        break
+                
+            # If episode done, get info about how the episode went
+            if episode_done:
+                if hasattr(self.model.vec_env, 'infos') and self.model.vec_env.infos[i] is not None:
+                    reward = self.model.vec_env.infos[i].get('reward', 0.0)
                     rewards_achieved.append(reward)
                     
-                    distance = vec_env.infos[i].get('distance_cm', float('inf')) / 100.0  # Convert to meters
+                    distance = self.model.vec_env.infos[i].get('distance_cm', float('inf')) / 100.0  # Convert to meters
                     distances_achieved.append(distance)
                     
                     # Check if robot improved its position
-                    position_improved = vec_env.infos[i].get('position_improved', False)
-                    improvement_amount = vec_env.infos[i].get('improvement_amount', 0.0) / 100.0  # Convert to meters
+                    position_improved = self.model.vec_env.infos[i].get('position_improved', False)
+                    improvement_amount = self.model.vec_env.infos[i].get('improvement_amount', 0.0) / 100.0  # Convert to meters
                     improvements.append(improvement_amount)
                     
                     # Only consider environments that showed improvement
@@ -2604,17 +2581,11 @@ class ModelUpdateCallback(BaseCallback):
                         envs_with_improvement.append(i)
                     
                     # Check if target was reached
-                    target_reached = vec_env.infos[i].get('target_reached', False)
+                    target_reached = self.model.vec_env.infos[i].get('target_reached', False)
                     
                     if target_reached:
                         # Target reached - this should always be an improvement
-                        if self.verbose > 0:
-                            print(f"\n{'='*60}")
-                            print(f"TARGET REACHED by Robot {i}!")
-                            print(f"Distance to target: {distance*100:.2f}cm")
-                            print(f"Reward: {reward}")
-                            print(f"Robot {i} has reached the target and contributed to model update.")
-                            print(f"{'='*60}\n")
+                        envs_with_improvement.append(i)
                 
         # If no environments completed episodes, return
         if not envs_completed:
@@ -2625,38 +2596,14 @@ class ModelUpdateCallback(BaseCallback):
             # If we have completed episodes with improvement, update the model
             self.update_count += 1
             
-            # Print information about the update
-            if self.verbose > 0:
-                avg_reward = np.mean(rewards_achieved) if rewards_achieved else 0.0
-                avg_distance = np.mean(distances_achieved) if distances_achieved else float('inf')
-                avg_improvement = np.mean(improvements) if improvements else 0.0
-                
-                print(f"\n{'='*60}")
-                print(f"MODEL UPDATE #{self.update_count}: {len(envs_with_improvement)}/{len(envs_completed)} robots showed improvement")
-                print(f"Average reward: {avg_reward:.4f}")
-                print(f"Average distance: {avg_distance*100:.2f}cm")
-                print(f"Average improvement: {avg_improvement*100:.2f}cm")
-                print(f"Updating shared model weights with experiences from improved robots.")
-                print(f"{'='*60}\n")
-            
             # Limit the episode info buffer to prevent memory growth
             limit_ep_info_buffer(self.model, max_size=100)
             
             # Update the shared model with the current model weights from improved robots
             model_version = increment_shared_model_version()
-            
-            if self.verbose > 0:
-                print(f"Updated shared model to version {model_version}")
         else:
             # No robots showed improvement, skip the update
             self.skipped_updates += 1
-            
-            if self.verbose > 0:
-                print(f"\n{'='*60}")
-                print(f"MODEL UPDATE SKIPPED #{self.skipped_updates}: No robots showed improvement")
-                print(f"Completed episodes: {len(envs_completed)}")
-                print(f"Not updating model weights to avoid learning bad behaviors")
-                print(f"{'='*60}\n")
         
         # Force target repositioning for all robots by updating the target randomization time
         update_target_randomization_time()
@@ -2903,19 +2850,6 @@ def main():
     model_path = f"{model_dir}/final_model"
     model.save(model_path)
     print(f"Model saved to {model_path}")
-    
-    # Plot training metrics
-    if hasattr(model, "ep_info_buffer") and len(model.ep_info_buffer) > 0:
-        plot_dir = "./plots"
-        os.makedirs(plot_dir, exist_ok=True)
-        plot_path = f"{plot_dir}/{args.algorithm}_{timestamp}_metrics.png"
-        plot_training_metrics(model, plot_path)
-        print(f"Training metrics saved to {plot_path}")
-        
-        # Also save a copy in the model directory
-        progress_plot_path = f"{model_dir}/training_progress.png"
-        plot_training_metrics(model, progress_plot_path)
-        print(f"Training progress plot saved to {progress_plot_path}")
     
     # Close the environment
     vec_env.close()
