@@ -29,7 +29,6 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.env_checker import check_env
 import gymnasium as gym
 from gymnasium import spaces
-import matplotlib.pyplot as plt
 from datetime import datetime
 import psutil  # type: ignore
 import warnings
@@ -1917,249 +1916,6 @@ class SaveModelCallback(BaseCallback):
                 print(f"Model saved to {model_path}")
         return True
 
-# Add this class to monitor and report training progress
-class TrainingMonitorCallback(BaseCallback):
-    """
-    Callback for monitoring training progress and logging metrics.
-    All metrics are standardized to be within the 0 to 1 range.
-    """
-    
-    def __init__(self, log_interval=250, verbose=1):
-        super(TrainingMonitorCallback, self).__init__(verbose)
-        self.log_interval = log_interval
-        
-        # Initialize lists to store metrics
-        self.timesteps = []
-        self.mean_rewards = []
-        self.mean_lengths = []
-        self.success_rates = []
-        self.mean_distances = []
-        self.normalized_distances = []  # Add normalized distances
-        self.normalized_rewards = []    # Add normalized rewards
-        
-        # Initialize episode counter and metrics
-        self.episode_count = 0
-        self.episode_rewards = []
-        self.episode_lengths = []
-        self.episode_distances = []
-        self.episode_norm_distances = []  # Add normalized distances
-        self.episode_successes = []
-        
-        # Initialize the last log time
-        self.last_log_time = time.time()
-    
-    def _init_callback(self) -> None:
-        # Initialize the timesteps list with 0 and mean_rewards with initial value
-        # This ensures we have at least one data point for plotting
-        self.timesteps.append(0)
-        self.mean_rewards.append(0.0)
-        self.mean_lengths.append(0.0)
-        self.success_rates.append(0.0)
-        self.mean_distances.append(1.0)  # Start at maximum distance (worst case)
-        self.normalized_distances.append(1.0)  # Start at 1.0 (worst case)
-        self.normalized_rewards.append(0.0)    # Start at 0.0 (worst case)
-    
-    def _on_step(self) -> bool:
-        # Get the current environment
-        env = self.training_env.envs[0]
-        
-        # Check if an episode has ended
-        if hasattr(env, 'dones') and any(env.dones):
-            # Increment episode counter
-            self.episode_count += 1
-            
-            # Get the episode reward
-            episode_reward = env.rewards[0]
-            self.episode_rewards.append(episode_reward)
-            
-            # Get the episode length
-            episode_length = env.episode_lengths[0]
-            self.episode_lengths.append(episode_length)
-            
-            # Get the final distance to target (if available)
-            if hasattr(env, 'infos') and env.infos[0] is not None:
-                if 'distance_cm' in env.infos[0]:
-                    distance = env.infos[0]['distance_cm'] / 100.0  # Convert back to meters
-                    self.episode_distances.append(distance)
-                
-                # Get normalized distance if available
-                if 'normalized_distance' in env.infos[0]:
-                    norm_distance = env.infos[0]['normalized_distance']
-                    self.episode_norm_distances.append(norm_distance)
-                
-                # Check if the episode was successful
-                if 'target_reached' in env.infos[0] and env.infos[0]['target_reached']:
-                    self.episode_successes.append(1.0)
-                else:
-                    self.episode_successes.append(0.0)
-            
-            # Log metrics at the specified interval
-            if self.episode_count % self.log_interval == 0:
-                # Calculate mean metrics
-                mean_reward = np.mean(self.episode_rewards[-self.log_interval:])
-                mean_length = np.mean(self.episode_lengths[-self.log_interval:])
-                success_rate = np.mean(self.episode_successes[-self.log_interval:])
-                
-                # Calculate mean distance if available
-                mean_distance = 1.0
-                if len(self.episode_distances) > 0:
-                    mean_distance = np.mean(self.episode_distances[-self.log_interval:])
-                
-                # Calculate mean normalized distance if available
-                mean_norm_distance = 1.0
-                if len(self.episode_norm_distances) > 0:
-                    mean_norm_distance = np.mean(self.episode_norm_distances[-self.log_interval:])
-                
-                # Normalize mean reward to 0-1 range
-                # Assuming rewards are already normalized in the reward function
-                normalized_reward = np.clip(mean_reward, 0.0, 1.0)
-                
-                # Store metrics for plotting
-                self.timesteps.append(self.num_timesteps)
-                self.mean_rewards.append(mean_reward)
-                self.mean_lengths.append(mean_length / 100.0)  # Normalize to 0-1 range (assuming max 100 steps)
-                self.success_rates.append(success_rate)
-                self.mean_distances.append(mean_distance)
-                self.normalized_distances.append(mean_norm_distance)
-                self.normalized_rewards.append(normalized_reward)
-                
-                # Calculate time elapsed since last log
-                current_time = time.time()
-                time_elapsed = current_time - self.last_log_time
-                self.last_log_time = current_time
-                
-                # Log metrics
-                if self.verbose > 0:
-                    print(f"Timestep: {self.num_timesteps}")
-                    print(f"Episodes: {self.episode_count}")
-                    print(f"Mean reward: {mean_reward:.4f} (normalized: {normalized_reward:.4f})")
-                    print(f"Mean episode length: {mean_length:.2f} steps (normalized: {mean_length/100.0:.4f})")
-                    print(f"Success rate: {success_rate*100:.2f}%")
-                    print(f"Mean distance to target: {mean_distance*100:.2f}cm (normalized: {mean_norm_distance:.4f})")
-                    print(f"Time elapsed: {time_elapsed:.2f}s")
-                    print("-----------------------------------")
-        
-        return True
-    
-    def plot_training_progress(self, save_path):
-        """Plot training progress metrics, all normalized to 0-1 range."""
-        if len(self.timesteps) <= 1:
-            print("Not enough data to plot training progress")
-            return
-        
-        # Create figure with multiple subplots
-        fig, axs = plt.subplots(3, 2, figsize=(15, 12))
-        
-        # Plot normalized rewards
-        axs[0, 0].plot(self.timesteps, self.normalized_rewards)
-        axs[0, 0].set_title('Normalized Rewards (0-1)')
-        axs[0, 0].set_xlabel('Timesteps')
-        axs[0, 0].set_ylabel('Reward')
-        axs[0, 0].grid(True)
-        
-        # Plot success rate
-        axs[0, 1].plot(self.timesteps, self.success_rates)
-        axs[0, 1].set_title('Success Rate (0-1)')
-        axs[0, 1].set_xlabel('Timesteps')
-        axs[0, 1].set_ylabel('Success Rate')
-        axs[0, 1].grid(True)
-        
-        # Plot normalized episode lengths
-        axs[1, 0].plot(self.timesteps, [length/100.0 for length in self.mean_lengths])
-        axs[1, 0].set_title('Normalized Episode Length (0-1)')
-        axs[1, 0].set_xlabel('Timesteps')
-        axs[1, 0].set_ylabel('Length')
-        axs[1, 0].grid(True)
-        
-        # Plot normalized distances
-        axs[1, 1].plot(self.timesteps, self.normalized_distances)
-        axs[1, 1].set_title('Normalized Distance to Target (0-1)')
-        axs[1, 1].set_xlabel('Timesteps')
-        axs[1, 1].set_ylabel('Distance')
-        axs[1, 1].grid(True)
-        
-        # Plot all metrics together (normalized)
-        axs[2, 0].plot(self.timesteps, self.normalized_rewards, label='Reward')
-        axs[2, 0].plot(self.timesteps, self.success_rates, label='Success')
-        axs[2, 0].plot(self.timesteps, [length/100.0 for length in self.mean_lengths], label='Length')
-        axs[2, 0].plot(self.timesteps, self.normalized_distances, label='Distance')
-        axs[2, 0].set_title('All Metrics (Normalized 0-1)')
-        axs[2, 0].set_xlabel('Timesteps')
-        axs[2, 0].set_ylabel('Value')
-        axs[2, 0].legend()
-        axs[2, 0].grid(True)
-        
-        # Plot raw rewards (for reference)
-        axs[2, 1].plot(self.timesteps, self.mean_rewards)
-        axs[2, 1].set_title('Raw Rewards')
-        axs[2, 1].set_xlabel('Timesteps')
-        axs[2, 1].set_ylabel('Reward')
-        axs[2, 1].grid(True)
-        
-        # Adjust layout and save
-        plt.tight_layout()
-        plt.savefig(save_path)
-        plt.close()
-
-# Function to plot training metrics
-def plot_training_metrics(model, save_path):
-    """
-    Plot training metrics from the model's episode info buffer.
-    
-    Args:
-        model: The trained model with episode info buffer
-        save_path: Path to save the plot
-    """
-    try:
-        import matplotlib.pyplot as plt
-        
-        # Extract episode rewards and lengths
-        ep_rewards = [ep_info["r"] for ep_info in model.ep_info_buffer]
-        ep_lengths = [ep_info["l"] for ep_info in model.ep_info_buffer]
-        
-        # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-        
-        # Plot episode rewards
-        ax1.plot(ep_rewards, label='Episode Reward')
-        ax1.set_ylabel('Reward')
-        ax1.set_title('Training Progress')
-        ax1.legend()
-        ax1.grid(True)
-        
-        # Plot episode lengths
-        ax2.plot(ep_lengths, label='Episode Length', color='orange')
-        ax2.set_xlabel('Episode')
-        ax2.set_ylabel('Length (steps)')
-        ax2.legend()
-        ax2.grid(True)
-        
-        # Add a rolling average to both plots
-        if len(ep_rewards) > 10:
-            window_size = min(10, len(ep_rewards) // 5)
-            rewards_avg = np.convolve(ep_rewards, np.ones(window_size)/window_size, mode='valid')
-            lengths_avg = np.convolve(ep_lengths, np.ones(window_size)/window_size, mode='valid')
-            
-            # Pad the beginning of the rolling average to match the original data length
-            padding = len(ep_rewards) - len(rewards_avg)
-            rewards_avg = np.pad(rewards_avg, (padding, 0), 'edge')
-            lengths_avg = np.pad(lengths_avg, (padding, 0), 'edge')
-            
-            ax1.plot(rewards_avg, label=f'{window_size}-Episode Avg', linestyle='--', color='red')
-            ax2.plot(lengths_avg, label=f'{window_size}-Episode Avg', linestyle='--', color='red')
-            ax1.legend()
-            ax2.legend()
-        
-        # Adjust layout and save
-        plt.tight_layout()
-        plt.savefig(save_path)
-        plt.close()
-        
-    except ImportError:
-        print("matplotlib not installed, skipping plot generation")
-    except Exception as e:
-        print(f"Error generating plot: {e}")
-
 # Define a wrapper class for adding delay to GUI rendering
 class DelayedGUIEnv(gym.Wrapper):
     """
@@ -2463,10 +2219,10 @@ def get_target_randomization_time():
     global _TARGET_RANDOMIZATION_TIME
     return _TARGET_RANDOMIZATION_TIME
 
-# Add global variables to track the best-performing robot during timeout
+# Global variables for timeout tracking that we want to remove
 _BEST_TIMEOUT_DISTANCE = float('inf')
 _BEST_TIMEOUT_ROBOT_RANK = -1
-_BEST_TIMEOUT_REWARD = float('-inf')  # Initialize to negative infinity for reward maximization
+_BEST_TIMEOUT_REWARD = float('-inf')
 
 # Function to reset the best timeout tracking
 def reset_best_timeout_tracking():
@@ -2529,88 +2285,30 @@ def get_best_timeout_reward():
 # Add a ModelUpdateCallback class to handle model weight updates
 class ModelUpdateCallback(BaseCallback):
     """
-    Callback to update the model weights from successful robots.
+    Callback to update the model weights periodically.
     """
     def __init__(self, verbose=0):
         super(ModelUpdateCallback, self).__init__(verbose)
         self.update_count = 0
-        self.skipped_updates = 0
+        self.last_update_step = 0
+        self.update_interval = 1000  # Update every 1000 steps
 
     def _on_step(self):
-        # Get the current episode statuses for all environments
-        # Need to get from the vec_env.infos attribute since the ep_info_buffer may not be updated yet
-        if not hasattr(self.model, "vec_env") or not hasattr(self.model.vec_env, "infos"):
-            return True
-            
-        # Get information about completed episodes
-        envs_completed = []
-        envs_with_improvement = []
-        rewards_achieved = []
-        distances_achieved = []
-        improvements = []
-            
-        # Check each environment for completed episodes
-        for i in range(len(self.model.vec_env.infos)):
-            # Check if this environment completed an episode
-            episode_done = False
-                
-            if hasattr(self.model, "ep_info_buffer") and len(self.model.ep_info_buffer) > 0:
-                # Check if the latest episode info belongs to this environment
-                for ep_info in reversed(self.model.ep_info_buffer):
-                    if ep_info.get("env_id", -1) == i:
-                        episode_done = True
-                        envs_completed.append(i)
-                        break
-                
-            # If episode done, get info about how the episode went
-            if episode_done:
-                if hasattr(self.model.vec_env, 'infos') and self.model.vec_env.infos[i] is not None:
-                    reward = self.model.vec_env.infos[i].get('reward', 0.0)
-                    rewards_achieved.append(reward)
-                    
-                    distance = self.model.vec_env.infos[i].get('distance_cm', float('inf')) / 100.0  # Convert to meters
-                    distances_achieved.append(distance)
-                    
-                    # Check if robot improved its position
-                    position_improved = self.model.vec_env.infos[i].get('position_improved', False)
-                    improvement_amount = self.model.vec_env.infos[i].get('improvement_amount', 0.0) / 100.0  # Convert to meters
-                    improvements.append(improvement_amount)
-                    
-                    # Only consider environments that showed improvement
-                    if position_improved:
-                        envs_with_improvement.append(i)
-                    
-                    # Check if target was reached
-                    target_reached = self.model.vec_env.infos[i].get('target_reached', False)
-                    
-                    if target_reached:
-                        # Target reached - this should always be an improvement
-                        envs_with_improvement.append(i)
-                
-        # If no environments completed episodes, return
-        if not envs_completed:
-            return True
-         
-        # Only update if at least one robot showed improvement
-        if len(envs_with_improvement) > 0:
-            # If we have completed episodes with improvement, update the model
+        current_step = self.num_timesteps
+        if current_step - self.last_update_step >= self.update_interval:
+            # Update the shared model
+            set_shared_model(self.model)
+            increment_shared_model_version()
+            self.last_update_step = current_step
             self.update_count += 1
             
             # Limit the episode info buffer to prevent memory growth
             limit_ep_info_buffer(self.model, max_size=100)
             
-            # Update the shared model with the current model weights from improved robots
-            model_version = increment_shared_model_version()
-        else:
-            # No robots showed improvement, skip the update
-            self.skipped_updates += 1
-        
-        # Force target repositioning for all robots by updating the target randomization time
-        update_target_randomization_time()
-        
-        # Reset the best timeout tracking for the next round
-        reset_best_timeout_tracking()
-        
+            # Force target repositioning by updating the target randomization time
+            update_target_randomization_time()
+            
+            return True
         return True
 
 # Global variables for workspace data
