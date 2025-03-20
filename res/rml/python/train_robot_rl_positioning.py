@@ -1934,110 +1934,126 @@ class RobotPositioningEnv(gym.Env):
         
         return normalized_compactness
 
+# Residual block for deeper networks with skip connections
+class ResidualBlock(nn.Module):
+    """
+    Residual block with batch normalization for more stable training in deeper networks.
+    """
+    def __init__(self, channels, expansion=4):
+        super(ResidualBlock, self).__init__()
+        expanded_channels = channels * expansion
+        
+        self.network = nn.Sequential(
+            nn.Linear(channels, expanded_channels),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(expanded_channels),
+            nn.Linear(expanded_channels, expanded_channels),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(expanded_channels),
+            nn.Linear(expanded_channels, channels),
+            nn.BatchNorm1d(channels)
+        )
+        
+        self.activation = nn.LeakyReLU(0.1)
+        
+    def forward(self, x):
+        identity = x
+        out = self.network(x)
+        out += identity  # Skip connection
+        return self.activation(out)
+
 # Custom neural network architecture for the policy with the new requirements
 class CustomActorCriticNetwork(nn.Module):
     def __init__(self, feature_dim):
         super(CustomActorCriticNetwork, self).__init__()
         
-        # Input dimension: 
-        # - Previous outputs (6 values, -100 to 100)
-        # - Current joint angles (6 values, 0 to 100)
-        # - Current vector length to target (1 value, in mm)
-        # - Normalized direction vector to target (3 values, -1 to 1)
-        # - Previous distance to target (1 value, in mm)
-        # - Progress in last step (1 value, -1 to 1)
-        input_dim = 18  # 6 + 6 + 1 + 3 + 1 + 1 = 18 values
+        # The input now comes from the feature extractor with dimension 512
+        input_dim = feature_dim  # Now 512 from our enhanced feature extractor
         
-        # Massively larger shared feature extractor with more layers and width
+        # Multiple residual blocks for the shared network
+        # This creates a much deeper and more powerful architecture
         self.shared_net = nn.Sequential(
-            nn.Linear(input_dim, 1024),  # Increased from 512 to 1024
-            nn.ReLU(),
+            nn.Linear(input_dim, 1024),
+            nn.LeakyReLU(0.1),
             nn.BatchNorm1d(1024),
-            nn.Linear(1024, 2048),  # Increased from 512 to 2048
-            nn.ReLU(),
-            nn.BatchNorm1d(2048),
-            nn.Linear(2048, 2048),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(2048),
-            nn.Linear(2048, 1536),  # Increased from 384 to 1536
-            nn.ReLU(),
+            ResidualBlock(1024, expansion=4),  # Expanded bottleneck residual block
+            ResidualBlock(1024, expansion=4),
+            ResidualBlock(1024, expansion=4),
+            nn.Linear(1024, 1536),  # Expand representation
+            nn.LeakyReLU(0.1),
             nn.BatchNorm1d(1536),
-            nn.Linear(1536, 1024),  # Increased from 256 to 1024
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 768),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(768),
-            nn.Linear(768, 512),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, feature_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(feature_dim)
+            ResidualBlock(1536, expansion=3),
+            ResidualBlock(1536, expansion=3),
+            nn.Linear(1536, 1024),  # Reduce back down
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(1024)
         )
         
-        # Larger actor network (policy) with more layers
+        # Enhanced actor network with residual connections
         self.actor_net = nn.Sequential(
-            nn.Linear(feature_dim, 1024),  # Increased from 256 to 1024
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 768),  # Increased from 192 to 768
-            nn.ReLU(),
+            nn.Linear(1024, 768),
+            nn.LeakyReLU(0.1),
             nn.BatchNorm1d(768),
-            nn.Linear(768, 512),  # Added new layer
-            nn.ReLU(),
+            ResidualBlock(768, expansion=2),
+            ResidualBlock(768, expansion=2),
+            nn.Linear(768, 512),
+            nn.LeakyReLU(0.1),
             nn.BatchNorm1d(512),
-            nn.Linear(512, 384),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(384),
-            nn.Linear(384, 256),  # Increased from 128 to 256
-            nn.ReLU(),
+            ResidualBlock(512, expansion=2),
+            nn.Linear(512, 256),
+            nn.LeakyReLU(0.1),
             nn.BatchNorm1d(256),
-            nn.Linear(256, 128),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            nn.Linear(128, 64),  # Keep the final layer at 64 to match output layers
-            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(128)
+        )
+        
+        # Enhanced critic network with residual connections
+        self.critic_net = nn.Sequential(
+            nn.Linear(1024, 768),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(768),
+            ResidualBlock(768, expansion=2),
+            ResidualBlock(768, expansion=2),
+            nn.Linear(768, 512),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(512),
+            ResidualBlock(512, expansion=2),
+            nn.Linear(512, 256),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(256),
+            nn.Linear(256, 128),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(128)
+        )
+        
+        # Action outputs - maintaining same interface but with wider layers
+        self.action_output = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.LeakyReLU(0.1),
             nn.BatchNorm1d(64)
         )
         
-        # Larger critic network (value function) with more layers
-        self.critic_net = nn.Sequential(
-            nn.Linear(feature_dim, 1024),  # Increased from 256 to 1024
-            nn.ReLU(),
-            nn.BatchNorm1d(1024),
-            nn.Linear(1024, 768),  # Increased from 192 to 768
-            nn.ReLU(),
-            nn.BatchNorm1d(768),
-            nn.Linear(768, 512),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(512),
-            nn.Linear(512, 384),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(384),
-            nn.Linear(384, 256),  # Increased from 128 to 256
-            nn.ReLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 128),  # Added new layer
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            nn.Linear(128, 64),  # Keep the final layer at 64 to match output layers
-            nn.ReLU(),
+        # Value outputs - maintaining same interface but with wider layers
+        self.value_output = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.LeakyReLU(0.1),
             nn.BatchNorm1d(64)
         )
         
         # Output layer: power and direction of each motor (-100 to 100)
-        # -100 = full power in one direction
-        # 0 = not moving at all
-        # 100 = full power in the other direction
         self.mean_layer = nn.Sequential(
             nn.Linear(64, 6),  # 6 outputs (one per motor)
             nn.Tanh(),         # Outputs between -1 and 1
-            ScaleLayer(-100.0, 100.0)  # Scale to -100 to 100 range
+            ScaleLayer(out_min=-100.0, out_max=100.0)  # Scale from default [-1,1] to [-100,100] range
         )
         
-        # Log standard deviation layer (for stochastic policy)
+        # Log standard deviation layer with improved initialization
         self.log_std_layer = nn.Linear(64, 6)  # 6 outputs to match mean layer
+        
+        # Initialize log_std with a better range for more controlled exploration
+        nn.init.constant_(self.log_std_layer.bias, -1.0)  # Initialize to exp(-1.0) ≈ 0.368 std
+        nn.init.orthogonal_(self.log_std_layer.weight, gain=0.01)  # Small weight initialization
         
         # Value layer
         self.value_layer = nn.Sequential(
@@ -2045,31 +2061,38 @@ class CustomActorCriticNetwork(nn.Module):
         )
     
     def forward(self, x):
+        # Process through shared network
         features = self.shared_net(x)
         
-        # Actor
+        # Actor pathway
         actor_features = self.actor_net(features)
-        mean = self.mean_layer(actor_features)  # Outputs 6 values between -100 and 100
-        log_std = self.log_std_layer(actor_features)  # Outputs 6 log std values
+        action_output = self.action_output(actor_features)
+        mean = self.mean_layer(action_output)
+        log_std = self.log_std_layer(action_output)
         
-        # Critic
+        # Critic pathway
         critic_features = self.critic_net(features)
-        value = self.value_layer(critic_features)
+        value_output = self.value_output(critic_features)
+        value = self.value_layer(value_output)
         
         return mean, log_std, value
 
 # Custom scaling layer to transform values from one range to another
 class ScaleLayer(nn.Module):
-    def __init__(self, min_val, max_val):
+    def __init__(self, in_min=None, in_max=None, out_min=-1.0, out_max=1.0):
         super(ScaleLayer, self).__init__()
-        self.min_val = min_val
-        self.max_val = max_val
+        self.in_min = in_min
+        self.in_max = in_max
+        self.out_min = out_min
+        self.out_max = out_max
         
     def forward(self, x):
-        # Input is assumed to be between -1 and 1 (from tanh)
-        # Scale to min_val to max_val using full floating-point precision
-        # No rounding or clipping to preserve full precision
-        return x * (self.max_val - self.min_val) / 2 + (self.max_val + self.min_val) / 2
+        # If input range is provided, normalize to [0,1] first
+        if self.in_min is not None and self.in_max is not None:
+            x = (x - self.in_min) / (self.in_max - self.in_min)
+        
+        # Scale to output range
+        return x * (self.out_max - self.out_min) + self.out_min
 
 # Custom features extractor for the policy
 class CustomFeaturesExtractor(BaseFeaturesExtractor):
@@ -2077,85 +2100,143 @@ class CustomFeaturesExtractor(BaseFeaturesExtractor):
     Custom features extractor for the learning task.
     This extracts separate features for each component of the observation space.
     """
-    def __init__(self, observation_space: gym.spaces.Box):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim=512):
         """
         Initialize the features extractor.
         
         Args:
             observation_space: The observation space of the environment
+            features_dim: The dimension of the output features (default: 512)
         """
-        # Total combined features: 128
-        super().__init__(observation_space, features_dim=256)
+        # Use the provided features_dim or default to 512
+        super().__init__(observation_space, features_dim=features_dim)
         
         # Get the size of a single observation
         single_obs_size = 18  # Single observation size
         
-        # Define individual feature extractors
+        # Define individual feature extractors with larger networks
         # Previous action feature extractor (6 values)
         self.previous_action_extractor = nn.Sequential(
-            ScaleLayer(-100.0, 100.0, -1.0, 1.0),  # Scale to -1, 1
-            nn.Linear(6, 32),
-            nn.ReLU(),
-            nn.Linear(32, 32),
-            nn.ReLU()
+            ScaleLayer(-100.0, 100.0, -1.0, 1.0),  # Scale from [-100,100] to [-1,1]
+            nn.Linear(6, 64),  # Increased from 32 to 64
+            nn.LeakyReLU(0.1),  # Using LeakyReLU for better gradient flow
+            nn.BatchNorm1d(64),
+            nn.Linear(64, 96),  # Increased from 32 to 96
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(96)
         )
         
         # Joint angle feature extractor (6 values)
         self.joint_angle_extractor = nn.Sequential(
-            ScaleLayer(0.0, 100.0, 0.0, 1.0),  # Scale to 0, 1
-            nn.Linear(6, 32),
-            nn.ReLU(),
-            nn.Linear(32, 32),
-            nn.ReLU()
+            ScaleLayer(0.0, 100.0, 0.0, 1.0),  # Scale from [0,100] to [0,1]
+            nn.Linear(6, 64),  # Increased from 32 to 64
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(64),
+            nn.Linear(64, 96),  # Increased from 32 to 96
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(96)
         )
         
         # Target distance extractor (1 value)
         self.target_distance_extractor = nn.Sequential(
-            ScaleLayer(0.0, 2000.0, 0.0, 1.0),  # Scale to 0, 1
-            nn.Linear(1, 16),
-            nn.ReLU(),
-            nn.Linear(16, 16),
-            nn.ReLU()
+            ScaleLayer(0.0, 2000.0, 0.0, 1.0),  # Scale from [0,2000] to [0,1]
+            nn.Linear(1, 32),  # Increased from 16 to 32
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(32),
+            nn.Linear(32, 48),  # Increased from 16 to 48
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(48)
         )
         
         # Target direction extractor (3 values)
         self.target_direction_extractor = nn.Sequential(
-            nn.Linear(3, 32),
-            nn.ReLU(),
-            nn.Linear(32, 32),
-            nn.ReLU()
+            nn.Linear(3, 64),  # Increased from 32 to 64
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(64),
+            nn.Linear(64, 96),  # Increased from 32 to 96
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(96)
         )
         
         # Previous distance extractor (1 value)
         self.previous_distance_extractor = nn.Sequential(
-            ScaleLayer(0.0, 2000.0, 0.0, 1.0),  # Scale to 0, 1
-            nn.Linear(1, 16),
-            nn.ReLU(),
-            nn.Linear(16, 16),
-            nn.ReLU()
+            ScaleLayer(0.0, 2000.0, 0.0, 1.0),  # Scale from [0,2000] to [0,1]
+            nn.Linear(1, 32),  # Increased from 16 to 32
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(32),
+            nn.Linear(32, 48),  # Increased from 16 to 48
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(48)
         )
         
         # Progress extractor (1 value)
         self.progress_extractor = nn.Sequential(
-            nn.Linear(1, 16),  # Already in -1, 1 range
-            nn.ReLU(),
-            nn.Linear(16, 16),
-            nn.ReLU()
+            nn.Linear(1, 32),  # Increased from 16 to 32, already in -1, 1 range
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(32),
+            nn.Linear(32, 48),  # Increased from 16 to 48
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(48)
         )
         
-        # History integration layer (processes current + historical observations)
-        # Input is the combined features from all 4 timesteps
-        # 144 = 4 timesteps × (32 + 32 + 16 + 32 + 16 + 16) features
-        self.history_integrator = nn.Sequential(
-            nn.Linear(144, 192),
-            nn.ReLU(),
-            nn.Linear(192, 256),
-            nn.ReLU()
+        # Temporal attention mechanism for each feature type
+        # This helps focus on the most important timesteps for each feature
+        self.action_attention = nn.Sequential(
+            nn.Linear(96 * 4, 96),  # Process all timesteps of action features
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(96)
+        )
+        
+        self.joint_attention = nn.Sequential(
+            nn.Linear(96 * 4, 96),  # Process all timesteps of joint features
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(96)
+        )
+        
+        self.distance_attention = nn.Sequential(
+            nn.Linear(48 * 4, 48),  # Process all timesteps of distance features
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(48)
+        )
+        
+        self.direction_attention = nn.Sequential(
+            nn.Linear(96 * 4, 96),  # Process all timesteps of direction features
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(96)
+        )
+        
+        self.prev_distance_attention = nn.Sequential(
+            nn.Linear(48 * 4, 48),  # Process all timesteps of previous distance features
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(48)
+        )
+        
+        self.progress_attention = nn.Sequential(
+            nn.Linear(48 * 4, 48),  # Process all timesteps of progress features
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(48)
+        )
+        
+        # Calculate total feature dimension after extraction and attention
+        # 96 + 96 + 48 + 96 + 48 + 48 = 432
+        attention_feature_dim = 96 + 96 + 48 + 96 + 48 + 48
+        
+        # Final feature integration with added residual connections
+        self.feature_integrator = nn.Sequential(
+            nn.Linear(attention_feature_dim, 768),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(768),
+            nn.Linear(768, 768),
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(768),
+            nn.Linear(768, 512),  # Final output dimension
+            nn.LeakyReLU(0.1),
+            nn.BatchNorm1d(512)
         )
         
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         """
-        Extract features from observations.
+        Extract features from observations using a temporal attention mechanism.
         
         Args:
             observations: Batch of observations
@@ -2169,8 +2250,13 @@ class CustomFeaturesExtractor(BaseFeaturesExtractor):
         # Each full observation has 72 values (18 × 4 timesteps)
         observations_reshaped = observations.view(batch_size, 4, 18)
         
-        # Process each timestep's observation
-        all_features = []
+        # Process each timestep's observation and extract features
+        action_features = []
+        joint_features = []
+        distance_features = []
+        direction_features = []
+        prev_distance_features = []
+        progress_features = []
         
         for t in range(4):  # Process all 4 timesteps (current + 3 historical)
             # Get observation for this timestep
@@ -2185,30 +2271,42 @@ class CustomFeaturesExtractor(BaseFeaturesExtractor):
             progress = obs_t[:, 17:18]
             
             # Extract features for each component
-            prev_action_features = self.previous_action_extractor(prev_action)
-            joint_angle_features = self.joint_angle_extractor(joint_angles)
-            target_distance_features = self.target_distance_extractor(target_distance)
-            target_direction_features = self.target_direction_extractor(target_direction)
-            previous_distance_features = self.previous_distance_extractor(previous_distance)
-            progress_features = self.progress_extractor(progress)
-            
-            # Combine all features for this timestep
-            combined_features = torch.cat([
-                prev_action_features,
-                joint_angle_features,
-                target_distance_features,
-                target_direction_features,
-                previous_distance_features,
-                progress_features
-            ], dim=1)
-            
-            all_features.append(combined_features)
+            action_features.append(self.previous_action_extractor(prev_action))
+            joint_features.append(self.joint_angle_extractor(joint_angles))
+            distance_features.append(self.target_distance_extractor(target_distance))
+            direction_features.append(self.target_direction_extractor(target_direction))
+            prev_distance_features.append(self.previous_distance_extractor(previous_distance))
+            progress_features.append(self.progress_extractor(progress))
         
-        # Concatenate features from all timesteps
-        all_timesteps_features = torch.cat(all_features, dim=1)
+        # Apply temporal attention to each feature type across timesteps
+        # First concatenate features from all timesteps for each type
+        action_temporal = torch.cat(action_features, dim=1)
+        joint_temporal = torch.cat(joint_features, dim=1)
+        distance_temporal = torch.cat(distance_features, dim=1)
+        direction_temporal = torch.cat(direction_features, dim=1)
+        prev_distance_temporal = torch.cat(prev_distance_features, dim=1)
+        progress_temporal = torch.cat(progress_features, dim=1)
         
-        # Integrate historical information
-        integrated_features = self.history_integrator(all_timesteps_features)
+        # Apply attention mechanisms
+        action_attended = self.action_attention(action_temporal)
+        joint_attended = self.joint_attention(joint_temporal)
+        distance_attended = self.distance_attention(distance_temporal)
+        direction_attended = self.direction_attention(direction_temporal)
+        prev_distance_attended = self.prev_distance_attention(prev_distance_temporal)
+        progress_attended = self.progress_attention(progress_temporal)
+        
+        # Combine all attended features
+        combined_features = torch.cat([
+            action_attended,
+            joint_attended, 
+            distance_attended,
+            direction_attended,
+            prev_distance_attended,
+            progress_attended
+        ], dim=1)
+        
+        # Apply final feature integration
+        integrated_features = self.feature_integrator(combined_features)
         
         return integrated_features
 
@@ -3097,6 +3195,7 @@ def main():
             viz_speed=args.viz_speed if args.gui else 0.0,
             parallel_viz=args.parallel_viz,
             eval_env=args.eval_only
+            # Note: disable_bounds_collision is permanently disabled in newer versions
         )
     
     # Wrap environments with VecEnv
@@ -3113,11 +3212,49 @@ def main():
         model = SAC.load(args.load, env=vec_env)
     else:
         print("Creating new SAC model")
+        
+        # Enhanced policy configuration for our advanced neural architecture
+        policy_kwargs = dict(
+            # Use our custom feature extractor and actor-critic network
+            features_extractor_class=CustomFeaturesExtractor,
+            features_extractor_kwargs=dict(features_dim=512),  # Match the features_dim we set in the extractor
+            
+            # Network initialization parameters for more stable training
+            net_arch=dict(pi=[256, 256], qf=[256, 256]),  # Placeholder, our custom networks handle the actual architecture
+            
+            # Activation function matches what we used in our networks
+            activation_fn=nn.LeakyReLU,
+            
+            # Use our custom network architecture
+            share_features_extractor=True,  # Share the feature extractor between actor and critic
+            
+            # More optimal initial log std dev range for better exploration
+            log_std_init=-2.0,  # Lower initial log std for more controlled actions
+        )
+        
+        # Calculate a dynamic learning rate based on the network size
+        # This helps with the much larger network we've created
+        if hasattr(args, 'high_lr') and args.high_lr:
+            learning_rate = 3e-4  # Higher learning rate option if specified
+        else:
+            learning_rate = 1e-4  # Default to a slightly lower rate for stability with the complex network
+        
+        # SAC-specific parameters optimized for our enhanced architecture
         model = SAC(
             "MlpPolicy",
             vec_env,
-            learning_rate=args.learning_rate,
+            learning_rate=learning_rate,
+            buffer_size=args.buffer_size,
+            batch_size=max(256, min(1024, args.batch_size)),  # Larger batch size for more stable gradients
+            ent_coef="auto_1.0",  # Automatic entropy coefficient tuning
+            gamma=0.99,  # Discount factor, increased to prioritize future rewards
+            tau=0.02,  # Increased from 0.005 for faster target network updates
+            train_freq=args.train_freq,
+            gradient_steps=max(1, args.gradient_steps),
+            learning_starts=1000,  # More exploration steps before learning
+            policy_kwargs=policy_kwargs,
             verbose=1,
+            tensorboard_log="./logs/",
             device="cuda" if args.use_cuda and torch.cuda.is_available() else "cpu"
         )
     
@@ -3141,43 +3278,67 @@ def main():
     model_update_callback = ModelUpdateCallback(verbose=1)
     
     # Force target repositioning at the beginning of training
+    # This ensures all robots get new targets right from the start
     set_target_reached_flag()
     update_target_randomization_time()
+    if args.verbose:
+        print("Forcing initial target repositioning for all robots")
     
     # Training mode
     print(f"Training for {args.steps} steps")
     
-    model.learn(total_timesteps=args.steps, callback=model_update_callback)
+    # Limit the episode info buffer size to reduce memory usage
+    limit_ep_info_buffer(model, max_size=100)
     
-    # Save the model
+    # Create timestamp for the model name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_dir = f"./models/{args.algorithm}_{timestamp}"
-    os.makedirs(model_dir, exist_ok=True)
-    model_path = f"{model_dir}/final_model"
-    model.save(model_path)
-    print(f"Model saved to {model_path}")
+    save_path = f"./models/sac_{timestamp}"
+    os.makedirs(save_path, exist_ok=True)
+    
+    # Create save callback
+    save_callback = SaveModelCallback(
+        save_freq=args.save_freq,
+        save_path=save_path,
+        verbose=1
+    )
+    
+    # Create training monitor callback
+    training_monitor = TrainingMonitorCallback(log_interval=100, verbose=1)
+    
+    # Run training
+    force_garbage_collection()  # Clear memory before training
+    model.learn(
+        total_timesteps=args.steps,
+        callback=[model_update_callback, save_callback, training_monitor],
+        log_interval=100
+    )
+    
+    # Save final model
+    final_model_path = os.path.join(save_path, "final_model")
+    model.save(final_model_path)
+    print(f"Model saved to {final_model_path}")
+    
+    # Evaluate final model
+    print("Evaluating final model")
+    mean_reward, std_reward = evaluate_policy(
+        model, 
+        vec_env, 
+        n_eval_episodes=10,
+        deterministic=True
+    )
+    print(f"Final model mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
     
     # Plot training metrics
-    if hasattr(model, "ep_info_buffer") and len(model.ep_info_buffer) > 0:
-        plot_dir = "./plots"
-        os.makedirs(plot_dir, exist_ok=True)
-        plot_path = f"{plot_dir}/{args.algorithm}_{timestamp}_metrics.png"
-        plot_training_metrics(model, plot_path)
-        print(f"Training metrics saved to {plot_path}")
-        
-        # Also save a copy in the model directory
-        progress_plot_path = f"{model_dir}/training_progress.png"
-        plot_training_metrics(model, progress_plot_path)
-        print(f"Training progress plot saved to {progress_plot_path}")
+    plot_training_metrics(model, save_path)
     
-    # Close the environment
+    # Close environments
     vec_env.close()
 
 def parse_args():
     """Parse command line arguments."""
     # Create argument parser
     parser = argparse.ArgumentParser(description='Train a robot arm for precise end effector positioning')
-    parser.add_argument('--steps', type=int, default=999999999, help='Total number of training steps')
+    parser.add_argument('--steps', type=int, default=50000, help='Total number of training steps')
     parser.add_argument('--load', type=str, default=None, help='Load a pre-trained model to continue training')
     parser.add_argument('--eval-only', action='store_true', help='Only run evaluation on a pre-trained model')
     parser.add_argument('--gui', action='store_true', default=True, help='Enable GUI visualization')
@@ -3189,6 +3350,15 @@ def parse_args():
     parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate for the optimizer')
     parser.add_argument('--eval-episodes', type=int, default=5, help='Number of episodes for evaluation')
     parser.add_argument('--use-cuda', action='store_true', help='Use CUDA for training if available')
+    
+    # Add additional parameters for our enhanced network
+    parser.add_argument('--batch-size', type=int, default=256, help='Batch size for updates (default: 256)')
+    parser.add_argument('--buffer-size', type=int, default=1000000, help='Replay buffer size for SAC (default: 1M)')
+    parser.add_argument('--train-freq', type=int, default=1, help='Update frequency for SAC (default: 1)')
+    parser.add_argument('--gradient-steps', type=int, default=1, help='Gradient steps per update (default: 1)')
+    parser.add_argument('--save-freq', type=int, default=5000, help='Model saving frequency in steps')
+    parser.add_argument('--high-lr', action='store_true', help='Use a higher learning rate for faster learning')
+    
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     args = parser.parse_args()
@@ -3207,7 +3377,7 @@ def limit_ep_info_buffer(model, max_size=100):
         model: The model with an ep_info_buffer attribute
         max_size: Maximum number of episodes to keep in the buffer
     """
-    if hasattr(model, "ep_info_buffer") and len(model.ep_info_buffer) > max_size:
+    if hasattr(model, "ep_info_buffer") and model.ep_info_buffer is not None and len(model.ep_info_buffer) > max_size:
         # Keep only the most recent episodes
         model.ep_info_buffer = model.ep_info_buffer[-max_size:]
 
