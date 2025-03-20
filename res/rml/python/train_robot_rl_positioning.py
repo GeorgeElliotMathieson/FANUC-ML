@@ -2739,25 +2739,27 @@ def find_nearest_position(target_position, max_samples=1000):
     return positions[min_idx], joint_configs[min_idx], distances[min_idx]
 
 # Global variables for model sharing
-_SHARED_MODEL: Optional[Any] = None
-_MODEL_VERSION = 0
+_SHARED_MODEL: Optional[SAC] = None
+_SHARED_MODEL_VERSION: int = 0
+_TARGET_RANDOMIZATION_TIME: float = 0.0
+_TARGET_REACHED_FLAG: bool = False
 
 def set_shared_model(model):
     """Set the shared model that all robots will use."""
-    global _SHARED_MODEL, _MODEL_VERSION
+    global _SHARED_MODEL, _SHARED_MODEL_VERSION
     _SHARED_MODEL = model
-    _MODEL_VERSION += 1
-    return _MODEL_VERSION
+    _SHARED_MODEL_VERSION += 1
+    return _SHARED_MODEL_VERSION
 
 def get_shared_model():
-    """Get the shared model that all robots are using."""
+    """Get the shared model that all robots will use."""
     global _SHARED_MODEL
     return _SHARED_MODEL
 
 def get_model_version():
     """Get the current model version."""
-    global _MODEL_VERSION
-    return _MODEL_VERSION
+    global _SHARED_MODEL_VERSION
+    return _SHARED_MODEL_VERSION
 
 # Modify the main function to use the ModelUpdateCallback
 def main():
