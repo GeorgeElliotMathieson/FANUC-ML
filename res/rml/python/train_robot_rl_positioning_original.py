@@ -2958,6 +2958,24 @@ def limit_ep_info_buffer(model, max_size=100):
         # Keep only the most recent episodes
         model.ep_info_buffer = model.ep_info_buffer[-max_size:]
 
+import gc  # Add garbage collection module
+
+def force_garbage_collection():
+    """
+    Force garbage collection to free up memory.
+    Call this periodically during training to prevent memory leaks.
+    """
+    gc.collect()
+    
+    # Try to get memory info if psutil is available
+    try:
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / (1024 * 1024)
+        print(f"Memory usage after GC: {memory_mb:.1f} MB")
+    except ImportError:
+        pass  # Silently ignore if psutil is not available
+
 if __name__ == "__main__":
     main()
-
