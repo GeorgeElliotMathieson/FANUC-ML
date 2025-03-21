@@ -13,6 +13,45 @@ import gymnasium as gym  # Import gymnasium for the environment wrapper
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+# Check for GPU support (CUDA or ROCm/HIP)
+def check_gpu_support():
+    """Check for GPU support in PyTorch including both CUDA and AMD ROCm/HIP."""
+    has_cuda = torch.cuda.is_available()
+    
+    # Check for AMD ROCm/HIP support (may not be directly detectable in all PyTorch versions)
+    has_rocm = False
+    try:
+        has_rocm = hasattr(torch, 'hip') and torch.hip.is_available()
+    except:
+        # If the above explicit check fails, try alternative methods
+        try:
+            # Check for HIP version in torch.version
+            has_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+        except:
+            pass
+    
+    # Return available GPU backends and device info
+    if has_cuda:
+        return {
+            'backend': 'cuda',
+            'available': True,
+            'devices': torch.cuda.device_count(),
+            'current_device': torch.cuda.current_device(),
+            'device_name': torch.cuda.get_device_name(0)
+        }
+    elif has_rocm:
+        return {
+            'backend': 'hip',
+            'available': True,
+            'devices': torch.hip.device_count() if hasattr(torch.hip, 'device_count') else 'Unknown',
+            'device_name': 'AMD GPU (ROCm/HIP)'
+        }
+    else:
+        return {
+            'backend': 'cpu',
+            'available': False
+        }
+
 # We need to prevent the imported module from parsing args when imported
 # Save sys.argv and reset it temporarily
 original_argv = sys.argv
@@ -466,6 +505,11 @@ def parse_custom_args():
     parser.add_argument('--strict-limits', action='store_true', default=True, 
                       help='Strictly enforce joint limits from URDF (default: True)')
     
+    # GPU options
+    parser.add_argument('--use-gpu', action='store_true', help='Force use of GPU if available')
+    parser.add_argument('--use-amd', action='store_true', help='Specifically use AMD GPU with ROCm/HIP')
+    parser.add_argument('--use-cpu', action='store_true', help='Force use of CPU even if GPU is available')
+    
     args = parser.parse_args()
     
     # Handle gui/no-gui conflict
@@ -478,6 +522,42 @@ def main():
     """Main function."""
     # Parse arguments with our custom parser
     args = parse_custom_args()
+    
+    # Check GPU support
+    gpu_info = check_gpu_support()
+    gpu_available = gpu_info['available']
+    gpu_backend = gpu_info['backend']
+    
+    # Determine if we should use GPU based on arguments and availability
+    use_gpu = False
+    if args.use_cpu:
+        use_gpu = False
+        print("Forcing CPU usage as requested")
+    elif args.use_amd and gpu_backend != 'hip':
+        print("WARNING: AMD GPU (ROCm/HIP) specifically requested but not available")
+        print("To use your AMD Radeon RX 6700S GPU, please install PyTorch with ROCm support")
+        print("CPU will be used instead")
+        use_gpu = False
+    elif args.use_gpu or args.use_amd:
+        if gpu_available:
+            use_gpu = True
+            print(f"Using GPU with backend: {gpu_backend}")
+            if gpu_backend == 'cuda':
+                print(f"CUDA Device: {gpu_info['device_name']}")
+            elif gpu_backend == 'hip':
+                print(f"AMD GPU with ROCm/HIP support detected")
+            
+            # Set environment variables to prefer the AMD GPU if requested
+            if args.use_amd and 'hip' in gpu_backend:
+                os.environ['HIP_VISIBLE_DEVICES'] = '0'  # Use first AMD GPU
+        else:
+            print("GPU usage requested but no compatible GPU found. Using CPU instead.")
+            use_gpu = False
+    else:
+        if gpu_available:
+            print(f"GPU available with backend: {gpu_backend}")
+            print("Use --use-gpu to enable GPU acceleration")
+        use_gpu = False
     
     # Print information about joint limit enforcement
     if args.strict_limits:
@@ -532,7 +612,7 @@ def main():
     train_args.parallel_viz = False
     train_args.viz_speed = args.viz_speed
     train_args.learning_rate = args.learning_rate
-    train_args.use_cuda = torch.cuda.is_available()
+    train_args.use_cuda = use_gpu  # Set based on our GPU detection and user preferences
     train_args.seed = args.seed
     train_args.verbose = args.verbose
     train_args.algorithm = 'ppo'
@@ -541,6 +621,10 @@ def main():
     train_args.demo = False
     train_args.save_video = False
     train_args.strict_limits = args.strict_limits
+    
+    # Set additional environment variables for AMD GPU if requested
+    if args.use_amd and gpu_backend == 'hip':
+        os.environ['PYTORCH_HIP_ALLOC_CONF'] = 'max_split_size_mb:128'  # Optimize memory allocation
     
     train_revamped_robot(train_args)
 
