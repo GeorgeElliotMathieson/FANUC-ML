@@ -82,8 +82,7 @@ class RobotPositioningRevampedEnv(gym.Env):
                  verbose=False, 
                  parallel_viz=False, 
                  rank=0, 
-                 offset_x=0.0,
-                 offset_y=0.0):
+                 offset_x=0.0):
         """
         Initialize the robot positioning environment with improvements.
         
@@ -97,7 +96,6 @@ class RobotPositioningRevampedEnv(gym.Env):
             parallel_viz: Whether this is used in parallel visualization mode
             rank: The rank of this robot in parallel training
             offset_x: X-axis offset for parallel robots
-            offset_y: Y-axis offset for parallel robots
         """
         super().__init__()
         
@@ -111,7 +109,6 @@ class RobotPositioningRevampedEnv(gym.Env):
         self.parallel_viz = parallel_viz
         self.rank = rank
         self.offset_x = offset_x
-        self.offset_y = offset_y
         
         # Initialize PyBullet client
         self.client_id = get_shared_pybullet_client(render=gui)
@@ -120,7 +117,7 @@ class RobotPositioningRevampedEnv(gym.Env):
         self.robot = FANUCRobotEnv(render=gui, verbose=verbose, client=self.client_id)
         
         # Apply offset if needed (for parallel robots)
-        self.robot_offset = np.array([offset_x, offset_y, 0.0])
+        self.robot_offset = np.array([offset_x, 0.0, 0.0])
         self._apply_robot_offset()
         
         # Get robot's degrees of freedom
@@ -1163,20 +1160,10 @@ def create_revamped_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=F
     use_gui = True if num_envs == 1 or parallel_viz else False
     
     if parallel_viz:
-        # When using parallel visualization, we need to offset the robots in a grid pattern
-        # Calculate grid dimensions based on number of environments
-        grid_size = int(np.ceil(np.sqrt(num_envs)))  # Size of grid (e.g., 2x2, 3x3, etc.)
-        spacing = 1.5  # Spacing between robots in meters
-        
+        # When using parallel visualization, we need to offset the robots
         for i in range(num_envs):
-            # Calculate grid position (row, col)
-            row = i // grid_size
-            col = i % grid_size
-            
             # Calculate offset for this robot
-            # Center the grid around the origin
-            offset_x = (col - (grid_size - 1) / 2) * spacing
-            offset_y = (row - (grid_size - 1) / 2) * spacing
+            offset_x = (i - num_envs / 2) * 1.5  # 1.5m spacing between robots
             
             # Create environment with the offset
             env = RobotPositioningRevampedEnv(
@@ -1185,10 +1172,8 @@ def create_revamped_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=F
                 verbose=(i == 0),  # Only the first environment is verbose
                 parallel_viz=parallel_viz,
                 rank=i,
-                offset_x=offset_x,
-                offset_y=offset_y
+                offset_x=offset_x
             )
-            
             envs.append(env)
     else:
         # Standard environment creation
