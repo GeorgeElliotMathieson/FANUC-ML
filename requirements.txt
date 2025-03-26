@@ -1,0 +1,8 @@
+# Requirements for FANUC Robot ML training with DirectML support
+numpy>=1.20.0
+torch>=1.13.0
+torch-directml>=0.2.0.dev0  # Direct ML support for AMD GPUs
+gymnasium>=0.28.1
+matplotlib>=3.5.0
+pybullet>=3.2.1
+psutil>=5.9.0 
