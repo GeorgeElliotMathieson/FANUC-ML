@@ -40,7 +40,7 @@ import pybullet_data  # Add this import
 # from domain_randomisation import DomainRandomizedEnv
 
 # Import utility functions from pybullet_utils
-from pybullet_utils import (
+from res.rml.python.pybullet_utils import (
     configure_visualization,
     visualize_target,
     visualize_ee_position,

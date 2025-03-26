@@ -59,7 +59,7 @@ def visualize_target(position, client_id):
 
 # Import shared functionality from the original implementation
 # This will be replaced with our own implementations in subsequent edits
-from train_robot_rl_positioning import (
+from res.rml.python.train_robot_rl_positioning import (
     get_shared_pybullet_client, 
     FANUCRobotEnv, 
     load_workspace_data,
