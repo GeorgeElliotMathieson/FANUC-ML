@@ -24,6 +24,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional
 import sys
+from stable_baselines3.common.preprocessing import get_action_dim
+import torch as th
 
 # Global shared variables
 _WORKSPACE_POSITIONS = None
@@ -61,11 +63,13 @@ def visualize_target(position, client_id):
 # This will be replaced with our own implementations in subsequent edits
 from res.rml.python.train_robot_rl_positioning import (
     get_shared_pybullet_client, 
-    FANUCRobotEnv, 
     load_workspace_data,
     determine_reachable_workspace,
     adjust_camera_for_robots
 )
+
+# Import the robot environment directly from robot_sim.py
+from res.rml.python.robot_sim import FANUCRobotEnv
 
 # Utility function to strictly enforce joint limits from URDF
 def ensure_joint_limits(robot, joint_positions):
@@ -97,41 +101,186 @@ def ensure_joint_limits(robot, joint_positions):
 # Custom environment wrapper to enforce joint limits
 class JointLimitEnforcingEnv(gym.Wrapper):
     """
-    Environment wrapper that strictly enforces joint limits from the URDF model.
+    Environment wrapper that works with JointLimitedBox action space to enforce joint limits.
+    With JointLimitedBox, this wrapper is mostly for backward compatibility and monitoring.
     """
     def __init__(self, env):
         super().__init__(env)
         self.robot = env.robot
-        print("Joint limits will be strictly enforced according to URDF specifications")
+        
+        # Check if we're using the JointLimitedBox action space
+        if isinstance(env.action_space, JointLimitedBox):
+            print("Using JointLimitedBox action space - joint limits are inherently enforced")
+            self.using_joint_limited_box = True
+        else:
+            print("LEGACY MODE: Joint limits will be enforced by the environment wrapper")
+            self.using_joint_limited_box = False
     
     def step(self, action):
-        # Extract the underlying robot action from the environment's step method
-        if hasattr(self.env, 'robot') and hasattr(self.env.robot, 'step'):
-            # Get current joint positions
-            state = self.robot._get_state()
-            current_joint_positions = state[:self.robot.dof*2:2]
-            
-            # For delta joint position control, calculate new positions
-            new_joint_positions = []
-            for i, delta in enumerate(action):
-                # Current position plus delta
-                new_pos = current_joint_positions[i] + delta
-                new_joint_positions.append(new_pos)
-            
-            # Enforce joint limits
-            limited_positions = ensure_joint_limits(self.robot, new_joint_positions)
-            
-            # Create zero velocities for the robot step
-            zero_velocities = [0.0] * len(limited_positions)
-            
-            # Call the original step method with enforced limits
-            next_state = self.robot.step((limited_positions, zero_velocities))
-            
-            # Pass to parent step with the original action (the environment will re-apply limits internally)
+        # If using JointLimitedBox, the limits are already enforced by the action space
+        if self.using_joint_limited_box:
+            # Just pass the action through to the underlying environment
             return self.env.step(action)
+        
+        # Legacy mode: manually enforce limits
         else:
-            # Fallback if the environment doesn't match our expected structure
-            return self.env.step(action)
+            # Extract the underlying robot action from the environment's step method
+            if hasattr(self.env, 'robot') and hasattr(self.env.robot, 'step'):
+                # Get current joint positions
+                state = self.robot._get_state()
+                current_joint_positions = state[:self.robot.dof*2:2]
+                
+                # For delta joint position control, calculate new positions
+                new_joint_positions = []
+                for i, delta in enumerate(action):
+                    # Current position plus delta
+                    new_pos = current_joint_positions[i] + delta
+                    new_joint_positions.append(new_pos)
+                
+                # Enforce joint limits
+                limited_positions = ensure_joint_limits(self.robot, new_joint_positions)
+                
+                # Create zero velocities for the robot step
+                zero_velocities = [0.0] * len(limited_positions)
+                
+                # Call the original step method with enforced limits
+                next_state = self.robot.step((limited_positions, zero_velocities))
+                
+                # Pass to parent step with the original action (the environment will re-apply limits internally)
+                return self.env.step(action)
+            else:
+                # Fallback if the environment doesn't match our expected structure
+                return self.env.step(action)
+
+# Add this new class near the top of the file after the imports
+class JointLimitedBox(spaces.Box):
+    """
+    A gym.spaces.Box variant that inherently respects joint limits.
+    
+    This space represents actions as normalized values in [-1, 1], which are then
+    mapped to the corresponding joint limits. This ensures that any action sampled
+    from this space is always within the physical limits of the robot.
+    
+    Additional features:
+    - Provides metadata about joint limits for policy networks
+    - Implements custom sampling that respects safe margins near limits
+    - Includes helper methods for action normalization/unnormalization
+    """
+    def __init__(self, robot, shape=(5,), dtype=np.float32):
+        """
+        Initialize JointLimitedBox action space.
+        
+        Args:
+            robot: The FANUCRobotEnv instance with joint_limits dictionary
+            shape: The shape of the action space (default is 5 for the FANUC robot)
+            dtype: The data type of the action space
+        """
+        super().__init__(low=-1.0, high=1.0, shape=shape, dtype=dtype)
+        self.robot = robot
+        
+        # Store joint limits for quick access
+        self.joint_limits = {}
+        for i in range(shape[0]):
+            if i in robot.joint_limits:
+                self.joint_limits[i] = robot.joint_limits[i]
+        
+        # Calculate midpoints and ranges for each joint for efficient unnormalization
+        self.joint_mids = {}
+        self.joint_ranges = {}
+        
+        for joint_idx, limits in self.joint_limits.items():
+            limit_low, limit_high = limits
+            mid = (limit_high + limit_low) / 2.0
+            rng = (limit_high - limit_low) / 2.0
+            
+            self.joint_mids[joint_idx] = mid
+            self.joint_ranges[joint_idx] = rng
+        
+        # Safety margin factor (reduces the effective range to avoid getting too close to limits)
+        self.safety_margin = 0.97  # Use 97% of the range to avoid hitting exact limits
+    
+    def sample(self):
+        """
+        Sample a random action that respects joint limits with a safety margin.
+        This ensures that random exploration doesn't push joints to their absolute limits.
+        """
+        # Sample uniformly but with slightly reduced range to leave safety margin
+        action = np.random.uniform(
+            low=-1.0 * self.safety_margin, 
+            high=1.0 * self.safety_margin, 
+            size=self.shape
+        ).astype(self.dtype)
+        
+        return action
+    
+    def contains(self, x):
+        """
+        Check if the action is within the space's bounds, respecting joint limits.
+        Since all normalized actions in [-1, 1] are valid by design, we just check
+        the normalized action range.
+        """
+        if isinstance(x, list):
+            x = np.array(x, dtype=self.dtype)
+        
+        return np.all(np.logical_and(x >= self.low, x <= self.high))
+    
+    def normalize_action(self, joint_positions):
+        """
+        Convert real joint positions to normalized actions in [-1, 1].
+        
+        Args:
+            joint_positions: List of joint positions in radians
+            
+        Returns:
+            Normalized action array with values in [-1, 1]
+        """
+        normalized = np.zeros(self.shape, dtype=self.dtype)
+        
+        for joint_idx in range(len(joint_positions)):
+            if joint_idx in self.joint_limits:
+                mid = self.joint_mids[joint_idx]
+                rng = self.joint_ranges[joint_idx]
+                
+                # Normalize to [-1, 1]
+                normalized[joint_idx] = (joint_positions[joint_idx] - mid) / rng
+                
+                # Ensure we're strictly within bounds
+                normalized[joint_idx] = np.clip(normalized[joint_idx], -1.0, 1.0)
+            else:
+                # For joints without defined limits, use the position directly
+                normalized[joint_idx] = np.clip(joint_positions[joint_idx], -1.0, 1.0)
+        
+        return normalized
+    
+    def unnormalize_action(self, normalized_action):
+        """
+        Convert normalized actions in [-1, 1] to actual joint positions.
+        
+        Args:
+            normalized_action: Array of normalized actions in [-1, 1]
+            
+        Returns:
+            Array of joint positions in radians within joint limits
+        """
+        # Ensure the action is clipped to [-1, 1] for safety
+        clipped_action = np.clip(normalized_action, -1.0, 1.0)
+        
+        # Initialize joint positions
+        joint_positions = np.zeros(self.shape, dtype=np.float32)
+        
+        # Convert normalized values to actual joint positions
+        for joint_idx in range(len(joint_positions)):
+            if joint_idx in self.joint_limits:
+                mid = self.joint_mids[joint_idx]
+                rng = self.joint_ranges[joint_idx]
+                
+                # Unnormalize to joint position
+                joint_positions[joint_idx] = mid + clipped_action[joint_idx] * rng
+            else:
+                # For joints without defined limits, use the normalized value directly
+                joint_positions[joint_idx] = clipped_action[joint_idx]
+        
+        return joint_positions
 
 class RobotPositioningRevampedEnv(gym.Env):
     """
@@ -149,7 +298,8 @@ class RobotPositioningRevampedEnv(gym.Env):
                  verbose=False, 
                  parallel_viz=False, 
                  rank=0, 
-                 offset_x=0.0):
+                 offset_x=0.0,
+                 training_mode=True):
         """
         Initialize the robot positioning environment with improvements.
         
@@ -163,6 +313,7 @@ class RobotPositioningRevampedEnv(gym.Env):
             parallel_viz: Whether this is used in parallel visualization mode
             rank: The rank of this robot in parallel training
             offset_x: X-axis offset for parallel robots
+            training_mode: Whether the environment is used for training (affects exploration)
         """
         super().__init__()
         
@@ -176,6 +327,7 @@ class RobotPositioningRevampedEnv(gym.Env):
         self.parallel_viz = parallel_viz
         self.rank = rank
         self.offset_x = offset_x
+        self.training_mode = training_mode
         
         # Initialize PyBullet client
         self.client_id = get_shared_pybullet_client(render=gui)
@@ -249,26 +401,20 @@ class RobotPositioningRevampedEnv(gym.Env):
         empty_observation = np.zeros(self.dof + 7)  # joint positions + ee position + dist to target
         self.observation_history = [empty_observation.copy() for _ in range(self.observation_history_length)]
         
-        # Define action space: Delta joint positions (continuous)
-        # Each action is a delta to the current joint position, limited to a reasonable range
-        max_delta = 0.1  # 5.7 degrees maximum change per step for more precise control
-        self.action_space = spaces.Box(
-            low=-max_delta, 
-            high=max_delta, 
-            shape=(self.dof,),
-            dtype=np.float32
-        )
+        # Define action space: Use the new JointLimitedBox space instead of regular Box
+        # This ensures actions inherently respect joint limits
+        self.action_space = JointLimitedBox(self.robot, shape=(self.dof,), dtype=np.float32)
         
         # Define observation space: 
-        # - Current normalized joint angles (6)
+        # - Current normalized joint angles (5)
         # - Current end effector position (3)
         # - Target position (3)
         # - Distance to target (1)
         # - Normalized direction to target (3)
-        # - Previous action (6)
-        # - Joint position history (6 * history_length)
+        # - Previous action (5)
+        # - Joint position history (5 * history_length)
         # - End effector position history (3 * history_length)
-        # Total: 6 + 3 + 3 + 1 + 3 + 6 + (6+3)*5 = 73
+        # Total: 5 + 3 + 3 + 1 + 3 + 5 + (5+3)*5 = 60
         
         # Maximum values for each component
         max_joints = np.ones(self.dof)  # Normalized joint angles (0-1)
@@ -276,17 +422,17 @@ class RobotPositioningRevampedEnv(gym.Env):
         max_target = np.ones(3) * (workspace_size * 2.0)  # Target position (meters)
         max_distance = np.array([workspace_size * 2.0])  # Distance (meters)
         max_direction = np.ones(3)  # Normalized direction (-1 to 1)
-        max_action = np.ones(self.dof) * max_delta  # Previous action
+        max_action = np.ones(self.dof) * 1.0  # Assuming max action range is [-1, 1]
         
         # Combine all max values
         max_obs = np.concatenate([
-            max_joints,  # 6
+            max_joints,  # 5
             max_position,  # 3
             max_target,  # 3
             max_distance,  # 1
             max_direction,  # 3
-            max_action,  # 6
-            np.tile(np.concatenate([max_joints, max_position]), self.observation_history_length)  # (6+3)*history_length
+            max_action,  # 5
+            np.tile(np.concatenate([max_joints, max_position]), self.observation_history_length)  # (5+3)*history_length
         ])
         
         # Define observation space
@@ -574,39 +720,37 @@ class RobotPositioningRevampedEnv(gym.Env):
     
     def step(self, action):
         """
-        Apply action to the robot using direct joint position control
+        Apply action to the robot using direct joint position control with built-in joint limit enforcement.
         
         Args:
-            action: Delta joint positions (in radians)
+            action: Normalized actions in [-1, 1] for each joint
         """
-        # Get current joint positions
-        state = self.robot._get_state()
-        current_joint_positions = state[:self.robot.dof*2:2]
+        # The action is now in the range [-1, 1] for each joint
+        # Convert to actual joint positions within the joint limits
+        joint_positions = self.action_space.unnormalize_action(action)
         
-        # Calculate new joint positions by adding the delta
-        new_joint_positions = []
+        # Add small random noise to joint positions (exploration during training)
+        if self.training_mode:
+            # Add tiny noise to help explore the space more thoroughly
+            noise_scale = 0.001  # Very small noise
+            joint_positions += np.random.normal(0, noise_scale, size=len(joint_positions))
         
-        for i, delta in enumerate(action):
+        # Check if positions would exceed limits (should never happen with JointLimitedBox)
+        # This is purely for monitoring and diagnostics
+        positions_within_limits = True
+        for i, pos in enumerate(joint_positions):
             if i in self.robot.joint_limits:
                 limit_low, limit_high = self.robot.joint_limits[i]
-                # Current position
-                current_pos = current_joint_positions[i]
-                
-                # Calculate new position with delta
-                new_pos = current_pos + delta
-                
-                # Enforce joint limits
-                new_pos = max(limit_low, min(limit_high, new_pos))
-                
-                new_joint_positions.append(new_pos)
-            else:
-                # For joints without limits, just add the delta
-                new_joint_positions.append(current_joint_positions[i] + delta)
+                if pos < limit_low or pos > limit_high:
+                    positions_within_limits = False
+                    if self.verbose:
+                        print(f"Warning: Action would exceed joint {i} limits: {pos:.4f} not in [{limit_low:.4f}, {limit_high:.4f}]")
+                    # Force within limits (should be unnecessary with JointLimitedBox)
+                    joint_positions[i] = np.clip(pos, limit_low, limit_high)
         
-        # Apply the new joint positions
-        # Fix by passing both positions and velocities (zero velocities)
-        zero_velocities = [0.0] * len(new_joint_positions)
-        next_state = self.robot.step((new_joint_positions, zero_velocities))
+        # Apply the joint positions with zero velocities
+        zero_velocities = [0.0] * len(joint_positions)
+        next_state = self.robot.step((joint_positions, zero_velocities))
         
         # Store the current action for next observation
         self.previous_action = np.array(action)
@@ -624,7 +768,8 @@ class RobotPositioningRevampedEnv(gym.Env):
         # Create info dictionary for debugging and monitoring
         info = {
             "distance_cm": distance * 100,
-            "joint_positions": current_joint_positions,
+            "joint_positions": joint_positions,
+            "positions_within_limits": positions_within_limits
         }
         
         # Determine if target is reached
@@ -632,7 +777,7 @@ class RobotPositioningRevampedEnv(gym.Env):
         info["target_reached"] = target_reached
         
         # Calculate reward
-        reward = self._calculate_reward(distance, current_ee_pos, action)
+        reward = self._calculate_reward(distance, current_ee_pos, action, positions_within_limits)
         
         # Update previous distance for next step's calculation
         self.previous_distance = distance
@@ -697,7 +842,7 @@ class RobotPositioningRevampedEnv(gym.Env):
         # Return according to Gymnasium API
         return observation, reward, done, False, info
     
-    def _calculate_reward(self, distance, current_ee_pos, action):
+    def _calculate_reward(self, distance, current_ee_pos, action, positions_within_limits=True):
         """
         Calculate reward with sophisticated reward engineering
         
@@ -707,6 +852,8 @@ class RobotPositioningRevampedEnv(gym.Env):
         3. Movement efficiency: penalty for excessive movement
         4. Smooth motion: penalty for jerky movements
         5. Joint limit avoidance: penalty for approaching joint limits
+        6. Joint limit violation: strong penalty if the action would exceed limits
+           (should never happen with JointLimitedBox but included as safety)
         """
         # 1. Distance component - negative exponential of distance
         # This gives higher gradients close to the target (encouraging precision)
@@ -803,13 +950,17 @@ class CustomFeatureExtractor(BaseFeaturesExtractor):
         
         # Determine observation dimensions
         obs_dim = observation_space.shape[0]
+        print(f"Observation space dimension: {obs_dim}")
+        
+        # Number of joints (DOF) in the environment (5 for FANUC robot)
+        self.dof = 5
         
         # Define the encoder for different parts of the observation
         # This structured approach helps the network better understand spatial relationships
         
-        # Joint positions and previous action encoders (12 values: 6 joints + 6 previous actions)
+        # Joint positions and previous action encoders (10 values: 5 joints + 5 previous actions)
         self.joint_encoder = nn.Sequential(
-            nn.Linear(12, 128),
+            nn.Linear(10, 128),
             nn.LayerNorm(128),
             nn.ReLU(),
             nn.Linear(128, 128),
@@ -839,7 +990,8 @@ class CustomFeatureExtractor(BaseFeaturesExtractor):
         
         # History encoder (processes the time series information)
         # This captures the motion dynamics over time
-        history_dim = 9 * 5  # 9 values per timestep (6 joints + 3 ee pos) * 5 timesteps
+        # 8 values per timestep (5 joints + 3 ee pos) * 5 timesteps
+        history_dim = 8 * 5  
         self.history_encoder = nn.Sequential(
             nn.Linear(history_dim, 128),
             nn.LayerNorm(128),
@@ -867,13 +1019,13 @@ class CustomFeatureExtractor(BaseFeaturesExtractor):
         
         # Extract different components from observation
         # Note: these indices must match the observation creation in the environment
-        joint_pos = observations[:, :6]  # First 6 are joint positions
-        ee_pos = observations[:, 6:9]  # Next 3 are ee position
-        target_pos = observations[:, 9:12]  # Next 3 are target position
-        distance = observations[:, 12:13]  # Next 1 is distance
-        direction = observations[:, 13:16]  # Next 3 are direction
-        prev_action = observations[:, 16:22]  # Next 6 are previous action
-        history = observations[:, 22:]  # Rest is history
+        joint_pos = observations[:, :self.dof]  # First 5 are joint positions
+        ee_pos = observations[:, self.dof:self.dof+3]  # Next 3 are ee position
+        target_pos = observations[:, self.dof+3:self.dof+6]  # Next 3 are target position
+        distance = observations[:, self.dof+6:self.dof+7]  # Next 1 is distance
+        direction = observations[:, self.dof+7:self.dof+10]  # Next 3 are direction
+        prev_action = observations[:, self.dof+10:self.dof*2+10]  # Next 5 are previous action
+        history = observations[:, self.dof*2+10:]  # Rest is history
         
         # Process different components
         joint_features = self.joint_encoder(torch.cat([joint_pos, prev_action], dim=1))
@@ -898,6 +1050,7 @@ class CustomActorNetwork(nn.Module):
     """
     Custom actor network with improved architecture for precise robot control.
     Uses residual connections and deeper layers for better gradient flow.
+    The network's output is explicitly designed to respect joint limits inherently.
     """
     def __init__(self, feature_dim, action_dim):
         super().__init__()
@@ -919,8 +1072,13 @@ class CustomActorNetwork(nn.Module):
         self.mean_out = nn.Linear(128, action_dim)
         
         # Log standard deviation layer with learned parameters
-        # Starting with a low log std for more precise initial actions
-        self.log_std = nn.Parameter(torch.ones(action_dim) * -1.0)
+        # Starting with a lower initial value for more precise actions and
+        # to reduce sampling outside of valid regions
+        self.log_std = nn.Parameter(torch.ones(action_dim) * -2.0)
+        
+        # Additional layer to scale the exploration as we get closer to limits
+        # This helps the model learn to avoid sampling actions near the boundaries
+        self.adaptive_std_scale = nn.Linear(feature_dim, action_dim)
     
     def forward(self, features):
         # First layer
@@ -939,8 +1097,17 @@ class CustomActorNetwork(nn.Module):
         # We scale in the env for actual action range
         mean = torch.tanh(self.mean_out(x))
         
-        # Return mean and log std
-        log_std = self.log_std.expand_as(mean)
+        # Apply adaptive standard deviation scaling
+        # This allows the model to learn to reduce exploration near limits
+        std_scaling = torch.sigmoid(self.adaptive_std_scale(features))
+        
+        # Base log standard deviation, scaled by the adaptive factor
+        # This helps prevent sampling outside valid regions
+        log_std = self.log_std * (0.5 + 0.5 * std_scaling)
+        
+        # Clamp log_std for numerical stability while allowing
+        # sufficient exploration in the middle of the joint range
+        log_std = torch.clamp(log_std, -20.0, 0.0)
         
         return mean, log_std
 
@@ -1169,17 +1336,17 @@ class TrainingMonitorCallback(BaseCallback):
 # Custom PPO algorithm wrapper that uses our custom policy
 class CustomPPO(PPO):
     """
-    Custom PPO implementation with our improved policy architecture.
+    Custom PPO implementation with our improved policy architecture
+    that inherently respects joint limits during action sampling.
     """
     def __init__(self, policy, env, learning_rate=0.0003, n_steps=2048, batch_size=64,
                  n_epochs=10, gamma=0.99, gae_lambda=0.95, clip_range=0.2,
                  clip_range_vf=None, normalize_advantage=True, ent_coef=0.0,
                  vf_coef=0.5, max_grad_norm=0.5, use_sde=False, sde_sample_freq=-1,
-                 target_kl=None, tensorboard_log=None, create_eval_env=False,
-                 policy_kwargs=None, verbose=0, seed=None, device='auto',
-                 _init_setup_model=True):
+                 target_kl=None, tensorboard_log=None, policy_kwargs=None,
+                 verbose=0, seed=None, device='auto', _init_setup_model=True):
         
-        # Initialize standard PPO
+        # Remove create_eval_env which is causing a linter error
         super(CustomPPO, self).__init__(
             policy=policy,
             env=env,
@@ -1199,7 +1366,6 @@ class CustomPPO(PPO):
             sde_sample_freq=sde_sample_freq,
             target_kl=target_kl,
             tensorboard_log=tensorboard_log,
-            create_eval_env=create_eval_env,
             policy_kwargs=policy_kwargs,
             verbose=verbose,
             seed=seed,
@@ -1208,7 +1374,7 @@ class CustomPPO(PPO):
         )
 
 # Function to create environments for training
-def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_limits=False):
+def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_limits=False, training_mode=True):
     """
     Create multiple instances of the revamped robot positioning environment.
     
@@ -1217,6 +1383,7 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_l
         viz_speed: Speed of visualization (seconds between steps)
         parallel_viz: Whether to use parallel visualization mode
         strict_limits: Whether to strictly enforce joint limits
+        training_mode: Whether the environments are used for training (affects exploration)
     
     Returns:
         List of environment instances
@@ -1235,7 +1402,8 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_l
                 verbose=False,
                 parallel_viz=True,
                 rank=i,
-                offset_x=offset_x
+                offset_x=offset_x,
+                training_mode=training_mode
             )
             
             # Wrap in JointLimitEnforcingEnv if requested
@@ -1255,7 +1423,8 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_l
                 gui=is_gui,
                 viz_speed=viz_speed if is_gui else 0.0,
                 verbose=False,
-                rank=i
+                rank=i,
+                training_mode=training_mode
             )
             
             # Wrap in JointLimitEnforcingEnv if requested
@@ -1268,7 +1437,7 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_l
 
 def train_revamped_robot(args):
     """
-    Train a robot with the revamped approach.
+    Train a robot with the revamped approach, ensuring the model inherently respects joint limits.
     
     Args:
         args: Command line arguments
@@ -1287,15 +1456,24 @@ def train_revamped_robot(args):
             num_envs=args.parallel,
             viz_speed=args.viz_speed,
             parallel_viz=True,
-            strict_limits=getattr(args, 'strict_limits', False)
+            strict_limits=False,  # We no longer need this with JointLimitedBox
+            training_mode=True
         )
     else:
         envs = create_revamped_envs(
             num_envs=args.parallel,
             viz_speed=args.viz_speed if args.gui else 0.0,
             parallel_viz=False,
-            strict_limits=getattr(args, 'strict_limits', False)
+            strict_limits=False,  # We no longer need this with JointLimitedBox
+            training_mode=True
         )
+    
+    # Verify environments use JointLimitedBox action space
+    for i, env in enumerate(envs):
+        if isinstance(env.action_space, JointLimitedBox):
+            print(f"Environment {i} is using JointLimitedBox action space - limits inherently enforced")
+        else:
+            print(f"WARNING: Environment {i} is not using JointLimitedBox action space")
     
     # Create vectorized environment
     vec_env = DummyVecEnv([lambda env=env: env for env in envs])
@@ -1311,38 +1489,91 @@ def train_revamped_robot(args):
         epsilon=1e-8,
     )
     
-    # Define policy kwargs
+    # Define policy kwargs with our custom feature extractor
+    # and with specific hyperparameters to ensure inherent joint limit respect
     policy_kwargs = {
         "features_extractor_class": CustomFeatureExtractor,
+        "activation_fn": nn.ReLU,
         "net_arch": dict(pi=[256, 256], vf=[256, 256]),
-        "activation_fn": nn.ReLU
+        "log_std_init": -2.0,  # Start with low exploration to avoid hitting limits
+        "ortho_init": False,   # Use our custom initialization
     }
+    
+    # Use CUDA if available
+    device = "cuda" if args.use_cuda and torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
     
     # Create or load model
     if args.load:
         print(f"Loading model from {args.load}")
         model = PPO.load(args.load, env=vec_env)
     else:
-        print("Creating new PPO model with custom architecture")
+        print("Creating new PPO model with joint-limit-aware architecture")
+        
+        # Create PPO with custom parameters tuned for joint limit learning
         model = PPO(
             "MlpPolicy",
             vec_env,
             learning_rate=args.learning_rate,
-            n_steps=512,  # Shorter rollout buffer for faster updates
+            n_steps=512,                 # Shorter rollout buffer for faster updates
             batch_size=64,
-            n_epochs=10,  # More epochs per update for better learning
+            n_epochs=10,                 # More epochs per update for better learning
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
             clip_range_vf=0.2,
             normalize_advantage=True,
-            ent_coef=0.01,  # Small entropy coefficient for exploration
+            ent_coef=0.005,              # Slightly lower entropy to be more conservative near limits
             vf_coef=0.5,
             max_grad_norm=0.5,
             verbose=1,
             policy_kwargs=policy_kwargs,
-            device="cuda" if args.use_cuda and torch.cuda.is_available() else "cpu"
+            device=device
         )
+    
+    # Add a callback to test joint limits during training
+    class JointLimitMonitorCallback(BaseCallback):
+        """Callback to monitor if actions respect joint limits during training."""
+        def __init__(self, verbose=0, check_freq=1000):
+            super(JointLimitMonitorCallback, self).__init__(verbose)
+            self.check_freq = check_freq
+            self.violations = 0
+            self.total_checked = 0
+        
+        def _on_step(self):
+            """Check if latest actions respect joint limits."""
+            if self.n_calls % self.check_freq == 0 and hasattr(self.model, 'last_obs'):
+                # Get current actions from the policy
+                actions, _ = self.model.predict(self.model.last_obs, deterministic=False)
+                
+                # Check if actions would result in joint positions within limits
+                all_within_limits = True
+                
+                for env_idx, action in enumerate(actions):
+                    # Get the environment and check if the unnormalized action respects limits
+                    env = self.training_env.envs[env_idx]
+                    if hasattr(env, 'action_space') and isinstance(env.action_space, JointLimitedBox):
+                        joint_positions = env.action_space.unnormalize_action(action)
+                        
+                        # Check each joint against its limits
+                        for joint_idx, pos in enumerate(joint_positions):
+                            if joint_idx in env.action_space.joint_limits:
+                                limit_low, limit_high = env.action_space.joint_limits[joint_idx]
+                                if pos < limit_low or pos > limit_high:
+                                    all_within_limits = False
+                                    self.violations += 1
+                                    if self.verbose > 0:
+                                        print(f"Joint limit violation: Joint {joint_idx} position {pos:.4f} outside limits [{limit_low:.4f}, {limit_high:.4f}]")
+                
+                self.total_checked += 1
+                if self.verbose > 0 and self.total_checked > 0:
+                    violation_rate = (self.violations / self.total_checked) * 100
+                    print(f"Joint limit check: {violation_rate:.2f}% violations detected ({self.violations}/{self.total_checked})")
+            
+            return True
+    
+    # Add joint limit monitor to callbacks
+    joint_limit_monitor = JointLimitMonitorCallback(verbose=args.verbose, check_freq=5000)
     
     # Evaluation mode
     if args.eval_only:
@@ -1383,17 +1614,18 @@ def train_revamped_robot(args):
     
     # Print training information
     print("\n" + "="*80)
-    print(f"Starting training with revamped approach")
+    print(f"Starting training with joint-limit-aware architecture")
     print(f"Using {args.parallel} parallel environments")
     print(f"Learning rate: {args.learning_rate}")
     print(f"Training for {args.steps} timesteps")
     print(f"Models will be saved to {model_dir}")
+    print("Joint limits will be inherently respected by the model")
     print("="*80 + "\n")
     
     # Start training
     model.learn(
         total_timesteps=args.steps,
-        callback=[save_callback, monitor_callback]
+        callback=[save_callback, monitor_callback, joint_limit_monitor]
     )
     
     # Save final model
@@ -1496,17 +1728,17 @@ def main():
 
 def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, strict_limits=False):
     """
-    Evaluate a trained model on the robot positioning task.
+    Evaluate a trained model and report performance metrics.
     
     Args:
-        model_path: Path to the trained model
+        model_path: Path to the saved model
         num_episodes: Number of episodes to evaluate
         visualize: Whether to visualize the evaluation
-        verbose: Whether to print verbose output
-        strict_limits: Whether to strictly enforce joint limits
-    
+        verbose: Whether to print detailed output
+        strict_limits: Legacy parameter, no longer needed with JointLimitedBox
+        
     Returns:
-        dict: Dictionary of evaluation metrics
+        Dictionary of evaluation metrics
     """
     print(f"\nEvaluating model: {model_path}")
     
@@ -1592,44 +1824,11 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, st
             # Get action from model
             action, _ = model.predict(obs, deterministic=True)
             
-            # Enforce joint limits before stepping if strict limits enabled
-            if strict_limits:
-                # Get current joint positions
-                state = env.robot._get_state()
-                current_joint_positions = state[:env.robot.dof*2:2]
-                
-                # Calculate new joint positions from action deltas
-                new_joint_positions = []
-                for i, delta in enumerate(action[0]):  # action is wrapped in array due to vectorized env
-                    new_pos = current_joint_positions[i] + delta
-                    new_joint_positions.append(new_pos)
-                
-                # Enforce limits
-                limited_positions = ensure_joint_limits(env.robot, new_joint_positions)
-                
-                # If action was limited, create a new action array with deltas that respect limits
-                if not np.array_equal(new_joint_positions, limited_positions):
-                    limited_deltas = []
-                    for i, (pos, limited_pos) in enumerate(zip(new_joint_positions, limited_positions)):
-                        if pos != limited_pos:
-                            # Calculate the allowed delta that respects the limit
-                            allowed_delta = limited_pos - current_joint_positions[i]
-                            limited_deltas.append(allowed_delta)
-                        else:
-                            limited_deltas.append(action[0][i])
-                    
-                    # Replace action with limited version
-                    action = np.array([limited_deltas])
+            # Actions are now inherently limited by the JointLimitedBox space
+            # No need for additional limit enforcement
             
-            # Step environment with API compatibility handling
-            try:
-                # Try new gymnasium API
-                obs, reward, terminated, truncated, info = vec_env.step(action)
-                done = terminated[0] or truncated[0]
-            except ValueError:
-                # Fall back to older gym API
-                obs, reward, done, info = vec_env.step(action)
-                done = done[0]
+            # Step environment with the action
+            obs, reward, done, info = vec_env.step(action)
             
             # Update metrics
             ep_reward += reward[0]
@@ -1697,14 +1896,13 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, st
 
 def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False, strict_limits=False):
     """
-    Run a sequence of evaluation episodes for demonstration purposes
-    with visualization and optional video saving.
+    Run a predefined evaluation sequence to showcase model capabilities.
     
     Args:
-        model_path: Path to the trained model
-        viz_speed: Visualization speed (delay in seconds)
+        model_path: Path to the saved model
+        viz_speed: Speed of visualization (seconds between steps)
         save_video: Whether to save a video of the evaluation
-        strict_limits: Whether to strictly enforce joint limits
+        strict_limits: Legacy parameter, no longer needed with JointLimitedBox
     """
     print(f"Running evaluation sequence for model: {model_path}")
     
@@ -1784,44 +1982,11 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False, strict
             # Get action from model
             action, _ = model.predict(obs, deterministic=True)
             
-            # Enforce joint limits before stepping if strict limits enabled
-            if strict_limits:
-                # Get current joint positions
-                state = env.robot._get_state()
-                current_joint_positions = state[:env.robot.dof*2:2]
-                
-                # Calculate new joint positions from action deltas
-                new_joint_positions = []
-                for i, delta in enumerate(action[0]):  # action is wrapped in array due to vectorized env
-                    new_pos = current_joint_positions[i] + delta
-                    new_joint_positions.append(new_pos)
-                
-                # Enforce limits
-                limited_positions = ensure_joint_limits(env.robot, new_joint_positions)
-                
-                # If action was limited, create a new action array with deltas that respect limits
-                if not np.array_equal(new_joint_positions, limited_positions):
-                    limited_deltas = []
-                    for i, (pos, limited_pos) in enumerate(zip(new_joint_positions, limited_positions)):
-                        if pos != limited_pos:
-                            # Calculate the allowed delta that respects the limit
-                            allowed_delta = limited_pos - current_joint_positions[i]
-                            limited_deltas.append(allowed_delta)
-                        else:
-                            limited_deltas.append(action[0][i])
-                    
-                    # Replace action with limited version
-                    action = np.array([limited_deltas])
+            # Actions are now inherently limited by the JointLimitedBox space
+            # No need for additional limit enforcement
             
-            # Step environment with API compatibility handling
-            try:
-                # Try new gymnasium API
-                obs, reward, terminated, truncated, info = vec_env.step(action)
-                done = terminated[0] or truncated[0]
-            except ValueError:
-                # Fall back to older gym API
-                obs, reward, done, info = vec_env.step(action)
-                done = done[0]
+            # Step environment with the action
+            obs, reward, done, info = vec_env.step(action)
             
             # Capture frame for video or delay for visualization
             if save_video:

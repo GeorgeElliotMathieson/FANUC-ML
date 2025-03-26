@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # train_robot_rl_ppo_directml.py
-# Training FANUC robot for end-effector positioning using PPO algorithm
+# Training 5-axis FANUC robot (without gripper) for end-effector positioning using PPO algorithm
 # with DirectML support for AMD RX 6700S GPU
 
 import os
@@ -44,11 +44,13 @@ from res.rml.python.train_robot_rl_positioning_revamped import (
 
 from res.rml.python.train_robot_rl_positioning import (
     get_shared_pybullet_client, 
-    FANUCRobotEnv, 
     load_workspace_data,
     determine_reachable_workspace,
     adjust_camera_for_robots
 )
+
+# Import the robot environment directly from robot_sim.py
+from res.rml.python.robot_sim import FANUCRobotEnv
 
 # Ensure output directories exist
 os.makedirs("./models", exist_ok=True)
@@ -1380,10 +1382,10 @@ def create_ppo_envs(num_envs=1, viz_speed=0.0, parallel_viz=False):
 # Main training function
 def train_robot_with_ppo_directml(args):
     """
-    Train the robot using PPO algorithm with DirectML on AMD GPU
+    Train the 5-axis FANUC robot (without gripper) using PPO algorithm with DirectML on AMD GPU
     """
     print("\n" + "="*80)
-    print("FANUC Robot Positioning with PPO and DirectML")
+    print("5-Axis FANUC Robot Positioning with PPO and DirectML")
     print("Optimized for AMD RX 6700S GPU")
     print("="*80 + "\n")
     
@@ -1840,14 +1842,20 @@ def force_gc():
 
 def showcase_model(model, env, max_steps=200):
     """
-    Run a showcase episode that demonstrates the model's performance
-    with a longer step limit for visualization purposes.
+    Showcase a trained model by running it in the environment.
     
     Args:
-        model: The trained model to evaluate
-        env: The evaluation environment
+        model: The trained PPO model
+        env: The environment to run in
         max_steps: Maximum number of steps to run
+        
+    Returns:
+        Success rate and final distance
     """
+    print("\n" + "="*80)
+    print("Showcasing 5-Axis FANUC Robot (without gripper) trained with PPO and DirectML")
+    print("="*80)
+    
     # Check if we have a vector environment
     is_vector_env = hasattr(env, 'num_envs') and env.num_envs > 1
     
@@ -1967,6 +1975,7 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("--no-gpu", dest="gpu", action="store_false", help="Disable GPU usage")
     parser.add_argument("--gpu", action="store_true", default=True, help="Enable GPU usage")
+    parser.add_argument("--test-robot", action="store_true", help="Just visualize the robot model and exit")
     
     # PPO specific parameters
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="Learning rate")
@@ -1981,6 +1990,56 @@ def main():
     parser.add_argument("--max-grad-norm", type=float, default=0.5, help="Maximum gradient norm")
     
     args = parser.parse_args()
+    
+    # Configure the pretty print
+    print("\n" + "="*80)
+    print("5-Axis FANUC Robot Positioning with PPO and DirectML")
+    print("Optimized for AMD RX 6700S GPU")
+    print("="*80)
+    
+    # Test robot visualization if requested
+    if args.test_robot:
+        print("\n" + "="*80)
+        print("Testing 5-Axis FANUC Robot (without gripper) Visualization")
+        print("="*80 + "\n")
+        
+        from res.rml.python.robot_sim import FANUCRobotEnv
+        
+        # Create environment with GUI rendering
+        env = FANUCRobotEnv(render=True, verbose=True)
+        
+        # Wait for user to observe the robot
+        print("\nRobot loaded. Press Ctrl+C to exit.")
+        try:
+            # Move joints to different positions to demonstrate the robot
+            for i in range(10):
+                print(f"Movement sequence {i+1}/10...")
+                # Create some simple joint movements
+                action = [0.0] * env.dof
+                
+                # Move different joints in sequence
+                joint_idx = i % env.dof
+                action[joint_idx] = np.sin(i/5.0) * np.pi/4  # ~45 degree movement
+                
+                # Apply the movement
+                env.step(action)
+                
+                # Wait to observe
+                time.sleep(1.0)
+            
+            # Reset to home position
+            env.reset()
+            print("Demonstration complete.")
+            
+            # Keep running until user interrupts
+            while True:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\nExiting robot visualization test.")
+        finally:
+            env.close()
+        
+        return
     
     # Train the model
     model, env = train_robot_with_ppo_directml(args)

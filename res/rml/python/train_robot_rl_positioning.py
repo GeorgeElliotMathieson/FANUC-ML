@@ -239,256 +239,42 @@ def adjust_camera_for_robots(client_id, num_robots):
     
     print(f"Camera adjusted for {num_robots} robots with distance {camera_distance}")
 
-# Modify the FANUCRobotEnv class to accept a client parameter
+# Change the FANUCRobotEnv class to import from robot_sim
+from res.rml.python.robot_sim import FANUCRobotEnv as UpdatedFANUCRobotEnv  # Import with full path
+
+# Modify the FANUCRobotEnv class to serve as a wrapper for backward compatibility
 class FANUCRobotEnv:
     def __init__(self, render=True, verbose=False, client=None):
-        # Store verbose flag
-        self.verbose = verbose
-        
-        # Store render mode
-        self.render_mode = render
-        
-        # Connect to the physics server using the provided client or create a new one
-        if client is not None:
-            self.client = client
-        else:
-            # Connect to the physics server using the shared client function
-            self.client = get_shared_pybullet_client(render=render)
-            
-        if self.verbose:
-            print(f"Connected to PyBullet physics server with client ID: {self.client}")
-        
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.setGravity(0, 0, -9.81)
-        
-        # Load plane - keeping it visible as requested
-        self.plane_id = p.loadURDF("plane.urdf")
-        
-        # Set collision filter for the plane to interact with all robots
-        # The plane is in group 0 and can collide with all groups
-        p.setCollisionFilterGroupMask(
-            self.plane_id,
-            -1,  # Base link of the plane
-            0,   # Group 0
-            0xFFFF,  # Mask: collide with all groups
-            physicsClientId=self.client
-        )
-        
-        # Robot parameters from the documentation
-        self.dof = 6  # 6 degrees of freedom
-        self.max_force = 100  # Maximum force for joint motors
-        self.position_gain = 0.3
-        self.velocity_gain = 1.0
-        
-        # Load the robot URDF (you'll need to create this based on the manual specs)
-        # For now, we'll use a placeholder
-        self.robot_id = self._load_robot()
-        
-        # Get joint information
-        self.num_joints = p.getNumJoints(self.robot_id)
-        self.joint_indices = range(self.num_joints)
-        
-        # Joint limits from manual
-        self.joint_limits = {
-            0: [-720, 720],  # J1 axis - physical limit (multiple rotations allowed)
-            1: [-360, 360],  # J2 axis - physical limit
-            2: [-360, 360],  # J3 axis - physical limit
-            3: [-720, 720],  # J4 axis - physical limit (multiple rotations allowed)
-            4: [-360, 360],  # J5 axis - physical limit
-            5: [-1080, 1080]  # J6 axis - physical limit (multiple rotations allowed)
-        }
-        
-        # Convert to radians
-        for joint, limits in self.joint_limits.items():
-            self.joint_limits[joint] = [np.deg2rad(limits[0]), np.deg2rad(limits[1])]
-        
-        # Set up collision detection: disable self-collisions for all links except end effector
-        self._configure_collision_detection()
-            
-        # Initial configuration
-        self.reset()
-    
-    def _configure_collision_detection(self):
         """
-        Configure collision detection for the robot:
-        1. Disable self-collisions between robot links
-        2. Keep only end effector collision enabled
+        A wrapper around the updated FANUCRobotEnv from robot_sim.py
+        This ensures compatibility with existing code while using the updated robot model.
         """
-        if self.verbose:
-            print("Configuring robot collision detection: end effector only")
-            
-        # Define collision groups
-        ROBOT_BODY_GROUP = 1  # Group for the robot body
-        EE_GROUP = 2          # Group for the end effector
+        # Create an instance of the updated robot environment
+        self.env = UpdatedFANUCRobotEnv(render=render, verbose=verbose)
         
-        # End effector is the last link in the chain
-        ee_link_id = self.dof - 1
+        # Forward important attributes
+        self.robot_id = self.env.robot_id
+        self.client = self.env.client
+        self.dof = self.env.dof
+        self.num_joints = self.env.num_joints
+        self.joint_limits = self.env.joint_limits
+        self.joint_indices = self.env.joint_indices
         
-        # Set all links except the end effector to not collide with each other
-        for i in range(self.num_joints):
-            if i != ee_link_id:
-                # Set this link to the robot body group
-                p.setCollisionFilterGroupMask(
-                    self.robot_id,
-                    i,
-                    ROBOT_BODY_GROUP,  # This link is in the robot body group
-                    0,  # This link doesn't collide with any other link
-                    physicsClientId=self.client
-                )
-            else:
-                # Set the end effector to its own group that can collide
-                p.setCollisionFilterGroupMask(
-                    self.robot_id,
-                    i,
-                    EE_GROUP,  # End effector is in its own group
-                    0xFFFF,    # End effector can collide with everything
-                    physicsClientId=self.client
-                )
-        
-        # Also set the base link (link_id = -1)
-        p.setCollisionFilterGroupMask(
-            self.robot_id,
-            -1,
-            ROBOT_BODY_GROUP,
-            0,  # Base doesn't collide with any robot parts
-            physicsClientId=self.client
-        )
-        
-        # Store for reference
-        self.ee_link_id = ee_link_id
-        self.ROBOT_BODY_GROUP = ROBOT_BODY_GROUP
-        self.EE_GROUP = EE_GROUP
-    
-    def _load_robot(self):
-        # Load the URDF for the FANUC LR Mate 200iC
-        
-        # Get the absolute path to the workspace directory
-        workspace_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-        
-        # Define the absolute path to the URDF file
-        urdf_path = os.path.join(workspace_dir, "res", "fanuc_lrmate_200ic.urdf")
-        
-        # Check if the URDF file exists
-        if os.path.exists(urdf_path):
-            if self.verbose:
-                print(f"Loading FANUC LR Mate 200iC URDF from: {urdf_path}")
-            return p.loadURDF(urdf_path, [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
-        
-        # If we couldn't find the URDF, print a warning and fall back to a simple robot
-        print("WARNING: Could not find FANUC LR Mate 200iC URDF file. Falling back to default robot.")
-        print("Expected URDF path:", urdf_path)
-        print("Current working directory:", os.getcwd())
-        
-        # Fallback to a simple robot for testing
-        return p.loadURDF("kuka_iiwa/model.urdf", [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
-    
+    # Forward all methods to the updated class
     def reset(self):
-        # Get the current joint states if they exist (for subsequent resets)
-        current_joint_states = []
-        for i in range(self.dof):
-            try:
-                state = p.getJointState(self.robot_id, i)
-                current_joint_states.append(state[0])  # Joint position
-            except:
-                # If we can't get the joint state, use home position
-                current_joint_states = None
-                break
-        
-        # On first reset, use home position
-        if current_joint_states is None or not hasattr(self, 'first_reset_done'):
-            # Reset to home position only on the first reset
-            home_position = [0, 0, 0, 0, 0, 0]  # All joints at 0 position
-            for i, pos in enumerate(home_position):
-                p.resetJointState(self.robot_id, i, pos)
-            self.first_reset_done = True
-        else:
-            # On subsequent resets, keep the current position
-            for i, pos in enumerate(current_joint_states):
-                p.resetJointState(self.robot_id, i, pos)
-        
-        # Get current state
-        state = self._get_state()
-        return state
+        return self.env.reset()
         
     def step(self, action):
-        """
-        Apply action to the robot
-        
-        Args:
-            action: Can be either:
-                   - If tuple: (positions, velocities) where each is a list of 6 values
-                   - If positions is None, only velocities will be applied
-        """
-        # Apply the action as joint velocities if it's a tuple with None and velocities
-        if isinstance(action, tuple) and len(action) == 2:
-            positions, velocities = action
-            
-            # If positions is None, only apply velocity control
-            if positions is None and velocities is not None:
-                # Apply velocity control with limit checks
-                p.setJointMotorControlArray(
-                    bodyUniqueId=self.robot_id,
-                    jointIndices=range(self.dof),
-                    controlMode=p.VELOCITY_CONTROL,
-                    targetVelocities=velocities,
-                    forces=[self.max_force] * self.dof,
-                    velocityGains=[self.velocity_gain] * self.dof,
-                    physicsClientId=self.client
-                )
-            else:
-                # Apply both position and velocity control
-                p.setJointMotorControlArray(
-                    bodyUniqueId=self.robot_id,
-                    jointIndices=range(self.dof),
-                    controlMode=p.POSITION_CONTROL,
-                    targetPositions=positions,
-                    targetVelocities=velocities,
-                    forces=[self.max_force] * self.dof,
-                    positionGains=[self.position_gain] * self.dof,
-                    velocityGains=[self.velocity_gain] * self.dof,
-                    physicsClientId=self.client
-                )
-        else:
-            # For backward compatibility - just positions
-            p.setJointMotorControlArray(
-                bodyUniqueId=self.robot_id,
-                jointIndices=range(self.dof),
-                controlMode=p.POSITION_CONTROL,
-                targetPositions=action,
-                forces=[self.max_force] * self.dof,
-                positionGains=[self.position_gain] * self.dof,
-                velocityGains=[self.velocity_gain] * self.dof,
-                physicsClientId=self.client
-            )
-        
-        # Step simulation
-        p.stepSimulation(physicsClientId=self.client)
-        
-        # Get new state
-        next_state = self._get_state()
-        
-        return next_state
+        return self.env.step(action)
     
     def _get_state(self):
-        # Get joint states
-        joint_states = []
-        for i in range(self.dof):
-            state = p.getJointState(self.robot_id, i)
-            joint_states.append(state[0])  # Joint position
-            joint_states.append(state[1])  # Joint velocity
-        
-        # Get end-effector position and orientation
-        ee_link_state = p.getLinkState(self.robot_id, self.dof-1)
-        ee_position = ee_link_state[0]
-        ee_orientation = ee_link_state[1]
-        
-        # Combine for full state
-        state = np.array(joint_states + list(ee_position) + list(ee_orientation))
-        return state
+        return self.env._get_state()
+    
+    def render(self):
+        return self.env.render()
     
     def close(self):
-        # We don't disconnect the client here since it's shared
-        pass
+        return self.env.close()
 
 # Modify the DomainRandomizedEnv class to use the shared client
 class DomainRandomizedEnv(gym.Wrapper):
