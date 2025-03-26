@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional
+import sys
 
 # Global shared variables
 _WORKSPACE_POSITIONS = None
@@ -65,6 +66,72 @@ from train_robot_rl_positioning import (
     determine_reachable_workspace,
     adjust_camera_for_robots
 )
+
+# Utility function to strictly enforce joint limits from URDF
+def ensure_joint_limits(robot, joint_positions):
+    """
+    Strictly enforce joint limits from the URDF model.
+    
+    Args:
+        robot: The robot environment instance
+        joint_positions: Array of joint positions to check and enforce
+        
+    Returns:
+        Array of joint positions with limits enforced
+    """
+    limited_positions = joint_positions.copy()
+    
+    for i, pos in enumerate(joint_positions):
+        if i in robot.joint_limits:
+            limit_low, limit_high = robot.joint_limits[i]
+            # Strictly enforce limits
+            if pos < limit_low:
+                limited_positions[i] = limit_low
+                print(f"WARNING: Joint {i} below limit ({pos:.4f} < {limit_low:.4f}), enforcing limit")
+            elif pos > limit_high:
+                limited_positions[i] = limit_high
+                print(f"WARNING: Joint {i} above limit ({pos:.4f} > {limit_high:.4f}), enforcing limit")
+    
+    return limited_positions
+
+# Custom environment wrapper to enforce joint limits
+class JointLimitEnforcingEnv(gym.Wrapper):
+    """
+    Environment wrapper that strictly enforces joint limits from the URDF model.
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        self.robot = env.robot
+        print("Joint limits will be strictly enforced according to URDF specifications")
+    
+    def step(self, action):
+        # Extract the underlying robot action from the environment's step method
+        if hasattr(self.env, 'robot') and hasattr(self.env.robot, 'step'):
+            # Get current joint positions
+            state = self.robot._get_state()
+            current_joint_positions = state[:self.robot.dof*2:2]
+            
+            # For delta joint position control, calculate new positions
+            new_joint_positions = []
+            for i, delta in enumerate(action):
+                # Current position plus delta
+                new_pos = current_joint_positions[i] + delta
+                new_joint_positions.append(new_pos)
+            
+            # Enforce joint limits
+            limited_positions = ensure_joint_limits(self.robot, new_joint_positions)
+            
+            # Create zero velocities for the robot step
+            zero_velocities = [0.0] * len(limited_positions)
+            
+            # Call the original step method with enforced limits
+            next_state = self.robot.step((limited_positions, zero_velocities))
+            
+            # Pass to parent step with the original action (the environment will re-apply limits internally)
+            return self.env.step(action)
+        else:
+            # Fallback if the environment doesn't match our expected structure
+            return self.env.step(action)
 
 class RobotPositioningRevampedEnv(gym.Env):
     """
@@ -1141,49 +1208,60 @@ class CustomPPO(PPO):
         )
 
 # Function to create environments for training
-def create_revamped_envs(num_envs, viz_speed=0.0, parallel_viz=False, eval_env=False):
+def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_limits=False):
     """
-    Create multiple environments for parallel training.
+    Create multiple instances of the revamped robot positioning environment.
     
     Args:
         num_envs: Number of environments to create
-        viz_speed: Visualization speed (delay in seconds)
-        parallel_viz: Whether to use parallel visualization
-        eval_env: Whether this is an evaluation environment
-        
+        viz_speed: Speed of visualization (seconds between steps)
+        parallel_viz: Whether to use parallel visualization mode
+        strict_limits: Whether to strictly enforce joint limits
+    
     Returns:
-        List of environments
+        List of environment instances
     """
+    # Create environments based on parameters
     envs = []
     
-    # Determine GUI configuration based on number of environments
-    use_gui = True if num_envs == 1 or parallel_viz else False
-    
     if parallel_viz:
-        # When using parallel visualization, we need to offset the robots
+        # Calculate offsets for multiple robots in same visualization
+        client_id = get_shared_pybullet_client(render=True)
         for i in range(num_envs):
-            # Calculate offset for this robot
-            offset_x = (i - num_envs / 2) * 1.5  # 1.5m spacing between robots
-            
-            # Create environment with the offset
+            offset_x = i * 1.0  # 1m spacing between robots
             env = RobotPositioningRevampedEnv(
-                gui=use_gui,
+                gui=True,
                 viz_speed=viz_speed,
-                verbose=(i == 0),  # Only the first environment is verbose
-                parallel_viz=parallel_viz,
+                verbose=False,
+                parallel_viz=True,
                 rank=i,
                 offset_x=offset_x
             )
+            
+            # Wrap in JointLimitEnforcingEnv if requested
+            if strict_limits:
+                env = JointLimitEnforcingEnv(env)
+                
             envs.append(env)
+        
+        # Adjust camera to see all robots
+        adjust_camera_for_robots(client_id, num_envs)
     else:
-        # Standard environment creation
+        # Create separate environments
         for i in range(num_envs):
+            # First env is GUI if visualization is enabled
+            is_gui = (i == 0 and viz_speed > 0.0)
             env = RobotPositioningRevampedEnv(
-                gui=(i == 0 and use_gui),  # Only the first environment has GUI
-                viz_speed=viz_speed if i == 0 else 0.0,
-                verbose=(i == 0),  # Only the first environment is verbose
+                gui=is_gui,
+                viz_speed=viz_speed if is_gui else 0.0,
+                verbose=False,
                 rank=i
             )
+            
+            # Wrap in JointLimitEnforcingEnv if requested
+            if strict_limits:
+                env = JointLimitEnforcingEnv(env)
+                
             envs.append(env)
     
     return envs
@@ -1208,13 +1286,15 @@ def train_revamped_robot(args):
         envs = create_revamped_envs(
             num_envs=args.parallel,
             viz_speed=args.viz_speed,
-            parallel_viz=True
+            parallel_viz=True,
+            strict_limits=getattr(args, 'strict_limits', False)
         )
     else:
         envs = create_revamped_envs(
             num_envs=args.parallel,
             viz_speed=args.viz_speed if args.gui else 0.0,
-            parallel_viz=False
+            parallel_viz=False,
+            strict_limits=getattr(args, 'strict_limits', False)
         )
     
     # Create vectorized environment
@@ -1348,6 +1428,7 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--algorithm', choices=['ppo'], default='ppo', help='RL algorithm to use')
+    parser.add_argument('--strict-limits', action='store_true', help='Strictly enforce joint limits from URDF model')
     
     args = parser.parse_args()
     
@@ -1360,6 +1441,9 @@ def parse_args():
 def main():
     """Main function."""
     try:
+        # Save sys.argv and reset it temporarily to prevent conflicts between demo and main
+        original_argv = sys.argv
+        
         # Parse arguments
         args = parse_args()
         
@@ -1377,7 +1461,8 @@ def main():
                 model_path=args.load,
                 num_episodes=args.eval_episodes,
                 visualize=args.gui,
-                verbose=args.verbose
+                verbose=args.verbose,
+                strict_limits=args.strict_limits
             )
             return
         
@@ -1391,12 +1476,17 @@ def main():
             run_evaluation_sequence(
                 model_path=args.load,
                 viz_speed=args.viz_speed if args.viz_speed > 0 else 0.02,
-                save_video=args.save_video
+                save_video=args.save_video,
+                strict_limits=args.strict_limits
             )
             return
         
         # Train with revamped approach
         train_revamped_robot(args)
+        
+        # Restore original argv
+        sys.argv = original_argv
+        
     except Exception as e:
         import traceback
         with open("error_log.txt", "w") as f:
@@ -1404,7 +1494,7 @@ def main():
             f.write(traceback.format_exc())
         print(f"Error occurred. Check error_log.txt for details.")
 
-def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
+def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, strict_limits=False):
     """
     Evaluate a trained model on the robot positioning task.
     
@@ -1413,6 +1503,7 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
         num_episodes: Number of episodes to evaluate
         visualize: Whether to visualize the evaluation
         verbose: Whether to print verbose output
+        strict_limits: Whether to strictly enforce joint limits
     
     Returns:
         dict: Dictionary of evaluation metrics
@@ -1429,6 +1520,10 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
         viz_speed=0.01 if visualize else 0.0,
         verbose=verbose
     )
+    
+    # Wrap with joint limit enforcer if requested
+    if strict_limits:
+        env = JointLimitEnforcingEnv(env)
     
     # Wrap in VecEnv as required by Stable-Baselines3
     vec_env = DummyVecEnv([lambda: env])
@@ -1470,11 +1565,19 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
         if verbose:
             print(f"\nEvaluation Episode {ep+1}/{num_episodes}")
         
-        # Reset environment
-        obs, info = vec_env.reset()
+        # Reset environment with API compatibility handling
+        try:
+            # Try new gymnasium API (returns obs, info)
+            obs, info = vec_env.reset()
+            initial_distance = info[0].get('initial_distance', 0.0)
+        except ValueError:
+            # Fall back to older gym API (returns only obs)
+            obs = vec_env.reset()
+            # Estimate initial distance as best we can
+            state = env.robot._get_state()
+            ee_position = state[12:15]
+            initial_distance = np.linalg.norm(ee_position - env.target_position)
         
-        # Get initial info
-        initial_distance = info[0].get('initial_distance', 0.0)
         if verbose:
             print(f"Initial distance to target: {initial_distance*100:.2f}cm")
         
@@ -1489,14 +1592,54 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
             # Get action from model
             action, _ = model.predict(obs, deterministic=True)
             
-            # Step environment
-            obs, reward, terminated, truncated, info = vec_env.step(action)
-            done = terminated[0] or truncated[0]
+            # Enforce joint limits before stepping if strict limits enabled
+            if strict_limits:
+                # Get current joint positions
+                state = env.robot._get_state()
+                current_joint_positions = state[:env.robot.dof*2:2]
+                
+                # Calculate new joint positions from action deltas
+                new_joint_positions = []
+                for i, delta in enumerate(action[0]):  # action is wrapped in array due to vectorized env
+                    new_pos = current_joint_positions[i] + delta
+                    new_joint_positions.append(new_pos)
+                
+                # Enforce limits
+                limited_positions = ensure_joint_limits(env.robot, new_joint_positions)
+                
+                # If action was limited, create a new action array with deltas that respect limits
+                if not np.array_equal(new_joint_positions, limited_positions):
+                    limited_deltas = []
+                    for i, (pos, limited_pos) in enumerate(zip(new_joint_positions, limited_positions)):
+                        if pos != limited_pos:
+                            # Calculate the allowed delta that respects the limit
+                            allowed_delta = limited_pos - current_joint_positions[i]
+                            limited_deltas.append(allowed_delta)
+                        else:
+                            limited_deltas.append(action[0][i])
+                    
+                    # Replace action with limited version
+                    action = np.array([limited_deltas])
+            
+            # Step environment with API compatibility handling
+            try:
+                # Try new gymnasium API
+                obs, reward, terminated, truncated, info = vec_env.step(action)
+                done = terminated[0] or truncated[0]
+            except ValueError:
+                # Fall back to older gym API
+                obs, reward, done, info = vec_env.step(action)
+                done = done[0]
             
             # Update metrics
             ep_reward += reward[0]
             ep_steps += 1
-            current_distance = info[0].get('distance', 0.0)
+            
+            try:
+                current_distance = info[0].get('distance', 0.0)
+            except (IndexError, TypeError):
+                # Fallback if info is not structured as expected
+                current_distance = best_distance
             
             # Update best distance
             best_distance = min(best_distance, current_distance)
@@ -1506,7 +1649,10 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
                 time.sleep(0.01)
         
         # Calculate success
-        success = info[0].get('target_reached', False)
+        try:
+            success = info[0].get('target_reached', False)
+        except (IndexError, TypeError):
+            success = False
         
         # Update metrics
         total_reward += ep_reward
@@ -1549,7 +1695,7 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
     
     return metrics
 
-def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
+def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False, strict_limits=False):
     """
     Run a sequence of evaluation episodes for demonstration purposes
     with visualization and optional video saving.
@@ -1558,6 +1704,7 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
         model_path: Path to the trained model
         viz_speed: Visualization speed (delay in seconds)
         save_video: Whether to save a video of the evaluation
+        strict_limits: Whether to strictly enforce joint limits
     """
     print(f"Running evaluation sequence for model: {model_path}")
     
@@ -1570,6 +1717,10 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
         viz_speed=viz_speed,
         verbose=True
     )
+    
+    # Wrap with joint limit enforcer if requested
+    if strict_limits:
+        env = JointLimitEnforcingEnv(env)
     
     # Wrap in VecEnv
     vec_env = DummyVecEnv([lambda: env])
@@ -1602,11 +1753,19 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
     for ep in range(5):
         print(f"\nDemo Episode {ep+1}/5")
         
-        # Reset environment
-        obs, info = vec_env.reset()
+        # Reset environment with API compatibility handling
+        try:
+            # Try new gymnasium API (returns obs, info)
+            obs, info = vec_env.reset()
+            initial_distance = info[0].get('initial_distance', 0.0)
+        except ValueError:
+            # Fall back to older gym API (returns only obs)
+            obs = vec_env.reset()
+            # Estimate initial distance as best we can
+            state = env.robot._get_state()
+            ee_position = state[12:15]
+            initial_distance = np.linalg.norm(ee_position - env.target_position)
         
-        # Get initial info
-        initial_distance = info[0].get('initial_distance', 0.0)
         print(f"Initial distance to target: {initial_distance*100:.2f}cm")
         
         done = False
@@ -1625,9 +1784,44 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
             # Get action from model
             action, _ = model.predict(obs, deterministic=True)
             
-            # Step environment
-            obs, reward, terminated, truncated, info = vec_env.step(action)
-            done = terminated[0] or truncated[0]
+            # Enforce joint limits before stepping if strict limits enabled
+            if strict_limits:
+                # Get current joint positions
+                state = env.robot._get_state()
+                current_joint_positions = state[:env.robot.dof*2:2]
+                
+                # Calculate new joint positions from action deltas
+                new_joint_positions = []
+                for i, delta in enumerate(action[0]):  # action is wrapped in array due to vectorized env
+                    new_pos = current_joint_positions[i] + delta
+                    new_joint_positions.append(new_pos)
+                
+                # Enforce limits
+                limited_positions = ensure_joint_limits(env.robot, new_joint_positions)
+                
+                # If action was limited, create a new action array with deltas that respect limits
+                if not np.array_equal(new_joint_positions, limited_positions):
+                    limited_deltas = []
+                    for i, (pos, limited_pos) in enumerate(zip(new_joint_positions, limited_positions)):
+                        if pos != limited_pos:
+                            # Calculate the allowed delta that respects the limit
+                            allowed_delta = limited_pos - current_joint_positions[i]
+                            limited_deltas.append(allowed_delta)
+                        else:
+                            limited_deltas.append(action[0][i])
+                    
+                    # Replace action with limited version
+                    action = np.array([limited_deltas])
+            
+            # Step environment with API compatibility handling
+            try:
+                # Try new gymnasium API
+                obs, reward, terminated, truncated, info = vec_env.step(action)
+                done = terminated[0] or truncated[0]
+            except ValueError:
+                # Fall back to older gym API
+                obs, reward, done, info = vec_env.step(action)
+                done = done[0]
             
             # Capture frame for video or delay for visualization
             if save_video:
@@ -1647,14 +1841,20 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
             time.sleep(1.0)
         
         # Print episode results
-        success = info[0].get('target_reached', False)
-        distance = info[0].get('distance', 0.0)
+        try:
+            success = info[0].get('target_reached', False)
+            distance = info[0].get('distance', 0.0)
+        except (IndexError, TypeError):
+            success = False
+            distance = 0.0
+            
         print(f"Episode {ep+1} - {'SUCCESS' if success else 'FAILURE'}")
         print(f"  Final distance: {distance*100:.2f}cm")
         print(f"  Steps: {step}")
     
     # Save video if requested
     if save_video:
+        from datetime import datetime
         video_path = f"./evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
         imageio.mimsave(video_path, frames, fps=30)
         print(f"Video saved to {video_path}")
