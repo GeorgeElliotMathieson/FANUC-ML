@@ -39,10 +39,8 @@ classifiers = [
 "Bug Tracker" = "https://github.com/yourusername/fanuc-ml/issues"
 
 [project.scripts]
-fanuc-train = "main:main"
-fanuc-eval = "tools.run_eval:main"  
-fanuc-test = "tools.test_install:main"
+fanuc-platform = "fanuc_platform:main"
 
 [tool.setuptools]
 packages = ["src", "tools"]
-py-modules = ["main"] 
+py-modules = ["fanuc_platform"] 

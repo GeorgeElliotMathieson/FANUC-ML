@@ -8,5 +8,9 @@ for FANUC robot arm positioning tasks, with special optimizations for DirectML.
 __version__ = "0.1.0"
 __author__ = "FANUC ML Team"
 
-# Import key modules for direct access
-from . import train_robot
+# Import key DirectML functionality
+from .directml_core import is_available as is_directml_available
+from .directml_core import setup_directml, get_device
+
+# Core modules are imported directly from their packages
+# See src/core/__init__.py for core exports
