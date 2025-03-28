@@ -258,7 +258,9 @@ def determine_reachable_workspace(robot, n_samples=1000, visualize=False):
         visualize: Whether to visualize the workspace during sampling
         
     Returns:
-        Tuple of (positions, joint_configs) arrays
+        Tuple of (max_reach, workspace_bounds) where:
+        - max_reach is the maximum distance the robot can reach
+        - workspace_bounds is a dictionary with 'x', 'y', 'z' keys containing [min, max] bounds
     """
     import numpy as np
     import time
@@ -315,11 +317,26 @@ def determine_reachable_workspace(robot, n_samples=1000, visualize=False):
     # Reset robot
     robot.reset()
     
+    # Calculate workspace bounds
+    x_min, y_min, z_min = np.min(positions, axis=0)
+    x_max, y_max, z_max = np.max(positions, axis=0)
+    
+    # Create bounds dictionary
+    workspace_bounds = {
+        'x': [x_min, x_max],
+        'y': [y_min, y_max],
+        'z': [z_min, z_max]
+    }
+    
+    # Calculate max reach (distance from origin to furthest point)
+    max_distances = np.linalg.norm(positions, axis=1)
+    max_reach = np.max(max_distances)
+    
     # Print results
     elapsed_time = time.time() - start_time
     print(f"Workspace determination complete: {len(positions)} positions in {elapsed_time:.2f} seconds")
     
-    return positions, joint_configs
+    return max_reach, workspace_bounds
 
 def adjust_camera_for_robots(client_id, num_robots=1, workspace_size=0.8):
     """

@@ -1,0 +1,4 @@
+[console_scripts]
+fanuc-eval = tools.run_eval:main
+fanuc-test = tools.test_install:main
+fanuc-train = main:main

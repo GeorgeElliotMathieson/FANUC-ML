@@ -1,0 +1,254 @@
+Metadata-Version: 2.4
+Name: fanuc-ml
+Version: 0.1.0
+Summary: Machine Learning Framework for FANUC Robot Arm Positioning
+Home-page: https://github.com/yourusername/fanuc-ml
+Author: FANUC ML Team
+Author-email: FANUC ML Team <your.email@example.com>
+License: MIT
+Project-URL: Homepage, https://github.com/yourusername/fanuc-ml
+Project-URL: Bug Tracker, https://github.com/yourusername/fanuc-ml/issues
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Dynamic: author
+Dynamic: home-page
+Dynamic: requires-python
+
+# FANUC Robot ML Platform
+
+A comprehensive machine learning platform for reinforcement learning with FANUC robot arms, focusing on precise end-effector positioning tasks. Optimized for both CPU and AMD GPU acceleration via DirectML.
+
+## Project Overview
+
+This platform provides a complete framework for applying reinforcement learning to control FANUC robot arms for positioning tasks. The system is designed with a modular architecture, clean Python package structure, and support for both standard training and AMD GPU acceleration.
+
+### Key Features
+
+- **Reinforcement Learning**: Custom-built environments using PPO algorithm
+- **Multi-Platform Support**: Works on both CPU and AMD GPUs (via DirectML)
+- **Flexible Evaluation Tools**: Comprehensive visualization and evaluation systems
+- **Modular Design**: Well-structured Python package with clean separation of concerns
+
+## Directory Structure
+
+```
+fanuc-ml/
+├── main.py               # Main entry point for all operations
+├── pyproject.toml        # Modern Python package configuration
+├── setup.py              # Traditional package configuration
+├── requirements.txt      # Core dependencies
+├── robots/               # Robot model files
+│   ├── urdf/             # URDF robot descriptions
+│   ├── meshes/           # 3D mesh files for robots
+│   └── README.md         # Robot models documentation
+├── src/                  # Source code (main package)
+│   ├── __init__.py       # Package definition
+│   ├── train_robot.py    # Main training script
+│   ├── core/             # Core training and simulation code
+│   ├── directml/         # DirectML-specific implementations
+│   ├── envs/             # Environment implementations
+│   ├── utils/            # Utility functions
+│   └── README.md         # Source code documentation
+├── scripts/              # Batch files and scripts for easy execution
+│   ├── train.bat         # Training entry point
+│   ├── eval.bat          # Evaluation entry point
+│   ├── demo.bat          # Demo entry point
+│   ├── evaluate_directml.bat # DirectML evaluation script
+│   └── test_install.bat  # Installation test script
+├── tools/                # Utility tools
+│   ├── demos/            # Robot demonstration scripts
+│   ├── run_eval.py       # DirectML evaluation tool
+│   ├── test_install.py   # Package installation tester
+│   └── README.md         # Tools documentation
+├── models/               # Trained model storage
+├── plots/                # Training plots and graphs
+├── visualizations/       # Evaluation visualizations
+└── docs/                 # Documentation
+```
+
+## Installation
+
+### Prerequisites
+
+- Python 3.8 or higher
+- PyTorch 1.10 or higher
+- PyBullet
+- (Optional) torch-directml for AMD GPU acceleration
+
+### Standard Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/fanuc-ml.git
+   cd fanuc-ml
+   ```
+
+2. Install as a package with dependencies:
+   ```bash
+   pip install -e .
+   ```
+
+### Installation with AMD GPU Acceleration
+
+For AMD GPU acceleration, install with the DirectML extras:
+
+```bash
+pip install -e ".[directml]"
+```
+
+Or manually install DirectML support:
+
+```bash
+pip install torch-directml
+```
+
+### Verify Installation
+
+Run the installation test script to verify everything is correctly installed:
+
+```bash
+# On Windows
+scripts/test_install.bat
+
+# On Unix
+python tools/test_install.py
+```
+
+## Usage
+
+### Training a Model
+
+Use the training script with the following options:
+
+```bash
+# Basic CPU training
+python main.py --train --steps 1000000
+
+# Training with AMD GPU acceleration
+python main.py --train --steps 1000000 --directml
+
+# Or use the convenience batch file (Windows)
+scripts/train.bat --steps 1000000 --directml
+```
+
+### Evaluating a Model
+
+```bash
+# Basic evaluation
+python main.py --eval --load ./models/model_name --eval-episodes 5
+
+# Evaluation with visualization
+python main.py --eval --load ./models/model_name --viz-speed 0.02
+
+# Or use the convenience batch file (Windows)
+scripts/eval.bat --load ./models/model_name --eval-episodes 5
+```
+
+### Running a Demo
+
+```bash
+# Basic demo
+python main.py --demo --load ./models/model_name --viz-speed 0.02
+
+# Or use the convenience batch file (Windows)
+scripts/demo.bat --load ./models/model_name
+```
+
+### DirectML-Specific Evaluation
+
+For AMD GPU-accelerated models, use the specialized evaluation tool:
+
+```bash
+# On Windows
+scripts/evaluate_directml.bat ./models/model_name 5
+
+# On Unix
+python tools/run_eval.py ./models/model_name 5 --verbose
+```
+
+### Robot Demonstrations
+
+To run a standalone robot demonstration without machine learning:
+
+```bash
+# Run the FANUC robot demo
+python tools/demos/load_fanuc_robot.py
+```
+
+## Training Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--steps` | Total number of training steps | 1,000,000 |
+| `--load` | Path to a pre-trained model | None |
+| `--eval-only` | Only run evaluation | False |
+| `--eval-episodes` | Number of episodes for evaluation | 10 |
+| `--demo` | Run a demonstration sequence | False |
+| `--save-video` | Save a video of evaluation | False |
+| `--gui` | Enable GUI visualization | True |
+| `--no-gui` | Disable GUI visualization | False |
+| `--viz-speed` | Visualization speed in seconds | 0.0 |
+| `--verbose` | Enable verbose output | False |
+| `--seed` | Random seed for reproducibility | None |
+| `--directml` | Use DirectML for AMD GPU acceleration | False |
+| `--parallel` | Number of parallel environments | 1 |
+| `--learning-rate` | Learning rate | 3e-4 |
+
+## Development
+
+### Project Structure
+
+The project uses a modern Python package structure:
+
+- `src/` - Main package directory containing all source code
+- `src/core/` - Core functionality for robot control and training
+- `src/directml/` - AMD GPU-specific implementations
+- `src/envs/` - Environment implementations for robot simulation
+- `src/utils/` - Utility functions and tools
+
+### Adding New Components
+
+To extend the platform with new features:
+
+1. Add new modules to the appropriate directory in `src/`
+2. Update imports to follow the package structure
+3. Use relative imports for internal modules
+4. Add docstrings for all public functions and classes
+
+### Testing
+
+Run the installation test to verify package structure:
+
+```bash
+python tools/test_install.py
+```
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgements
+
+- [PyBullet](https://pybullet.org/) - Used for physics simulation
+- [PyTorch](https://pytorch.org/) - Deep learning framework
+- [Stable Baselines3](https://github.com/DLR-RM/stable-baselines3) - RL algorithms
+- [torch-directml](https://github.com/microsoft/DirectML) - AMD GPU acceleration
+
+## Additional Documentation
+
+For more detailed information, refer to:
+- [DirectML Documentation](README_DIRECTML.md) - Details on DirectML implementation
+- [Training Documentation](README_TRAINING.md) - Details on training parameters
+
+## Models
+
+The repository includes pre-trained models:
+
+- `models/ppo_directml_20250326_202801/final_model.pt` - DirectML trained model 

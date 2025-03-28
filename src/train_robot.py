@@ -5,6 +5,7 @@
 import os
 import sys
 import argparse
+import torch
 
 def is_directml_model(model_path):
     """
@@ -52,199 +53,67 @@ def ensure_model_file_exists(model_path):
     print(f"Warning: Could not find model file at {model_path}")
     return model_path
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="FANUC Robot Training and Control Platform"
+    )
+    
+    # Mode selection arguments
+    mode_group = parser.add_argument_group("Mode Selection")
+    mode_group.add_argument("--eval-only", action="store_true", help="Evaluate an existing model")
+    mode_group.add_argument("--demo", action="store_true", help="Run a demo of an existing model")
+    
+    # Model loading/saving arguments
+    model_group = parser.add_argument_group("Model Options")
+    model_group.add_argument("--load", type=str, help="Path to load an existing model from")
+    model_group.add_argument("--save", type=str, default="./models/fanuc-ml", 
+                         help="Path to save the trained model to")
+    
+    # Training parameters
+    train_group = parser.add_argument_group("Training Options")
+    train_group.add_argument("--steps", type=int, default=1000000, 
+                          help="Number of training timesteps")
+    train_group.add_argument("--eval-episodes", type=int, default=10,
+                          help="Number of episodes to evaluate on")
+    
+    # Environment options
+    env_group = parser.add_argument_group("Environment Options")
+    env_group.add_argument("--no-gui", action="store_true", help="Disable GUI")
+    env_group.add_argument("--viz-speed", type=float, default=0.02,
+                        help="Visualization speed (smaller is faster)")
+    
+    # Miscellaneous options
+    misc_group = parser.add_argument_group("Miscellaneous")
+    misc_group.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    misc_group.add_argument("--seed", type=int, help="Random seed")
+    misc_group.add_argument("--use-cuda", action="store_true", help="Use CUDA if available")
+    misc_group.add_argument("--use-directml", action="store_true", help="Use DirectML for AMD GPU acceleration")
+    
+    return parser.parse_args()
+
 def main():
     """
-    Main function for the unified robot training approach.
-    This is a wrapper that calls the actual training implementation.
+    Main function to run using stable-baselines3 implementation.
+    This will call the appropriate function based on command-line arguments.
     """
-    try:
-        # Print banner
-        print("\n" + "="*80)
-        print("FANUC Robot Training - Unified Training Platform")
-        print("Using standardized training approach with improved architecture")
-        print("="*80 + "\n")
+    # Parse command line arguments
+    args = parse_args()
+    
+    if args.seed is not None:
+        # Import and set seed
+        from src.utils.seed import set_seed
+        set_seed(args.seed)
         
-        # Process arguments
-        args = sys.argv[1:]
-        
-        # Find model path if specified
-        model_path = None
-        for i, arg in enumerate(args):
-            if arg == "--load" and i + 1 < len(args):
-                model_path = args[i + 1]
-                model_path = ensure_model_file_exists(model_path)
-                # Update args with the corrected path
-                args[i + 1] = model_path
-                break
-        
-        # Extract common parameters
-        viz_speed = 0.0
-        for i, arg in enumerate(args):
-            if arg == "--viz-speed" and i + 1 < len(args):
-                try:
-                    viz_speed = float(args[i + 1])
-                except ValueError:
-                    pass
-        
-        # Check for AMD GPU acceleration request
-        use_amd_gpu = False
-        if "--use-directml" in args or "--use-gpu" in args or "--use-amd" in args or "--directml-demo" in args:
-            use_amd_gpu = True
-            # Remove these custom flags
-            args = [arg for arg in args if arg not in ["--use-directml", "--use-gpu", "--use-amd"]]
-        
-        # If loading a model, check if it's a DirectML model
-        if model_path and is_directml_model(model_path) and not use_amd_gpu:
-            print("Detected DirectML-trained model. Enabling DirectML for compatibility.")
-            use_amd_gpu = True
-        
-        # Check for DirectML demo mode
-        directml_demo = False
-        if "--directml-demo" in args:
-            print("Running in DirectML demo mode")
-            directml_demo = True
-            use_amd_gpu = True
-            args = [arg for arg in args if arg != "--directml-demo"]
-        
-        # Split out demo options
-        demo_mode = "--demo" in args
-        
-        # For DirectML demo, call special function
-        if directml_demo and model_path:
-            no_gui = "--no-gui" in args
-            return run_directml_demo(model_path, viz_speed, no_gui)
-            
-        # If a demo with DirectML model is requested, use DirectML-specific demo function
-        if demo_mode and model_path and is_directml_model(model_path):
-            no_gui = "--no-gui" in args
-            print(f"Running DirectML-specific demo for model: {model_path}")
-            return run_directml_demo(model_path, viz_speed, no_gui)
-        
-        # For AMD GPU acceleration with DirectML
-        if use_amd_gpu:
-            try:
-                # Set up DirectML
-                import torch
-                import torch_directml
-                
-                # Check for available DirectML devices
-                device_count = torch_directml.device_count()
-                if device_count == 0:
-                    raise RuntimeError("No DirectML devices detected")
-                
-                # Create a DirectML device
-                dml_device = torch_directml.device()
-                print(f"DirectML devices available: {device_count}")
-                print(f"Using DirectML device: {dml_device}")
-                
-                # Create a test tensor on the DirectML device to verify it works
-                test_tensor = torch.ones((2, 3), device=dml_device)
-                # Access the tensor to force execution on GPU
-                _ = test_tensor.cpu().numpy()
-                
-                print("✓ DirectML acceleration active and verified")
-                print("✓ Test tensor created successfully on GPU")
-                print("="*80 + "\n")
-                
-                # Configure environment variables for DirectML
-                os.environ["PYTORCH_DIRECTML_VERBOSE"] = "1"
-                os.environ["DIRECTML_ENABLE_OPTIMIZATION"] = "1"
-                os.environ["USE_DIRECTML"] = "1"
-                os.environ["USE_GPU"] = "1"
-                
-                # Import the DirectML implementation without affecting global state
-                print("Loading DirectML-optimized implementation for AMD GPU...")
-                from src.directml.train_robot_rl_ppo_directml import train_robot_with_ppo_directml
-                
-                # Create a directml-compatible args object
-                class DirectMLArgs:
-                    def __init__(self):
-                        self.gpu = True  # This is what DirectML uses to check for GPU
-                        self.steps = 1000000
-                        self.save_freq = 50000
-                        self.parallel = 1
-                        self.seed = None
-                        self.load = None
-                        self.eval_only = False
-                        self.viz_speed = 0.0
-                        self.verbose = False
-                        self.learning_rate = 3e-4
-                        self.n_steps = 2048
-                        self.batch_size = 256  # Optimized for AMD GPU
-                        self.n_epochs = 4  # Reduced for AMD GPU optimization
-                        self.gamma = 0.99
-                        self.gae_lambda = 0.95
-                        self.clip_range = 0.2
-                        self.ent_coef = 0.0
-                        self.vf_coef = 0.5
-                        self.max_grad_norm = 0.5
-                        # Add demo-related attributes
-                        self.eval_episodes = 5
-                        # Attributes for GUI
-                        self.gui = True
-                
-                # Create and populate the args object
-                directml_args = DirectMLArgs()
-                
-                # Parse command line arguments to override defaults
-                for i in range(len(args)):
-                    if i > 0 and args[i-1] in ["--steps", "--parallel", "--seed", "--load", 
-                                               "--viz-speed", "--learning-rate", "--eval-episodes"]:
-                        # Skip values that have already been processed with their flags
-                        continue
-                        
-                    # Handle arguments with values
-                    if args[i] == "--steps" and i + 1 < len(args):
-                        directml_args.steps = int(args[i + 1])
-                    elif args[i] == "--parallel" and i + 1 < len(args):
-                        directml_args.parallel = int(args[i + 1])
-                    elif args[i] == "--seed" and i + 1 < len(args):
-                        directml_args.seed = int(args[i + 1])
-                    elif args[i] == "--load" and i + 1 < len(args):
-                        directml_args.load = args[i + 1]
-                    elif args[i] == "--viz-speed" and i + 1 < len(args):
-                        directml_args.viz_speed = float(args[i + 1])
-                    elif args[i] == "--learning-rate" and i + 1 < len(args):
-                        directml_args.learning_rate = float(args[i + 1])
-                    elif args[i] == "--eval-episodes" and i + 1 < len(args):
-                        directml_args.eval_episodes = int(args[i + 1])
-                    # Handle flag arguments
-                    elif args[i] == "--eval-only":
-                        directml_args.eval_only = True
-                    elif args[i] == "--verbose":
-                        directml_args.verbose = True
-                
-                # For GUI, DirectML uses different system
-                if "--no-gui" in args:
-                    os.environ["NO_GUI"] = "1"
-                    directml_args.gui = False
-                
-                print("Starting training with DirectML-optimized implementation...")
-                
-                # Call the training function from DirectML module with our args
-                train_robot_with_ppo_directml(directml_args)
-                return
-                
-            except ImportError as e:
-                print(f"ERROR: DirectML package not found: {e}")
-                print("AMD GPU acceleration will not be available.")
-                print("To install DirectML support, run: pip install torch-directml")
-            except Exception as e:
-                print(f"ERROR initializing DirectML: {e}")
-                print(f"Exception details: {str(e)}")
-                print("Falling back to CPU implementation.")
-        
-        # If DirectML failed or wasn't requested, use the standard implementation
+    # Detect if we should use CUDA
+    if args.use_cuda and torch.cuda.is_available():
+        device = "cuda"
+        print(f"Using CUDA device for training: {torch.cuda.get_device_name(0)}")
+    else:
         print("Using standard CPU implementation")
         
         from src.core.train_robot_rl_positioning_revamped import main as train_main
         train_main()
-        
-    except Exception as e:
-        import traceback
-        print(f"Error in train_robot.py: {str(e)}")
-        print(traceback.format_exc())
-        sys.exit(1)
 
 def run_directml_demo(model_path, viz_speed=0.02, no_gui=False):
     """

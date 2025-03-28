@@ -1,4 +1,4 @@
-from setuptools import setup, find_namespace_packages
+from setuptools import setup, find_packages
 
 setup(
     name="fanuc-ml",
@@ -7,8 +7,7 @@ setup(
     author="FANUC ML Team",
     author_email="your.email@example.com",
     url="https://github.com/yourusername/fanuc-ml",
-    package_dir={"": "src", "fanuc_tools": "tools"},
-    packages=find_namespace_packages(where="src") + ["fanuc_tools"],
+    packages=find_packages(),
     py_modules=["main"],
     entry_points={
         "console_scripts": [

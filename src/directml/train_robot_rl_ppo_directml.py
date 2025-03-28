@@ -38,19 +38,19 @@ print(f"System memory: {mem.total / (1024.0**3):.1f} GB total, {mem.available / 
 from src.core.train_robot_rl_positioning_revamped import (
     RobotPositioningRevampedEnv,
     CustomFeatureExtractor,
-    visualize_target,
     JointLimitEnforcingEnv,
     JointLimitedBox,
     create_revamped_envs,
     evaluate_model
 )
 
-from src.core.train_robot_rl_positioning import (
+from src.utils.pybullet_utils import (
     get_shared_pybullet_client, 
     load_workspace_data,
     determine_reachable_workspace,
     adjust_camera_for_robots,
-    ensure_joint_limits
+    ensure_joint_limits,
+    visualize_target
 )
 
 # Import the robot environment directly from robot_sim.py

@@ -21,22 +21,6 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
-dependencies = [
-    "torch>=1.10.0",
-    "numpy>=1.20.0",
-    "pybullet>=3.2.1",
-    "gymnasium>=0.28.1",
-    "stable-baselines3>=2.0.0",
-    "matplotlib>=3.5.0",
-    "seaborn>=0.11.0",
-    "imageio>=2.22.0",
-    "pillow>=9.0.0",
-]
-
-[project.optional-dependencies]
-directml = [
-    "torch-directml>=0.2.0.dev230426"
-]
 
 [project.urls]
 "Homepage" = "https://github.com/yourusername/fanuc-ml"
@@ -48,6 +32,5 @@ fanuc-eval = "tools.run_eval:main"
 fanuc-test = "tools.test_install:main"
 
 [tool.setuptools]
-packages = ["src"]
-package-dir = {"" = "src", "fanuc_tools" = "tools"}
+packages = ["src", "tools"]
 py-modules = ["main"] 

@@ -12,6 +12,7 @@ import gc  # Explicit garbage collection
 from datetime import datetime
 import matplotlib.pyplot as plt
 try:
+
     import imageio  # For video recording if available
 except ImportError:
     print("Warning: imageio not found, video recording will be disabled")
@@ -68,7 +69,7 @@ def visualize_target(position, client_id):
 
 # Import shared functionality from the original implementation
 # This will be replaced with our own implementations in subsequent edits
-from src.utils.pybullet_utils import (
+from src.core.train_robot_rl_positioning import (
     get_shared_pybullet_client, 
     load_workspace_data,
     determine_reachable_workspace,
@@ -366,8 +367,9 @@ class RobotPositioningRevampedEnv(gym.Env):
         # Determine reachable workspace
         max_reach, workspace_bounds = determine_reachable_workspace(
             self.robot, 
-            n_samples=1000, 
-            visualize=verbose
+            self.home_position, 
+            num_samples=1000, 
+            verbose=verbose
         )
         
         # Calculate workspace center from bounds
@@ -887,43 +889,6 @@ class RobotPositioningRevampedEnv(gym.Env):
                     p.removeBody(marker_id, physicsClientId=self.client_id)
                 except:
                     pass
-    
-    def _distance_reward(self, distance):
-        """
-        Calculate reward based on distance to target using a smooth function.
-        
-        Args:
-            distance: Current distance to target in meters
-            
-        Returns:
-            Reward value (higher when closer to target)
-        """
-        # Convert distance to cm for easier scaling
-        distance_cm = distance * 100.0
-        
-        # Maximum distance for reward scaling (in cm)
-        max_distance_cm = 100.0
-        
-        # Normalize distance to [0, 1] range and invert so closer = higher reward
-        normalized_distance = np.clip(distance_cm / max_distance_cm, 0.0, 1.0)
-        proximity = 1.0 - normalized_distance
-        
-        # Apply non-linear transform to create a shaped reward
-        # This gives higher rewards as the robot gets closer to the target
-        shaped_reward = np.power(proximity, 2)
-        
-        # Scale the reward to a reasonable range
-        distance_reward = shaped_reward * 2.0
-        
-        # Add bonus for being very close to target
-        if distance_cm < 5.0:  # Less than 5cm
-            distance_reward += (5.0 - distance_cm) / 5.0  # Additional reward, max +1.0
-            
-        # Add extra bonus for being extremely close
-        if distance_cm < 1.0:  # Less than 1cm
-            distance_reward += 2.0  # Large success bonus
-            
-        return distance_reward
 
 # Custom neural network architectures for better learning
 class CustomFeatureExtractor(BaseFeaturesExtractor):
@@ -1580,15 +1545,12 @@ def main():
     
     # Training mode from here on
     # Create environments
-    envs = create_revamped_envs(
+    env = create_revamped_envs(
         num_envs=args.parallel,
         viz_speed=args.viz_speed if args.gui else 0.0,
         parallel_viz=args.parallel_viz and args.gui,
         training_mode=True
     )
-    
-    # Wrap environments in a vectorized environment
-    env = DummyVecEnv([lambda env=env: env for env in envs])
     
     # Normalization wrapper for observations
     env = VecNormalize(
@@ -2156,7 +2118,7 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
     print(f"Running evaluation sequence for model: {model_path}")
     
     # Load workspace data
-    load_workspace_data()
+    load_workspace_data(verbose=True)
     
     # Create environment
     env = RobotPositioningRevampedEnv(
