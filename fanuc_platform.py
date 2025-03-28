@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Unified Entry Point for FANUC Robot ML Platform
+DirectML-Only Entry Point for FANUC Robot ML Platform
 
-This consolidated script provides a single entry point for all FANUC Robot ML Platform operations:
-1. Training models (with or without DirectML acceleration)
-2. Evaluating models (thorough evaluation)
-3. Testing models (quick tests)
-4. Installation verification and troubleshooting
+This script provides a single entry point for all FANUC Robot ML Platform operations
+specifically optimized for AMD GPUs with DirectML acceleration:
 
-This file combines functionality from:
-- main.py (general framework entry point)
-- directml_tools.py (DirectML-specific operations)
-- tools/fanuc_tools.py (utility tools)
+1. Training models with DirectML acceleration
+2. Evaluating models with DirectML acceleration
+3. Testing models with DirectML acceleration
+4. Installation verification and DirectML troubleshooting
+
+This file has been streamlined to focus only on DirectML functionality.
 """
 
 import os
@@ -27,6 +26,11 @@ project_dir = os.path.abspath(os.path.dirname(__file__))
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
 
+# Set environment variables for DirectML
+os.environ['FANUC_DIRECTML'] = '1'
+os.environ['USE_DIRECTML'] = '1'
+os.environ['USE_GPU'] = '1'
+
 #########################################
 # Common Utilities
 #########################################
@@ -34,33 +38,22 @@ if project_dir not in sys.path:
 def print_banner(title):
     """Print a formatted banner with a title."""
     print("\n" + "="*80)
-    print(f"FANUC Robot - {title}")
+    print(f"FANUC Robot with DirectML - {title}")
     print("="*80 + "\n")
 
 def print_usage():
     """Print usage instructions for the script."""
-    print("\nFANUC Robot ML Platform - Unified CLI")
+    print("\nFANUC Robot ML Platform - DirectML CLI")
     print("\nAvailable commands:")
-    print("  python fanuc_platform.py train    - Train a model")
-    print("  python fanuc_platform.py eval     - Evaluate a model thoroughly")
-    print("  python fanuc_platform.py test     - Run a quick test of a model")
-    print("  python fanuc_platform.py install  - Test installation")
+    print("  python fanuc_platform.py train    - Train a model with DirectML")
+    print("  python fanuc_platform.py eval     - Evaluate a model thoroughly with DirectML")
+    print("  python fanuc_platform.py test     - Run a quick test of a model with DirectML")
+    print("  python fanuc_platform.py install  - Test DirectML installation")
     print("\nFor help on a specific command:")
     print("  python fanuc_platform.py train --help")
     print("  python fanuc_platform.py eval --help")
     print("  python fanuc_platform.py test --help")
     print("  python fanuc_platform.py install --help")
-    print("\nDirectML acceleration:")
-    print("  To use DirectML acceleration, add the --directml flag to any command")
-    print("  Example: python fanuc_platform.py train --directml")
-
-def is_directml_model(model_path):
-    """
-    Check if a model was trained with DirectML by looking at the file name pattern.
-    """
-    if model_path and 'directml' in model_path.lower():
-        return True
-    return False
 
 def ensure_model_file_exists(model_path: str) -> str:
     """
@@ -119,17 +112,14 @@ def check_module(module_name):
         print(f"Cannot import {module_name}: {e}")
         return False
 
-def test_install(use_directml=False):
+def test_install():
     """
-    Test the installation of FANUC-ML package and its dependencies.
-    
-    Args:
-        use_directml: Whether to include DirectML-specific checks
+    Test the installation of FANUC-ML package and DirectML dependencies.
     
     Returns:
         0 if successful, 1 otherwise
     """
-    print_banner("Installation Test" + (" with DirectML" if use_directml else ""))
+    print_banner("DirectML Installation Test")
     
     print(f"Python version: {sys.version}")
     print(f"Python executable: {sys.executable}")
@@ -140,12 +130,9 @@ def test_install(use_directml=False):
         "src",
         "src.core",
         "src.envs",
-        "src.utils"
+        "src.utils",
+        "src.directml_core"
     ]
-    
-    # Add directml_core.py for DirectML mode
-    if use_directml:
-        core_modules.append("src.directml_core")
     
     # Dependencies
     dependencies = [
@@ -157,7 +144,7 @@ def test_install(use_directml=False):
         "matplotlib"
     ]
     
-    # DirectML is required in DirectML mode, optional otherwise
+    # DirectML is required
     directml_dependencies = [
         "torch_directml"
     ]
@@ -196,214 +183,125 @@ def test_install(use_directml=False):
     
     # Check DirectML
     directml_ok = True
-    if use_directml:
-        print("\nChecking DirectML support:")
-        for module in directml_dependencies:
-            if check_module(module):
-                print(f"  ✓ {module}")
-            else:
-                print(f"  ✗ {module}")
-                directml_ok = False
-        
-        if not directml_ok:
-            print("\nERROR: DirectML dependencies are not installed.")
-            print("This project requires AMD GPU acceleration. Install DirectML with:")
-            print("pip install torch-directml")
-            return 1
-        
-        # Test AMD GPU detection with DirectML
-        try:
-            print("\nTesting DirectML AMD GPU detection:")
-            import torch
-            import torch_directml
-            
-            # Check for DirectML devices
-            device_count = torch_directml.device_count()
-            if device_count > 0:
-                dml_device = torch_directml.device()
-                print(f"  ✓ Found {device_count} DirectML devices")
-                print(f"  ✓ Using DirectML device: {dml_device}")
-                
-                # Create a test tensor on device
-                test_tensor = torch.ones((2, 3), device=dml_device)
-                print(f"  ✓ Successfully created tensor on DirectML device")
-                
-                # Access tensor to force execution
-                _ = test_tensor.cpu().numpy()
-                print(f"  ✓ Successfully executed operation on DirectML device")
-            else:
-                print(f"  ✗ No DirectML devices found")
-                directml_ok = False
-        except Exception as e:
-            print(f"  ✗ DirectML initialization failed: {e}")
-            directml_ok = False
-        
-        # Try importing key DirectML class
-        print("\nTesting DirectML implementation access:")
-        try:
-            from src.directml_core import is_available, DirectMLPPO
-            if is_available():
-                print("  ✓ Successfully imported DirectML implementation")
-            else:
-                print("  ✗ DirectML is not available in the environment")
-                directml_ok = False
-        except ImportError:
-            print("  ✗ Failed to import DirectML implementation")
-            print(traceback.format_exc())
-            directml_ok = False
-    else:
-        # In non-DirectML mode, check if DirectML is available as optional
-        print("\nChecking optional DirectML support:")
-        for module in directml_dependencies:
-            if check_module(module):
-                print(f"  ✓ {module} (optional)")
-            else:
-                print(f"  ✗ {module} (optional)")
-                directml_ok = False
-        
-        if not directml_ok:
-            print("\nNOTE: DirectML support is not available.")
-            print("For AMD GPU acceleration, install: pip install torch-directml")
+    print("\nChecking DirectML support:")
+    for module in directml_dependencies:
+        if check_module(module):
+            print(f"  ✓ {module}")
         else:
-            print("\nDirectML support is available (optional)!")
+            print(f"  ✗ {module}")
+            directml_ok = False
     
-    # Print summary
-    print("\nInstallation test summary:")
-    if core_ok and deps_ok:
-        print("  ✓ Basic installation looks good!")
-        if use_directml:
-            if directml_ok:
-                print("  ✓ DirectML support is available and working")
-            else:
-                print("  ✗ DirectML support is not working properly")
-                return 1
-        else:
-            if directml_ok:
-                print("  ✓ DirectML support is available (optional)")
-            else:
-                print("  ✗ DirectML support is not available (optional)")
-    else:
-        print("  ✗ Installation has issues that need to be fixed")
+    if not directml_ok:
+        print("\nERROR: DirectML support is not available.")
+        print("This implementation requires AMD GPU with DirectML support.")
+        print("Install with: pip install torch-directml")
         return 1
     
-    return 0
+    # Test DirectML
+    print("\nTesting DirectML AMD GPU detection:")
+    try:
+        import torch
+        import torch_directml
+        
+        # Check for DirectML devices
+        device_count = torch_directml.device_count()
+        print(f"  ✓ Found {device_count} DirectML device(s)")
+        
+        # Try to initialize a DirectML device
+        device = torch_directml.device()
+        print(f"  ✓ Successfully initialized DirectML device: {device}")
+        
+        # Check for AMD GPU info
+        from src.directml_core import setup_directml
+        dml_device = setup_directml()
+        
+        print("\nDirectML setup successful!")
+        
+    except Exception as e:
+        print(f"\nERROR: DirectML initialization failed: {e}")
+        if "trace" in locals():
+            print(traceback.format_exc())
+        return 1
+
+    if all([core_ok, deps_ok, directml_ok]):
+        print("\n✅ All checks passed! DirectML support is ready to use.")
+        return 0
+    else:
+        print("\n⚠️ Some checks failed. Please fix the issues above before proceeding.")
+        return 1
 
 #########################################
 # Evaluation Functionality
 #########################################
 
 def print_eval_usage():
-    """Print usage instructions for evaluation."""
-    print("\nEvaluation Usage:")
-    print("  fanuc.bat eval <model_path> [--episodes N] [--no-gui] [--verbose]")
-    print("\nRequired Arguments:")
-    print("  model_path      Path to a trained model file (.pt or .zip)")
-    print("\nOptional Arguments:")
-    print("  --episodes N    Number of evaluation episodes (default: 10)")
-    print("  --no-gui        Run without PyBullet GUI visualization")
-    print("  --verbose, -v   Show detailed episode results")
-    print("\nExamples:")
-    print("  fanuc.bat eval models/fanuc-ppo-model")
-    print("  fanuc.bat eval models/fanuc-directml-model --episodes 20 --no-gui")
+    """Print usage instructions for the eval command."""
+    print("Usage: python fanuc_platform.py eval <model_path> [episodes] [options]")
+    print("\nArguments:")
+    print("  model_path    - Path to trained model")
+    print("  episodes      - Number of episodes (default: 10)")
+    print("\nOptions:")
+    print("  --no-gui       - Disable GUI")
+    print("  --verbose      - Show detailed output")
+    print("  --speed=<val>  - Visualization speed (default: 0.02)")
+    print("  --save-video   - Save a video of the evaluation")
 
-def block_argparse():
-    """Block argparse from parsing sys.argv and exiting."""
-    saved_parse = argparse.ArgumentParser.parse_args
-    saved_exit = sys.exit
-    argparse.ArgumentParser.parse_args = lambda self, *args, **kwargs: None
-    sys.exit = lambda *args, **kwargs: None
-    return saved_parse, saved_exit
-
-def restore_argparse(saved_parse, saved_exit):
-    """Restore argparse functionality."""
-    argparse.ArgumentParser.parse_args = saved_parse
-    sys.exit = saved_exit
-
-def run_evaluation(model_path, episodes=10, use_gui=True, verbose=False, use_directml=False):
+def run_evaluation(model_path, episodes=10, use_gui=True, verbose=False):
     """
-    Run evaluation on a trained model.
+    Run a thorough evaluation of a model with DirectML acceleration.
     
     Args:
-        model_path: Path to the trained model
-        episodes: Number of episodes to run
+        model_path: Path to the model to evaluate
+        episodes: Number of evaluation episodes
         use_gui: Whether to use the PyBullet GUI
-        verbose: Whether to print detailed results
-        use_directml: Whether to use DirectML for evaluation
-    
+        verbose: Whether to show detailed progress
+        
     Returns:
         0 if successful, 1 otherwise
     """
-    # Ensure that a valid model file exists
+    # Ensure model file exists
     model_path = ensure_model_file_exists(model_path)
-    if not model_path:
-        return 1
     
     # Print banner with settings
-    title = f"Evaluating Model: {os.path.basename(model_path)}"
-    if use_directml:
-        title += " with DirectML"
-    print_banner(title)
+    print_banner(f"Evaluating Model: {model_path} with DirectML")
     
     print("Settings:")
     print(f"  Model Path: {model_path}")
     print(f"  Episodes: {episodes}")
     print(f"  GUI: {'Enabled' if use_gui else 'Disabled'}")
     print(f"  Verbose: {'Enabled' if verbose else 'Disabled'}")
-    print(f"  DirectML: {'Enabled' if use_directml else 'Disabled'}")
     print()
     
     # Set environment variables
     os.environ['FANUC_GUI'] = '1' if use_gui else '0'
     os.environ['FANUC_VERBOSE'] = '1' if verbose else '0'
     
-    # Use the appropriate evaluation function based on DirectML flag
+    # Load DirectML components
     try:
+        from src.directml_core import evaluate_model_directml
+        
+        # Check that the required module exists
+        if 'evaluate_model_directml' not in globals() and not hasattr(evaluate_model_directml, '__call__'):
+            print("ERROR: DirectML evaluation function not found.")
+            print("This implementation requires AMD GPU with DirectML support.")
+            return 1
+        
         print("Loading model and environment...")
-        if use_directml:
-            # Use DirectML evaluation
-            from src.directml_core import evaluate_model_directml
-            
-            # Check if DirectML is available
-            from src.directml_core import is_available
-            if not is_available():
-                print("ERROR: DirectML is not available in this environment.")
-                print("Install DirectML with: pip install torch-directml")
-                return 1
-            
-            # Evaluate with DirectML
-            results = evaluate_model_directml(model_path, num_episodes=episodes)
-        else:
-            # Use regular evaluation
-            from src.envs import FanucReachEnv
-            from src.core import evaluate_model
-            
-            # Evaluate with standard PyTorch
-            results = evaluate_model(model_path, env_class=FanucReachEnv, num_episodes=episodes)
         
-        # Print results
-        print("\nEvaluation Results:")
-        print(f"  Success Rate: {results['success_rate']:.2f}%")
-        print(f"  Average Distance: {results['avg_distance']:.4f} m")
-        print(f"  Average Reward: {results['avg_reward']:.2f}")
-        print(f"  Average Steps: {results['avg_steps']:.1f}")
+        # Run evaluation
+        results = evaluate_model_directml(
+            model_path=model_path,
+            num_episodes=episodes
+        )
         
-        if verbose:
-            print("\nEpisode details:")
-            for i, (success, distance, reward, steps) in enumerate(zip(
-                    results['successes'], results['distances'],
-                    results['rewards'], results['steps'])):
-                print(f"  Episode {i+1}: {'✓' if success else '✗'} "
-                      f"Distance={distance:.4f}m, Reward={reward:.2f}, Steps={steps}")
+        if results:
+            print("\nEvaluation Results:")
+            print(f"  Success Rate: {results['success_rate']:.1f}%")
+            print(f"  Average Distance: {results['avg_distance']:.4f} meters")
+            print(f"  Average Reward: {results['avg_reward']:.1f}")
+            print(f"  Average Steps: {results['avg_steps']:.1f}")
         
-        # Provide success/failure summary
-        print("\nSummary:")
-        if results['success_rate'] >= 80:
-            print("  ✓ Model performs well with high success rate!")
-        elif results['success_rate'] >= 50:
-            print("  ⚠ Model performs moderately well.")
-        else:
-            print("  ✗ Model performs poorly.")
-        
+        print("\nEvaluation completed!")
         return 0
     
     except Exception as e:
@@ -417,84 +315,58 @@ def run_evaluation(model_path, episodes=10, use_gui=True, verbose=False, use_dir
 #########################################
 
 def print_test_usage():
-    """Print usage instructions for testing."""
-    print("\nTesting Usage:")
-    print("  fanuc.bat test <model_path> [--episodes N] [--no-gui] [--verbose]")
-    print("\nRequired Arguments:")
-    print("  model_path      Path to a trained model file (.pt or .zip)")
-    print("\nOptional Arguments:")
-    print("  --episodes N    Number of test episodes (default: 1)")
-    print("  --no-gui        Run without PyBullet GUI visualization")
-    print("  --verbose, -v   Show detailed episode results")
-    print("\nExamples:")
-    print("  fanuc.bat test models/fanuc-ppo-model")
-    print("  fanuc.bat test models/fanuc-directml-model --episodes 5 --no-gui")
- 
-def run_test(model_path, episodes=1, use_gui=True, verbose=False, use_directml=False):
+    """Print usage instructions for the test command."""
+    print("Usage: python fanuc_platform.py test <model_path> [episodes] [options]")
+    print("\nArguments:")
+    print("  model_path    - Path to trained model")
+    print("  episodes      - Number of episodes (default: 1)")
+    print("\nOptions:")
+    print("  --no-gui       - Disable GUI")
+    print("  --verbose      - Show detailed output")
+    print("  --speed=<val>  - Visualization speed (default: 0.02)")
+
+def run_test(model_path, episodes=1, use_gui=True, verbose=False):
     """
-    Run testing on a trained model (interactive visualization).
+    Run a quick test of a model with DirectML acceleration.
     
     Args:
-        model_path: Path to the trained model
-        episodes: Number of episodes to run
+        model_path: Path to the model to test
+        episodes: Number of test episodes
         use_gui: Whether to use the PyBullet GUI
-        verbose: Whether to print detailed results
-        use_directml: Whether to use DirectML for testing
-    
+        verbose: Whether to show detailed progress
+        
     Returns:
         0 if successful, 1 otherwise
     """
-    # Ensure that a valid model file exists
+    # Ensure model file exists
     model_path = ensure_model_file_exists(model_path)
-    if not model_path:
-        return 1
     
     # Print banner with settings
-    title = f"Testing Model: {os.path.basename(model_path)}"
-    if use_directml:
-        title += " with DirectML"
-    print_banner(title)
+    print_banner(f"Testing Model: {model_path} with DirectML")
     
     print("Settings:")
     print(f"  Model Path: {model_path}")
     print(f"  Episodes: {episodes}")
     print(f"  GUI: {'Enabled' if use_gui else 'Disabled'}")
     print(f"  Verbose: {'Enabled' if verbose else 'Disabled'}")
-    print(f"  DirectML: {'Enabled' if use_directml else 'Disabled'}")
     print()
-    
-    if not use_gui:
-        print("WARNING: Testing without GUI may not be helpful.")
-        print("Consider running with GUI enabled for better visualization.")
     
     # Set environment variables
     os.environ['FANUC_GUI'] = '1' if use_gui else '0'
     os.environ['FANUC_VERBOSE'] = '1' if verbose else '0'
     
-    # Use the appropriate test function based on DirectML flag
     try:
-        print("Loading model and environment...")
-        if use_directml:
-            # Use DirectML for testing
-            from src.directml_core import test_model_directml
-            
-            # Check if DirectML is available
-            from src.directml_core import is_available
-            if not is_available():
-                print("ERROR: DirectML is not available in this environment.")
-                print("Install DirectML with: pip install torch-directml")
-                return 1
-            
-            # Test with DirectML
-            test_model_directml(model_path, num_episodes=episodes)
-        else:
-            # Use regular PyTorch for testing
-            from src.envs import FanucReachEnv
-            from src.core import test_model
-            
-            # Test with standard PyTorch
-            test_model(model_path, env_class=FanucReachEnv, num_episodes=episodes)
+        from src.directml_core import test_model_directml
         
+        print("Loading model and environment...")
+        
+        # Run test
+        test_model_directml(
+            model_path=model_path,
+            num_episodes=episodes
+        )
+        
+        print("\nTest completed!")
         return 0
     
     except Exception as e:
@@ -508,24 +380,19 @@ def run_test(model_path, episodes=1, use_gui=True, verbose=False, use_directml=F
 #########################################
 
 def print_train_usage():
-    """Print usage instructions for training."""
-    print("\nTraining Usage:")
-    print("  fanuc.bat train [options]")
+    """Print usage instructions for the train command."""
+    print("Usage: python fanuc_platform.py train [model_path] [steps] [options]")
+    print("\nArguments:")
+    print("  model_path    - Path to save the model (optional)")
+    print("  steps         - Number of training steps (default: 500000)")
     print("\nOptions:")
-    print("  --model_path NAME   Custom name/path for the trained model")
-    print("  --steps N           Number of training steps (default: 500000)")
-    print("  --no-gui            Run without PyBullet GUI visualization")
-    print("  --eval              Run evaluation after training")
-    print("  --verbose, -v       Show detailed training progress")
-    print("\nExamples:")
-    print("  fanuc.bat train")
-    print("  fanuc.bat train --model_path my_model --steps 1000000 --no-gui")
-    print("  fanuc.bat train --directml  # Train with DirectML for AMD GPUs")
+    print("  --no-gui       - Disable GUI")
+    print("  --eval         - Run evaluation after training")
+    print("  --verbose      - Show detailed output")
 
-def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, 
-                verbose=False, use_directml=False):
+def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, verbose=False):
     """
-    Train a new FANUC robot model.
+    Train a new FANUC robot model with DirectML acceleration.
     
     Args:
         model_path: Path to save the model (default: auto-generated)
@@ -533,26 +400,20 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False,
         use_gui: Whether to use the PyBullet GUI
         eval_after: Whether to run evaluation after training
         verbose: Whether to show detailed progress
-        use_directml: Whether to use DirectML for training
-    
+        
     Returns:
         0 if successful, 1 otherwise
     """
     # Generate a default model path if not provided
     if not model_path:
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        model_path = f"models/fanuc-{timestamp}"
-        if use_directml:
-            model_path += "-directml"
+        model_path = f"models/fanuc-{timestamp}-directml"
     
     # Create models directory if it doesn't exist
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     
     # Print banner with settings
-    title = "Training FANUC Robot Model"
-    if use_directml:
-        title += " with DirectML"
-    print_banner(title)
+    print_banner("Training FANUC Robot Model with DirectML")
     
     print("Settings:")
     print(f"  Model Path: {model_path}")
@@ -560,43 +421,30 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False,
     print(f"  GUI: {'Enabled' if use_gui else 'Disabled'}")
     print(f"  Evaluation After: {'Yes' if eval_after else 'No'}")
     print(f"  Verbose: {'Enabled' if verbose else 'Disabled'}")
-    print(f"  DirectML: {'Enabled' if use_directml else 'Disabled'}")
     print()
     
     # Set environment variables
     os.environ['FANUC_GUI'] = '1' if use_gui else '0'
     os.environ['FANUC_VERBOSE'] = '1' if verbose else '0'
     
-    # Train with the appropriate function based on DirectML flag
+    # Train with DirectML
     try:
-        if use_directml:
-            # Use DirectML for training
-            from src.directml_core import train_robot_with_ppo_directml
-            
-            # Check if DirectML is available
-            from src.directml_core import is_available
-            if not is_available():
-                print("ERROR: DirectML is not available in this environment.")
-                print("Install DirectML with: pip install torch-directml")
-                return 1
-            
-            print("Starting training with DirectML...")
-            model = train_robot_with_ppo_directml(
-                total_timesteps=steps,
-                model_path=model_path,
-                verbose=verbose
-            )
-        else:
-            # Use regular PyTorch for training
-            from src.envs import FanucReachEnv
-            from src.core import train_robot_with_ppo
-            
-            print("Starting training with PyTorch...")
-            model = train_robot_with_ppo(
-                total_timesteps=steps,
-                model_path=model_path,
-                verbose=verbose
-            )
+        # Use DirectML for training
+        from src.directml_core import train_robot_with_ppo_directml
+        
+        # Check if DirectML is available
+        from src.directml_core import is_available
+        if not is_available():
+            print("ERROR: DirectML is not available in this environment.")
+            print("Install DirectML with: pip install torch-directml")
+            return 1
+        
+        print("Starting training with DirectML...")
+        model = train_robot_with_ppo_directml(
+            total_timesteps=steps,
+            model_path=model_path,
+            verbose=verbose
+        )
         
         print(f"\nTraining completed! Model saved to: {model_path}")
         
@@ -607,8 +455,7 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False,
                 model_path=model_path,
                 episodes=10,
                 use_gui=use_gui,
-                verbose=verbose,
-                use_directml=use_directml
+                verbose=verbose
             )
         
         return 0
@@ -630,41 +477,27 @@ def parse_args():
     Returns:
         Parsed arguments namespace
     """
-    # Define the base parser with shared arguments
-    base_parser = argparse.ArgumentParser(add_help=False)
-    base_parser.add_argument("--directml", action="store_true", 
-                             help="Use DirectML acceleration for AMD GPUs")
-    
     # Create the main parser
     parser = argparse.ArgumentParser(
-        description="FANUC Robot ML Platform - Unified CLI"
+        description="FANUC Robot ML Platform - DirectML CLI"
     )
     
     # Create subparsers for different modes
     subparsers = parser.add_subparsers(dest="mode", help="Operation mode")
     
     # Train mode parser
-    train_parser = subparsers.add_parser("train", parents=[base_parser],
-                                        help="Train a model")
-    train_parser.add_argument("model_path", nargs="?", help="Path to load existing model (optional)")
-    train_parser.add_argument("steps", nargs="?", type=int, default=1000000, 
+    train_parser = subparsers.add_parser("train", help="Train a model with DirectML")
+    train_parser.add_argument("model_path", nargs="?", help="Path to save the model (optional)")
+    train_parser.add_argument("steps", nargs="?", type=int, default=500000, 
                              help="Number of training steps")
-    train_parser.add_argument("--save", type=str, help="Path to save the trained model")
     train_parser.add_argument("--no-gui", action="store_true", help="Disable GUI")
-    train_parser.add_argument("--viz-speed", type=float, default=0.02, 
-                            help="Visualization speed")
+    train_parser.add_argument("--eval", action="store_true", help="Run evaluation after training")
     train_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
-    train_parser.add_argument("--seed", type=int, help="Random seed")
-    train_parser.add_argument("--parallel", type=int, default=1, 
-                            help="Number of parallel environments")
-    train_parser.add_argument("--learning-rate", type=float, default=3e-4, 
-                            help="Learning rate")
     
     # Eval mode parser
-    eval_parser = subparsers.add_parser("eval", parents=[base_parser],
-                                       help="Evaluate a model thoroughly")
+    eval_parser = subparsers.add_parser("eval", help="Evaluate a model with DirectML")
     eval_parser.add_argument("model_path", help="Path to trained model")
-    eval_parser.add_argument("episodes", nargs="?", type=int, default=5, 
+    eval_parser.add_argument("episodes", nargs="?", type=int, default=10, 
                            help="Number of evaluation episodes")
     eval_parser.add_argument("--no-gui", action="store_true", help="Disable GUI")
     eval_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
@@ -674,8 +507,7 @@ def parse_args():
                            help="Save a video of the evaluation")
     
     # Test mode parser
-    test_parser = subparsers.add_parser("test", parents=[base_parser],
-                                       help="Run a quick test of a model")
+    test_parser = subparsers.add_parser("test", help="Test a model with DirectML")
     test_parser.add_argument("model_path", help="Path to trained model")
     test_parser.add_argument("episodes", nargs="?", type=int, default=1, 
                            help="Number of test episodes")
@@ -683,12 +515,9 @@ def parse_args():
     test_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     test_parser.add_argument("--speed", type=float, default=0.02, 
                           help="Visualization speed")
-    test_parser.add_argument("--save-video", action="store_true", 
-                           help="Save a video of the test")
     
     # Install mode parser
-    install_parser = subparsers.add_parser("install", parents=[base_parser],
-                                         help="Test installation")
+    install_parser = subparsers.add_parser("install", help="Test DirectML installation")
     
     # Parse args
     args = parser.parse_args()
@@ -702,17 +531,16 @@ def parse_args():
 
 def main():
     """
-    Main entry point for the unified FANUC Robot ML Platform.
+    Main entry point for the DirectML-focused FANUC Robot ML Platform.
     
-    Parses command line arguments and dispatches to the appropriate functions
-    based on mode and DirectML availability.
+    Parses command line arguments and dispatches to the appropriate functions.
     """
     # Parse command line arguments
     args = parse_args()
     
     # Handle each mode
     if args.mode == "install":
-        return test_install(use_directml=args.directml)
+        return test_install()
     
     elif args.mode == "train":
         return train_model(
@@ -720,8 +548,7 @@ def main():
             steps=args.steps,
             use_gui=not args.no_gui,
             eval_after=args.eval,
-            verbose=args.verbose,
-            use_directml=args.directml
+            verbose=args.verbose
         )
     
     elif args.mode == "eval":
@@ -729,8 +556,7 @@ def main():
             model_path=args.model_path,
             episodes=args.episodes,
             use_gui=not args.no_gui,
-            verbose=args.verbose,
-            use_directml=args.directml
+            verbose=args.verbose
         )
     
     elif args.mode == "test":
@@ -738,8 +564,7 @@ def main():
             model_path=args.model_path,
             episodes=args.episodes,
             use_gui=not args.no_gui,
-            verbose=args.verbose,
-            use_directml=args.directml
+            verbose=args.verbose
         )
     
     else:

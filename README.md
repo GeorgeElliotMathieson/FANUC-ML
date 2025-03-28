@@ -1,15 +1,15 @@
-# FANUC Robot ML Platform
+# FANUC Robot ML Platform (DirectML-Only)
 
-A comprehensive machine learning platform for reinforcement learning with FANUC robot arms, focusing on precise end-effector positioning tasks. Optimized for both standard PyTorch and AMD GPU acceleration via DirectML.
+A comprehensive machine learning platform for reinforcement learning with FANUC robot arms, focusing on precise end-effector positioning tasks. Optimized exclusively for AMD GPU acceleration via DirectML.
 
 ## Project Overview
 
-This platform provides a complete framework for applying reinforcement learning to control FANUC robot arms for positioning tasks. The system is designed with a modular architecture, clean Python package structure, and supports both standard PyTorch and AMD GPU acceleration via DirectML.
+This platform provides a complete framework for applying reinforcement learning to control FANUC robot arms for positioning tasks. The system is designed with a modular architecture, clean Python package structure, and is specifically optimized for AMD GPU acceleration via DirectML.
 
 ### Key Features
 
 - **Reinforcement Learning**: Custom-built environments using PPO algorithm
-- **Dual-GPU Support**: Works with standard PyTorch (NVIDIA) and AMD GPUs (via DirectML)
+- **AMD GPU Support**: Exclusively works with AMD GPUs (via DirectML)
 - **Flexible Evaluation Tools**: Comprehensive visualization and evaluation systems
 - **Modular Design**: Well-structured Python package with clean separation of concerns
 - **Unified Interface**: Single entry point for all operations
@@ -19,8 +19,8 @@ This platform provides a complete framework for applying reinforcement learning 
 This project has been streamlined to provide a unified interface for all operations:
 
 - **Unified Entry Points**: 
-  - `fanuc.bat` - Primary script for all standard operations
-  - `directml.bat` - Primary script for all AMD GPU-accelerated operations
+  - `fanuc.bat` - Primary script for all DirectML operations
+  - Legacy scripts for backward compatibility
 - **Single Python Implementation**: Core functionality is consolidated in `fanuc_platform.py`
 - **Simplified Usage**: Consistent parameter handling across all modes
 - **Reduced Complexity**: Eliminated redundant scripts and consolidated functionality
@@ -29,14 +29,15 @@ This project has been streamlined to provide a unified interface for all operati
 
 ```
 fanuc-ml/
-├── fanuc.bat            # Primary script for all standard operations
-├── directml.bat         # Primary script for all AMD GPU operations 
+├── fanuc.bat            # Primary script for all DirectML operations
+├── directml.bat         # Backward compatibility script (forwards to fanuc.bat)
 ├── fanuc_platform.py    # Unified implementation for all operations
-├── evaluate_model.bat   # Backward compatibility for model evaluation
-├── test_model.bat       # Backward compatibility for quick testing
+├── evaluate_model.bat   # Backward compatibility for DirectML model evaluation
+├── test_model.bat       # Backward compatibility for DirectML testing
 ├── evaluate_directml.bat # Backward compatibility for DirectML evaluation
 ├── test_directml.bat    # Backward compatibility for DirectML testing
 ├── CONSOLIDATION.md     # Documentation of consolidation efforts
+├── DIRECTML_CONVERSION.md # Documentation of DirectML-only conversion
 ├── pyproject.toml       # Modern Python package configuration
 ├── requirements.txt     # Core dependencies
 ├── robots/              # Robot model files
@@ -46,7 +47,7 @@ fanuc-ml/
 ├── src/                 # Source code (main package)
 │   ├── __init__.py      # Package definition
 │   ├── core/            # Core training and simulation code
-│   ├── directml_core.py # Consolidated DirectML implementation
+│   ├── directml_core.py # DirectML implementation
 │   ├── envs/            # Environment implementations
 │   ├── utils/           # Utility functions
 │   │   ├── __init__.py  # Core utilities including seeding
@@ -66,8 +67,8 @@ fanuc-ml/
 
 - Windows 10/11
 - Python 3.8 or higher
-- PyTorch for standard operation (NVIDIA GPUs)
-- torch-directml for AMD GPU acceleration (optional)
+- AMD GPU
+- torch-directml package
 
 ### Installation Steps
 
@@ -77,13 +78,9 @@ fanuc-ml/
    cd fanuc-ml
    ```
 
-2. Basic installation:
+2. Installation:
    ```bash
    pip install -e .
-   ```
-
-3. For AMD GPU support (optional):
-   ```bash
    pip install torch-directml
    ```
 
@@ -92,23 +89,17 @@ fanuc-ml/
 Run the installation test to verify your setup:
 
 ```bash
-# Test standard installation
+# Test DirectML installation
 fanuc.bat install
-
-# Test DirectML support (AMD GPUs)
-directml.bat install
 ```
 
 ## Usage
 
-All operations use the unified scripts with the following format:
+All operations use the unified script with the following format:
 
 ```bash
-# For standard operations (CPU or NVIDIA GPU)
+# For all operations (AMD GPU with DirectML)
 fanuc.bat [mode] [options]
-
-# For AMD GPU operations with DirectML
-directml.bat [mode] [options]
 ```
 
 Where `mode` can be one of:
@@ -125,9 +116,6 @@ fanuc.bat train
 
 # Training with specific parameters
 fanuc.bat train --model_path models/my_model --steps 1000000 --no-gui
-
-# Training with DirectML (AMD GPUs)
-directml.bat train --steps 500000
 ```
 
 ### Evaluating a Model
@@ -138,9 +126,6 @@ fanuc.bat eval models/my_model
 
 # Evaluation with specific episode count
 fanuc.bat eval models/my_model --episodes 20 --verbose
-
-# Evaluation with DirectML
-directml.bat eval models/my_model --no-gui
 ```
 
 ### Quick Testing
@@ -151,9 +136,6 @@ fanuc.bat test models/my_model
 
 # Test with specific parameters
 fanuc.bat test models/my_model --episodes 3 --verbose
-
-# Test with DirectML
-directml.bat test models/my_model
 ```
 
 ### Common Options
@@ -195,7 +177,6 @@ The training implementation uses a consolidated architecture with:
 Models are saved with timestamp-based naming in the `models/` directory:
 
 ```
-models/fanuc-20250401-120523/    # Standard model trained on April 1, 2025
 models/fanuc-20250401-120523-directml/  # DirectML model trained on April 1, 2025
 ```
 
@@ -256,6 +237,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 For more detailed information, refer to:
 - [Consolidation Documentation](CONSOLIDATION.md) - Details on code consolidation efforts
+- [DirectML Conversion](DIRECTML_CONVERSION.md) - Details on the conversion to DirectML-only
 
 ## Models
 
@@ -263,113 +245,39 @@ The repository includes pre-trained models:
 
 - `models/fanuc-ml-directml` - DirectML trained model 
 
-## DirectML Support for FANUC Robot Control
+## DirectML Implementation Details
 
-This project supports AMD GPU acceleration through the DirectML backend for PyTorch.
+This platform exclusively uses AMD GPU acceleration through the DirectML backend for PyTorch.
 
 ### Requirements
 
-To use DirectML acceleration, you must have:
+To use this platform, you must have:
 
 1. Windows 10/11 with an AMD GPU (tested with AMD RX 6700S)
 2. Python 3.8+ 
 3. PyTorch 2.0.0+
 4. torch-directml package
 
-### Installation
-
-Install the DirectML backend for PyTorch:
-
-```bash
-pip install torch-directml
-```
-
-Verify the installation by running:
-
-```bash
-directml.bat install
-```
-
-### Unified DirectML Interface
-
-The platform provides a simplified interface for DirectML-accelerated operations through the `directml.bat` script, which is a wrapper around the unified `fanuc_platform.py` implementation.
-
-#### Training with DirectML
-
-To train a model with AMD GPU acceleration:
-
-```bash
-directml.bat train [options]
-```
-
-Options include:
-- `--model_path PATH` - Custom path to save the model
-- `--steps N` - Number of training steps (default: 500000)
-- `--no-gui` - Run without PyBullet visualization 
-- `--eval` - Run evaluation after training
-- `--verbose` - Show detailed training progress
-
-Example:
-```bash
-directml.bat train --steps 1000000 --no-gui
-```
-
-#### Evaluating Models with DirectML
-
-Evaluate a trained model using AMD GPU acceleration:
-
-```bash
-directml.bat eval <model_path> [options]
-```
-
-Options include:
-- `--episodes N` - Number of evaluation episodes (default: 10)
-- `--no-gui` - Run without PyBullet visualization
-- `--verbose` - Show detailed episode results
-
-Example:
-```bash
-directml.bat eval models/fanuc-ml-directml --episodes 20 --verbose
-```
-
-#### Quick Testing Models with DirectML
-
-Run a quick test of a model with DirectML acceleration:
-
-```bash
-directml.bat test <model_path> [options]
-```
-
-Options include:
-- `--episodes N` - Number of test episodes (default: 1)
-- `--no-gui` - Run without PyBullet visualization
-- `--verbose` - Show detailed results
-
-Example:
-```bash
-directml.bat test models/fanuc-ml-directml --verbose
-```
-
-### Under the Hood: How DirectML Works
+### DirectML Architecture
 
 The DirectML implementation provides several key components:
 
 1. **DirectML Device Detection**: The system automatically detects AMD GPUs and configures PyTorch to use them via DirectML.
 
-2. **Optimized Model Loading**: Models trained with DirectML are loaded with DirectML-specific optimizations.
+2. **Optimized Model Loading**: Models are loaded with DirectML-specific optimizations.
 
 3. **Environment Variables**: The DirectML backend uses several environment variables for configuration:
-   - `FANUC_DIRECTML=1` - Set by `directml.bat` to indicate DirectML mode
+   - `FANUC_DIRECTML=1` - Set by `fanuc.bat` to indicate DirectML mode
    - `PYTORCH_DIRECTML_VERBOSE=1` - Controls verbosity of DirectML operations
    - `DIRECTML_ENABLE_OPTIMIZATION=1` - Enables DirectML optimization (default)
 
 ### High-Level Architecture
 
 ```
-directml.bat → fanuc_platform.py → src/directml_core.py
+fanuc.bat → fanuc_platform.py → src/directml_core.py
 ```
 
-- `directml.bat`: Entry point script that adds the `--directml` flag
+- `fanuc.bat`: Entry point script that sets DirectML environment variables
 - `fanuc_platform.py`: Unified platform script that handles all operations
 - `src/directml_core.py`: Core DirectML implementation with AMD-specific optimizations
 
@@ -391,9 +299,8 @@ Common issues with DirectML:
 
 ### Development Notes
 
-When developing new features that need to support DirectML:
+When developing new features:
 
-1. Use the `torch_directml.device()` for tensor operations instead of hardcoding device references
-2. Use the utility function `is_available()` from `src.directml_core` to check for DirectML availability
-3. Handle DirectML errors with appropriate error messages rather than fallbacks
-4. Add your implementation to the `src/directml_core.py` module for consistency 
+1. Use the `torch_directml.device()` for tensor operations
+2. Handle DirectML errors with appropriate error messages
+3. Add your implementation to the `src/directml_core.py` module for consistency 
