@@ -8,8 +8,14 @@ import math
 import json
 import argparse
 import numpy as np
+import gc  # Explicit garbage collection
 from datetime import datetime
 import matplotlib.pyplot as plt
+try:
+    import imageio  # For video recording if available
+except ImportError:
+    print("Warning: imageio not found, video recording will be disabled")
+    imageio = None
 import pybullet as p
 import gymnasium as gym
 from gymnasium import spaces
@@ -844,81 +850,36 @@ class RobotPositioningRevampedEnv(gym.Env):
     
     def _calculate_reward(self, distance, current_ee_pos, action, positions_within_limits=True):
         """
-        Calculate reward with sophisticated reward engineering
+        Calculate reward with a simplified, more stable reward function.
         
         The reward has these components:
-        1. Distance component: reward for reducing distance to target
-        2. Progress component: reward based on improvement from previous step
-        3. Movement efficiency: penalty for excessive movement
-        4. Smooth motion: penalty for jerky movements
-        5. Joint limit avoidance: penalty for approaching joint limits
-        6. Joint limit violation: strong penalty if the action would exceed limits
-           (should never happen with JointLimitedBox but included as safety)
+        1. Distance component: primary signal for reducing distance to target
+        2. Progress component: reward for improvement from the previous step
+        3. Action penalty: small penalty for large/unnecessary actions
         """
         # 1. Distance component - negative exponential of distance
-        # This gives higher gradients close to the target (encouraging precision)
-        distance_factor = 0.5  # Controls how quickly the reward falls off with distance
-        distance_reward = np.exp(-distance_factor * distance) - 0.5
+        # Provides a smooth gradient that gets stronger as the agent gets closer to the target
+        distance_scale = 5.0  # Controls how quickly the reward increases near the target
+        distance_reward = 2.0 * np.exp(-distance_scale * distance)
         
         # 2. Progress component - reward for getting closer to the target
+        progress = 0.0
         if self.previous_distance is not None:
             # Raw progress in meters (positive = getting closer)
             progress = self.previous_distance - distance
-            
-            # Scale by previous distance to normalize (percent improvement)
-            if self.previous_distance > 1e-6:
-                relative_progress = progress / self.previous_distance
-                progress_reward = relative_progress * 2.0
-            else:
-                progress_reward = 0.0
-                
-            # Cap the progress reward to avoid large spikes
-            progress_reward = np.clip(progress_reward, -0.5, 0.5)
+            # Scale progress reward based on distance
+            progress_reward = progress * 5.0
+            # Clip to avoid extreme values
+            progress_reward = np.clip(progress_reward, -1.0, 1.0)
         else:
             progress_reward = 0.0
         
-        # 3. Movement efficiency - small penalty for large actions
-        # Encourages using minimum necessary movement
-        efficiency_penalty = -0.02 * np.sum(np.square(action))
+        # 3. Action penalty - small penalty for unnecessary movement
+        # Encourages finding efficient paths to the target
+        action_penalty = -0.01 * np.sum(np.square(action))
         
-        # 4. Smooth motion - penalty for jerky movements
-        # Compare this action to the previous action to discourage rapid changes
-        if np.any(self.previous_action):  # Check if previous action is not all zeros
-            jerk = np.sum(np.square(action - self.previous_action))
-            smoothness_penalty = -0.02 * jerk
-        else:
-            smoothness_penalty = 0.0
-        
-        # 5. Joint limit avoidance - penalty for getting close to joint limits
-        # Get current joint states
-        state = self.robot._get_state()
-        current_joint_positions = state[:self.robot.dof*2:2]
-        
-        joint_limit_penalty = 0.0
-        for i, pos in enumerate(current_joint_positions):
-            if i in self.robot.joint_limits:
-                limit_low, limit_high = self.robot.joint_limits[i]
-                
-                # Calculate proximity to limits (0 = at limit, 1 = at middle)
-                range_size = limit_high - limit_low
-                mid_point = (limit_high + limit_low) / 2.0
-                normalized_pos = 2.0 * abs(pos - mid_point) / range_size
-                
-                # Apply penalty that increases as we get closer to limits
-                # No penalty in the middle 50% of the range, then increasing
-                if normalized_pos > 0.5:
-                    # Map 0.5-1.0 to 0.0-1.0 for penalty calculation
-                    limit_proximity = (normalized_pos - 0.5) * 2.0
-                    joint_limit_penalty -= 0.1 * (limit_proximity ** 2)
-        
-        # Combine all reward components
-        reward = (
-            0.5 * distance_reward +      # Base distance reward
-            0.3 * progress_reward +      # Progress reward
-            0.1 * efficiency_penalty +   # Efficiency penalty (small influence)
-            0.05 * smoothness_penalty +  # Smoothness penalty (smaller influence)
-            0.05 * joint_limit_penalty   # Joint limit penalty (smaller influence)
-        )
+        # Combine all reward components with simplified weights
+        reward = distance_reward + progress_reward + action_penalty
         
         return reward
     
@@ -941,12 +902,13 @@ class RobotPositioningRevampedEnv(gym.Env):
 # Custom neural network architectures for better learning
 class CustomFeatureExtractor(BaseFeaturesExtractor):
     """
-    Custom feature extractor that processes observation components separately
-    and combines them in a structured way for better learning.
+    Simplified feature extractor with a more coherent architecture.
+    Processes observations in a more direct way with better parameter sharing.
     """
     def __init__(self, observation_space: spaces.Box):
-        # Extract features to a feature dimension that will then be fed to the policy/value networks
-        super().__init__(observation_space, features_dim=512)
+        # Use a smaller feature dimension for efficiency
+        features_dim = 256
+        super().__init__(observation_space, features_dim=features_dim)
         
         # Determine observation dimensions
         obs_dim = observation_space.shape[0]
@@ -955,95 +917,25 @@ class CustomFeatureExtractor(BaseFeaturesExtractor):
         # Number of joints (DOF) in the environment (5 for FANUC robot)
         self.dof = 5
         
-        # Define the encoder for different parts of the observation
-        # This structured approach helps the network better understand spatial relationships
-        
-        # Joint positions and previous action encoders (10 values: 5 joints + 5 previous actions)
-        self.joint_encoder = nn.Sequential(
-            nn.Linear(10, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-        )
-        
-        # Position encoder (9 values: 3 ee position + 3 target position + 3 direction)
-        self.position_encoder = nn.Sequential(
-            nn.Linear(9, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-        )
-        
-        # Distance encoder (1 value)
-        self.distance_encoder = nn.Sequential(
-            nn.Linear(1, 64),
-            nn.LayerNorm(64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.LayerNorm(64),
-            nn.ReLU(),
-        )
-        
-        # History encoder (processes the time series information)
-        # This captures the motion dynamics over time
-        # 8 values per timestep (5 joints + 3 ee pos) * 5 timesteps
-        history_dim = 8 * 5  
-        self.history_encoder = nn.Sequential(
-            nn.Linear(history_dim, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-        )
-        
-        # Final combined encoder
-        self.final_encoder = nn.Sequential(
-            nn.Linear(128 + 128 + 64 + 128, 256),  # Combine all encoders
-            nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Linear(256, 512),  # Output features
+        # Simplified architecture: 2-layer MLP with layer normalization
+        self.shared_network = nn.Sequential(
+            nn.Linear(obs_dim, 512),
             nn.LayerNorm(512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.ReLU(),
+            nn.Linear(512, features_dim),
+            nn.LayerNorm(features_dim),
             nn.ReLU(),
         )
     
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         """
-        Process the observations using our structured approach
+        Process the observations with the simplified network
         """
-        batch_size = observations.shape[0]
-        
-        # Extract different components from observation
-        # Note: these indices must match the observation creation in the environment
-        joint_pos = observations[:, :self.dof]  # First 5 are joint positions
-        ee_pos = observations[:, self.dof:self.dof+3]  # Next 3 are ee position
-        target_pos = observations[:, self.dof+3:self.dof+6]  # Next 3 are target position
-        distance = observations[:, self.dof+6:self.dof+7]  # Next 1 is distance
-        direction = observations[:, self.dof+7:self.dof+10]  # Next 3 are direction
-        prev_action = observations[:, self.dof+10:self.dof*2+10]  # Next 5 are previous action
-        history = observations[:, self.dof*2+10:]  # Rest is history
-        
-        # Process different components
-        joint_features = self.joint_encoder(torch.cat([joint_pos, prev_action], dim=1))
-        position_features = self.position_encoder(torch.cat([ee_pos, target_pos, direction], dim=1))
-        distance_features = self.distance_encoder(distance)
-        history_features = self.history_encoder(history)
-        
-        # Combine features
-        combined_features = torch.cat([
-            joint_features, 
-            position_features, 
-            distance_features, 
-            history_features
-        ], dim=1)
-        
-        # Final encoding
-        features = self.final_encoder(combined_features)
-        
+        # Forward pass through the shared network
+        features = self.shared_network(observations)
         return features
 
 class CustomActorNetwork(nn.Module):
@@ -1188,9 +1080,10 @@ class SaveModelCallback(BaseCallback):
     """
     Callback for saving models during training.
     """
-    def __init__(self, save_freq, save_path, verbose=1):
+    def __init__(self, save_freq=None, check_freq=None, save_path=None, verbose=1):
         super(SaveModelCallback, self).__init__(verbose)
-        self.save_freq = save_freq
+        # Support both save_freq (legacy) and check_freq (new)
+        self.save_freq = save_freq if save_freq is not None else check_freq
         self.save_path = save_path
     
     def _on_step(self):
@@ -1206,12 +1099,17 @@ class TrainingMonitorCallback(BaseCallback):
     """
     Callback for monitoring training progress and creating visualizations.
     """
-    def __init__(self, log_interval=100, verbose=1, plot_interval=10000):
+    def __init__(self, log_interval=100, verbose=1, plot_interval=10000, plot_dir=None, model_dir=None):
         super(TrainingMonitorCallback, self).__init__(verbose)
         self.log_interval = log_interval
         self.plot_interval = plot_interval
-        self.plot_dir = "./plots"
+        
+        # Support custom plot and model directories
+        self.plot_dir = plot_dir if plot_dir is not None else "./plots"
+        self.model_dir = model_dir if model_dir is not None else "./models"
+        
         os.makedirs(self.plot_dir, exist_ok=True)
+        os.makedirs(self.model_dir, exist_ok=True)
         
         # Initialize tracking variables
         self.timesteps = []
@@ -1282,7 +1180,7 @@ class TrainingMonitorCallback(BaseCallback):
             self.plot_training_progress(f"{self.plot_dir}/progress_{self.num_timesteps}.png")
             
             # Save checkpoint too
-            save_path = f"./models/checkpoint_{self.num_timesteps}"
+            save_path = f"{self.model_dir}/checkpoint_{self.num_timesteps}"
             self.model.save(save_path)
             print(f"Checkpoint saved to {save_path}")
         
@@ -1374,7 +1272,7 @@ class CustomPPO(PPO):
         )
 
 # Function to create environments for training
-def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_limits=False, training_mode=True):
+def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, training_mode=True):
     """
     Create multiple instances of the revamped robot positioning environment.
     
@@ -1382,7 +1280,6 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_l
         num_envs: Number of environments to create
         viz_speed: Speed of visualization (seconds between steps)
         parallel_viz: Whether to use parallel visualization mode
-        strict_limits: Whether to strictly enforce joint limits
         training_mode: Whether the environments are used for training (affects exploration)
     
     Returns:
@@ -1406,9 +1303,7 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_l
                 training_mode=training_mode
             )
             
-            # Wrap in JointLimitEnforcingEnv if requested
-            if strict_limits:
-                env = JointLimitEnforcingEnv(env)
+            
                 
             envs.append(env)
         
@@ -1427,9 +1322,7 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_l
                 training_mode=training_mode
             )
             
-            # Wrap in JointLimitEnforcingEnv if requested
-            if strict_limits:
-                env = JointLimitEnforcingEnv(env)
+            
                 
             envs.append(env)
     
@@ -1437,7 +1330,8 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, strict_l
 
 def train_revamped_robot(args):
     """
-    Train a robot with the revamped approach, ensuring the model inherently respects joint limits.
+    Train a robot with a consolidated, hardware-agnostic approach.
+    Standardized hyperparameters and memory-efficient implementations.
     
     Args:
         args: Command line arguments
@@ -1449,36 +1343,18 @@ def train_revamped_robot(args):
         if torch.cuda.is_available():
             torch.cuda.manual_seed(args.seed)
     
-    # Create environments
-    if args.parallel_viz and args.gui:
-        print(f"Using {args.parallel} robots in the same environment with visualization")
-        envs = create_revamped_envs(
-            num_envs=args.parallel,
-            viz_speed=args.viz_speed,
-            parallel_viz=True,
-            strict_limits=False,  # We no longer need this with JointLimitedBox
-            training_mode=True
-        )
-    else:
-        envs = create_revamped_envs(
-            num_envs=args.parallel,
-            viz_speed=args.viz_speed if args.gui else 0.0,
-            parallel_viz=False,
-            strict_limits=False,  # We no longer need this with JointLimitedBox
-            training_mode=True
-        )
-    
-    # Verify environments use JointLimitedBox action space
-    for i, env in enumerate(envs):
-        if isinstance(env.action_space, JointLimitedBox):
-            print(f"Environment {i} is using JointLimitedBox action space - limits inherently enforced")
-        else:
-            print(f"WARNING: Environment {i} is not using JointLimitedBox action space")
+    # Create environments based on available hardware
+    envs = create_revamped_envs(
+        num_envs=args.parallel,
+        viz_speed=args.viz_speed if args.gui else 0.0,
+        parallel_viz=args.parallel_viz and args.gui,
+        training_mode=True
+    )
     
     # Create vectorized environment
     vec_env = DummyVecEnv([lambda env=env: env for env in envs])
     
-    # Normalize observations and rewards
+    # Normalize observations and rewards with standardized parameters
     vec_env = VecNormalize(
         vec_env,
         norm_obs=True,
@@ -1489,140 +1365,87 @@ def train_revamped_robot(args):
         epsilon=1e-8,
     )
     
-    # Define policy kwargs with our custom feature extractor
-    # and with specific hyperparameters to ensure inherent joint limit respect
+    # Standard policy configuration that works well across hardware platforms
     policy_kwargs = {
         "features_extractor_class": CustomFeatureExtractor,
         "activation_fn": nn.ReLU,
-        "net_arch": dict(pi=[256, 256], vf=[256, 256]),
-        "log_std_init": -2.0,  # Start with low exploration to avoid hitting limits
-        "ortho_init": False,   # Use our custom initialization
+        "net_arch": dict(pi=[128, 128], vf=[128, 128]),  # Smaller networks for better efficiency
+        "ortho_init": True,  # Use orthogonal initialization for better training stability
     }
     
-    # Use CUDA if available
-    device = "cuda" if args.use_cuda and torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    # Choose device based on hardware availability
+    if args.use_cuda and torch.cuda.is_available():
+        device = "cuda"
+        print(f"Using CUDA device for training")
+    else:
+        device = "cpu"
+        print(f"Using CPU for training")
     
-    # Create or load model
+    # Create directories for models and logs
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_dir = f"./models/ppo_{timestamp}"
+    os.makedirs(model_dir, exist_ok=True)
+    
+    plot_dir = f"./plots/ppo_{timestamp}"
+    os.makedirs(plot_dir, exist_ok=True)
+    
+    # Load existing model or create a new one with standard hyperparameters
     if args.load:
         print(f"Loading model from {args.load}")
         model = PPO.load(args.load, env=vec_env)
     else:
-        print("Creating new PPO model with joint-limit-aware architecture")
+        print("Creating new PPO model with standardized hyperparameters")
         
-        # Create PPO with custom parameters tuned for joint limit learning
+        # Standard PPO parameters that work well across different hardware
         model = PPO(
             "MlpPolicy",
             vec_env,
-            learning_rate=args.learning_rate,
-            n_steps=512,                 # Shorter rollout buffer for faster updates
-            batch_size=64,
-            n_epochs=10,                 # More epochs per update for better learning
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            clip_range_vf=0.2,
+            learning_rate=3e-4,  # Standard learning rate for PPO
+            n_steps=2048,        # Standard rollout length for PPO
+            batch_size=64,       # Smaller batch size for better memory efficiency
+            n_epochs=10,         # Standard number of epochs
+            gamma=0.99,          # Standard discount factor
+            gae_lambda=0.95,     # Standard GAE lambda
+            clip_range=0.2,      # Standard PPO clip range
             normalize_advantage=True,
-            ent_coef=0.005,              # Slightly lower entropy to be more conservative near limits
-            vf_coef=0.5,
-            max_grad_norm=0.5,
+            ent_coef=0.01,       # Slightly higher entropy for better exploration
+            vf_coef=0.5,         # Standard value function coefficient
+            max_grad_norm=0.5,   # Standard gradient clipping
             verbose=1,
             policy_kwargs=policy_kwargs,
-            device=device
+            device=device,
+            tensorboard_log=f"{model_dir}/tensorboard"
         )
     
-    # Add a callback to test joint limits during training
-    class JointLimitMonitorCallback(BaseCallback):
-        """Callback to monitor if actions respect joint limits during training."""
-        def __init__(self, verbose=0, check_freq=1000):
-            super(JointLimitMonitorCallback, self).__init__(verbose)
-            self.check_freq = check_freq
-            self.violations = 0
-            self.total_checked = 0
-        
-        def _on_step(self):
-            """Check if latest actions respect joint limits."""
-            if self.n_calls % self.check_freq == 0 and hasattr(self.model, 'last_obs'):
-                # Get current actions from the policy
-                actions, _ = self.model.predict(self.model.last_obs, deterministic=False)
-                
-                # Check if actions would result in joint positions within limits
-                all_within_limits = True
-                
-                for env_idx, action in enumerate(actions):
-                    # Get the environment and check if the unnormalized action respects limits
-                    env = self.training_env.envs[env_idx]
-                    if hasattr(env, 'action_space') and isinstance(env.action_space, JointLimitedBox):
-                        joint_positions = env.action_space.unnormalize_action(action)
-                        
-                        # Check each joint against its limits
-                        for joint_idx, pos in enumerate(joint_positions):
-                            if joint_idx in env.action_space.joint_limits:
-                                limit_low, limit_high = env.action_space.joint_limits[joint_idx]
-                                if pos < limit_low or pos > limit_high:
-                                    all_within_limits = False
-                                    self.violations += 1
-                                    if self.verbose > 0:
-                                        print(f"Joint limit violation: Joint {joint_idx} position {pos:.4f} outside limits [{limit_low:.4f}, {limit_high:.4f}]")
-                
-                self.total_checked += 1
-                if self.verbose > 0 and self.total_checked > 0:
-                    violation_rate = (self.violations / self.total_checked) * 100
-                    print(f"Joint limit check: {violation_rate:.2f}% violations detected ({self.violations}/{self.total_checked})")
-            
-            return True
-    
-    # Add joint limit monitor to callbacks
-    joint_limit_monitor = JointLimitMonitorCallback(verbose=args.verbose, check_freq=5000)
-    
-    # Evaluation mode
-    if args.eval_only:
-        from stable_baselines3.common.evaluation import evaluate_policy
-        
-        print(f"Evaluating model for {args.eval_episodes} episodes")
-        mean_reward, std_reward = evaluate_policy(
-            model,
-            vec_env,
-            n_eval_episodes=args.eval_episodes,
-            deterministic=True
-        )
-        print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
-        vec_env.close()
-        return
-    
-    # Prepare directories
-    os.makedirs("./models", exist_ok=True)
-    os.makedirs("./plots", exist_ok=True)
-    
-    # Create a timestamp for this training run
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_dir = f"./models/revamped_{timestamp}"
-    os.makedirs(model_dir, exist_ok=True)
-    
-    # Create callbacks
+    # Create callbacks for model saving and monitoring
     save_callback = SaveModelCallback(
-        save_freq=50000,  # Save every 50k steps
+        check_freq=10000,
         save_path=model_dir,
         verbose=1
     )
     
     monitor_callback = TrainingMonitorCallback(
-        log_interval=100,  # Log every 100 steps
-        verbose=1,
-        plot_interval=10000  # Plot every 10k steps
+        log_interval=1000,
+        plot_interval=10000,
+        plot_dir=plot_dir,
+        model_dir=model_dir
     )
     
-    # Print training information
-    print("\n" + "="*80)
-    print(f"Starting training with joint-limit-aware architecture")
-    print(f"Using {args.parallel} parallel environments")
-    print(f"Learning rate: {args.learning_rate}")
-    print(f"Training for {args.steps} timesteps")
-    print(f"Models will be saved to {model_dir}")
-    print("Joint limits will be inherently respected by the model")
-    print("="*80 + "\n")
+    # Create a callback for monitoring joint limits
+    joint_limit_monitor = JointLimitMonitorCallback(
+        log_interval=5000,
+        verbose=1
+    )
     
-    # Start training
+    # Enable deterministic garbage collection for better memory management
+    import gc
+    gc.set_threshold(700, 10, 10)  # More aggressive GC thresholds
+    
+    print(f"Starting training with {args.steps} total timesteps")
+    print(f"Logs and models will be saved to {model_dir}")
+    print(f"Plot files will be saved to {plot_dir}")
+    
+    # Start training with all callbacks
     model.learn(
         total_timesteps=args.steps,
         callback=[save_callback, monitor_callback, joint_limit_monitor]
@@ -1633,10 +1456,13 @@ def train_revamped_robot(args):
     model.save(final_model_path)
     print(f"Final model saved to {final_model_path}")
     
-    # Save final VecNormalize statistics
+    # Save normalization statistics
     vec_normalize_path = f"{model_dir}/vec_normalize_stats"
     vec_env.save(vec_normalize_path)
     print(f"Normalization statistics saved to {vec_normalize_path}")
+    
+    # Force garbage collection before closing environments
+    gc.collect()
     
     # Close environment
     vec_env.close()
@@ -1660,7 +1486,16 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--algorithm', choices=['ppo'], default='ppo', help='RL algorithm to use')
-    parser.add_argument('--strict-limits', action='store_true', help='Strictly enforce joint limits from URDF model')
+    # Add missing training parameters
+    parser.add_argument('--batch-size', type=int, default=256, help='Batch size for training')
+    parser.add_argument('--n-steps', type=int, default=2048, help='Number of steps for each update')
+    parser.add_argument('--n-epochs', type=int, default=10, help='Number of epochs when optimizing')
+    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
+    parser.add_argument('--gae-lambda', type=float, default=0.95, help='GAE lambda parameter')
+    parser.add_argument('--clip-range', type=float, default=0.2, help='Clipping parameter for PPO')
+    parser.add_argument('--vf-coef', type=float, default=0.5, help='Value function coefficient')
+    parser.add_argument('--save-freq', type=int, default=50000, help='Frequency to save model')
+    parser.add_argument('--eval-after-training', action='store_true', help='Run evaluation after training')
     
     args = parser.parse_args()
     
@@ -1668,65 +1503,223 @@ def parse_args():
     if args.no_gui:
         args.gui = False
     
+    # Determine the device to use (CUDA or CPU)
+    if args.use_cuda and torch.cuda.is_available():
+        args.device = "cuda"
+        print("Using CUDA for training (GPU acceleration)")
+    else:
+        args.device = "cpu"
+        print("Using CPU for training (default setting, can be overridden with command line arguments)")
+    
     return args
 
 def main():
-    """Main function."""
-    try:
-        # Save sys.argv and reset it temporarily to prevent conflicts between demo and main
-        original_argv = sys.argv
-        
-        # Parse arguments
-        args = parse_args()
-        
-        # Load workspace data
-        load_workspace_data(verbose=args.verbose)
-        
-        # Check for evaluation mode
-        if args.eval_only:
-            if args.load is None:
-                print("Error: Must provide a model path with --load for evaluation")
-                return
+    """
+    Main entry point for the robot positioning revamped training script.
+    
+    This function processes command line arguments, initializes the environment,
+    and either trains a new model or evaluates an existing one.
+    """
+    args = parse_args()
+    
+    # Seed if requested
+    if args.seed is not None:
+        set_random_seed(args.seed)
+        print(f"Using seed: {args.seed}")
+    
+    # Check if we're just evaluating
+    if args.eval_only:
+        if args.load:
+            try:
+                if args.demo:
+                    # Run evaluation sequence for demo
+                    run_evaluation_sequence(
+                        model_path=args.load,
+                        viz_speed=args.viz_speed if args.viz_speed > 0 else 0.02,
+                        save_video=args.save_video
+                    )
+                else:
+                    # Evaluate model with standard evaluation
+                    evaluate_model(
+                        model_path=args.load,
+                        num_episodes=args.eval_episodes,  # Pass the eval_episodes parameter here
+                        visualize=args.gui,
+                        verbose=args.verbose
+                    )
+            except Exception as e:
+                import traceback
+                error_msg = f"Exception: {str(e)}\n{traceback.format_exc()}"
+                print(f"Error occurred. Check error_log.txt for details.")
+                with open("error_log.txt", "w") as f:
+                    f.write(error_msg)
+        else:
+            print("Error: --eval-only requires a model path specified with --load")
+            sys.exit(1)
+        return  # Exit after evaluation
+    
+    # Training mode from here on
+    # Create environments
+    env = create_revamped_envs(
+        num_envs=args.parallel,
+        viz_speed=args.viz_speed if args.gui else 0.0,
+        parallel_viz=args.parallel_viz and args.gui,
+        training_mode=True
+    )
+    
+    # Normalization wrapper for observations
+    env = VecNormalize(
+        env,
+        norm_obs=True,
+        norm_reward=True,
+        clip_obs=10.0,
+        clip_reward=10.0,
+    )
+    
+    # Create policy
+    policy_kwargs = {
+        "features_extractor_class": CustomFeatureExtractor,
+        "activation_fn": torch.nn.ReLU,
+        "net_arch": [dict(pi=[256, 128, 64], vf=[256, 128, 64])],
+    }
+    
+    # Compute appropriate batch size based on n_steps and parallel environments
+    # This ensures we use full trajectories
+    n_steps_per_env = args.n_steps // args.parallel
+    batch_size = min(args.batch_size, n_steps_per_env * args.parallel)
+    
+    # Ensure batch size is compatible with n_steps
+    if n_steps_per_env * args.parallel % batch_size != 0:
+        # Adjust to nearest compatible batch size
+        old_batch_size = batch_size
+        batch_size = n_steps_per_env * args.parallel // (n_steps_per_env * args.parallel // batch_size)
+        print(f"Adjusted batch size from {old_batch_size} to {batch_size} for compatibility with n_steps")
+    
+    # Print training parameters
+    print("\nTraining Parameters:")
+    print(f"Learning Rate: {args.learning_rate}")
+    print(f"Timesteps: {args.steps}")
+    print(f"n_steps: {args.n_steps}")
+    print(f"Batch Size: {batch_size}")
+    print(f"n_epochs: {args.n_epochs}")
+    print(f"Parallel Environments: {args.parallel}")
+    print(f"Gamma: {args.gamma}")
+    print(f"GAE Lambda: {args.gae_lambda}")
+    print(f"Clip Range: {args.clip_range}")
+    print(f"VF Coefficient: {args.vf_coef}")
+    print(f"Save Frequency: {args.save_freq}")
+    print("Architecture:", policy_kwargs["net_arch"])
+    print()
+    
+    # Create the model timestamp for saving
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_dir = f"./models/revamped_{timestamp}"
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Create callbacks for saving and monitoring
+    callbacks = [
+        SaveModelCallback(
+            save_freq=args.save_freq // args.parallel,  # Save every n steps, adjusted for parallel envs
+            save_path=model_dir,
+            verbose=1,
+        ),
+        TrainingMonitorCallback(
+            log_interval=100,
+            verbose=args.verbose,
+            plot_interval=args.save_freq,
+            plot_dir=f"{model_dir}/plots",
+            model_dir=model_dir
+        ),
+        JointLimitMonitorCallback(
+            log_interval=5000, 
+            verbose=args.verbose
+        )
+    ]
+    
+    # Create the model
+    model = PPO(
+        "MlpPolicy",
+        env,
+        learning_rate=args.learning_rate,
+        n_steps=n_steps_per_env,  # Steps per environment
+        batch_size=batch_size,
+        n_epochs=args.n_epochs,
+        gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
+        clip_range=args.clip_range,
+        normalize_advantage=True,
+        ent_coef=0.0,
+        vf_coef=args.vf_coef,
+        max_grad_norm=0.5,
+        verbose=args.verbose,
+        policy_kwargs=policy_kwargs,
+        seed=args.seed,
+        device=args.device,
+        tensorboard_log=f"{model_dir}/tb_logs"
+    )
+    
+    # Load pretrained model if specified
+    if args.load:
+        try:
+            print(f"Loading model from {args.load}")
+            # Handle both paths with and without .zip extension
+            load_path = args.load
+            if not os.path.exists(load_path) and os.path.exists(load_path + ".zip"):
+                load_path = load_path + ".zip"
             
-            # Run evaluation
-            evaluate_model(
-                model_path=args.load,
-                num_episodes=args.eval_episodes,
-                visualize=args.gui,
-                verbose=args.verbose,
-                strict_limits=args.strict_limits
+            # Load the model
+            model = PPO.load(
+                load_path,
+                env=env, 
+                device=args.device,
+                custom_objects={
+                    "learning_rate": args.learning_rate,
+                    "n_steps": n_steps_per_env,  
+                    "batch_size": batch_size,
+                    "n_epochs": args.n_epochs,
+                    "clip_range": args.clip_range,
+                    "ent_coef": 0.0,
+                    "vf_coef": args.vf_coef,
+                    "max_grad_norm": 0.5,
+                }
             )
-            return
-        
-        # Check for demo mode
-        if args.demo:
-            if args.load is None:
-                print("Error: Must provide a model path with --load for demonstration")
-                return
+            print("Model loaded successfully!")
             
-            # Run demonstration sequence
-            run_evaluation_sequence(
-                model_path=args.load,
-                viz_speed=args.viz_speed if args.viz_speed > 0 else 0.02,
-                save_video=args.save_video,
-                strict_limits=args.strict_limits
-            )
-            return
-        
-        # Train with revamped approach
-        train_revamped_robot(args)
-        
-        # Restore original argv
-        sys.argv = original_argv
-        
-    except Exception as e:
-        import traceback
-        with open("error_log.txt", "w") as f:
-            f.write(f"Exception: {str(e)}\n")
-            f.write(traceback.format_exc())
-        print(f"Error occurred. Check error_log.txt for details.")
+            # Also check for normalization stats
+            norm_path = args.load.replace("final_model", "vec_normalize_stats")
+            if os.path.exists(norm_path):
+                print(f"Loading normalization stats from {norm_path}")
+                env = VecNormalize.load(norm_path, env)
+                # Don't update stats during training, we want to preserve the loaded stats
+                env.training = True  # Set to true as we are continuing training
+                print("Normalization stats loaded successfully!")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            print("Starting with a fresh model...")
+    
+    # Train the model
+    print("\nStarting training...\n")
+    model.learn(
+        total_timesteps=args.steps,
+        callback=callbacks,
+        log_interval=1,  # Print stats every n updates (but our callback handles actual logging)
+    )
+    
+    # Save the final model
+    final_model_path = os.path.join(model_dir, "final_model")
+    model.save(final_model_path)
+    
+    # Save normalization statistics
+    norm_path = os.path.join(model_dir, "vec_normalize_stats")
+    env.save(norm_path)
+    
+    print(f"\nTraining completed. Final model saved to {final_model_path}")
+    
+    # Run a final evaluation
+    if args.eval_after_training:
+        print("\nRunning final evaluation...")
+        evaluate_model(final_model_path, num_episodes=20, visualize=args.gui and args.viz_speed > 0, verbose=args.verbose)
 
-def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, strict_limits=False):
+def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
     """
     Evaluate a trained model and report performance metrics.
     
@@ -1735,12 +1728,35 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, st
         num_episodes: Number of episodes to evaluate
         visualize: Whether to visualize the evaluation
         verbose: Whether to print detailed output
-        strict_limits: Legacy parameter, no longer needed with JointLimitedBox
         
     Returns:
         Dictionary of evaluation metrics
     """
     print(f"\nEvaluating model: {model_path}")
+    
+    # Check for model file existence and handle extensions
+    if not os.path.exists(model_path):
+        # Try adding .zip extension (standard format)
+        if os.path.exists(model_path + '.zip'):
+            model_path = model_path + '.zip'
+            print(f"Using model file with .zip extension: {model_path}")
+        # Try adding .pt extension (DirectML format)
+        elif os.path.exists(model_path + '.pt'):
+            model_path = model_path + '.pt'
+            print(f"Using model file with .pt extension: {model_path}")
+        # If nothing exists, try removing extensions
+        elif model_path.endswith('.zip') and os.path.exists(model_path[:-4]):
+            model_path = model_path[:-4]
+            print(f"Using model file without extension: {model_path}")
+        elif model_path.endswith('.pt') and os.path.exists(model_path[:-3]):
+            model_path = model_path[:-3]
+            print(f"Using model file without extension: {model_path}")
+        else:
+            print(f"ERROR: Model file not found at {model_path}")
+            # Log this to the error file
+            with open("error_log.txt", "w") as f:
+                f.write(f"FileNotFoundError: [Errno 2] No such file or directory: '{model_path}'")
+            return None
     
     # Load workspace data if not already loaded
     if _WORKSPACE_POSITIONS is None:
@@ -1753,27 +1769,272 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, st
         verbose=verbose
     )
     
-    # Wrap with joint limit enforcer if requested
-    if strict_limits:
-        env = JointLimitEnforcingEnv(env)
+    # Check if it's a DirectML model
+    is_directml_model = 'directml' in model_path.lower() or model_path.endswith('.pt')
     
-    # Wrap in VecEnv as required by Stable-Baselines3
-    vec_env = DummyVecEnv([lambda: env])
-    
-    # Check if VecNormalize statistics are available
-    vec_normalize_path = model_path.replace("final_model", "vec_normalize_stats")
-    if os.path.exists(vec_normalize_path):
-        # Load with normalization
-        vec_env = VecNormalize.load(vec_normalize_path, vec_env)
-        vec_env.training = False  # Don't update normalization statistics during evaluation
-        vec_env.norm_reward = False  # Don't normalize rewards during evaluation
-        print("Loaded normalization statistics")
+    if is_directml_model:
+        print("Detected DirectML model. Using DirectML-compatible loading...")
+        try:
+            # Create a custom implementation to avoid DirectML dependency issues
+            class CustomDirectMLModel:
+                """
+                Custom implementation of a DirectML model that matches the architecture
+                of the trained model and provides compatible predict method.
+                """
+                
+                def __init__(self, observation_space, action_space, device="cpu"):
+                    """Initialize the model with the right observation and action spaces"""
+                    self.device = device
+                    self.observation_space = observation_space
+                    self.action_space = action_space
+                    
+                    # Initialize networks with structure matching loaded model
+                    self._init_networks()
+                
+                def predict(self, observation, deterministic=True):
+                    """
+                    Get action predictions from the model, compatible with SB3 interface.
+                    
+                    Args:
+                        observation: Environment observation
+                        deterministic: Whether to use deterministic actions
+                        
+                    Returns:
+                        action: Action to take
+                        _: Placeholder for state (None)
+                    """
+                    with torch.no_grad():
+                        # Convert to tensor if it's a numpy array
+                        if isinstance(observation, np.ndarray):
+                            observation = torch.FloatTensor(observation).to(self.device)
+                            if observation.dim() == 1:
+                                observation = observation.unsqueeze(0)
+                        
+                        # Forward pass through each component separately with debugging
+                        features = self.feature_extractor(observation)
+                        
+                        # First layer of shared trunk
+                        shared_features = self.shared_trunk_linear1(features)
+                        shared_features = self.shared_trunk_norm(shared_features)
+                        shared_features = torch.tanh(shared_features)
+                        
+                        # Second layer of shared trunk
+                        shared_features = self.shared_trunk_linear2(shared_features)
+                        
+                        # Get action mean and std
+                        action_mean = self.action_mean(shared_features)
+                        
+                        if deterministic:
+                            action = action_mean
+                        else:
+                            action_log_std = self.action_log_std(shared_features)
+                            action_std = torch.exp(action_log_std)
+                            normal = torch.distributions.Normal(action_mean, action_std)
+                            action = normal.sample()
+                        
+                        # Convert to numpy
+                        action_np = action.cpu().numpy().flatten()
+                        return action_np, None
+                
+                def _init_networks(self):
+                    """Initialize the model architecture to match the loaded weights"""
+                    import torch.nn as nn
+                    
+                    # Feature extractor with 128 dimensions
+                    self.feature_extractor = nn.Sequential(
+                        nn.Linear(self.observation_space.shape[0], 128),  # 0
+                        nn.LayerNorm(128),                               # 1
+                        nn.Tanh(),                                       # 2
+                        nn.Linear(128, 128),                             # 3
+                        nn.LayerNorm(128),                               # 4
+                        nn.Tanh(),                                       # 5
+                        nn.Linear(128, 128)                              # 6
+                    )
+                    
+                    # Shared trunk components broken down to avoid dimension mismatch
+                    self.shared_trunk_linear1 = nn.Linear(128, 128)      # 0
+                    self.shared_trunk_norm = nn.LayerNorm(128)           # 1
+                    # Tanh is applied directly in forward pass
+                    self.shared_trunk_linear2 = nn.Linear(128, 256)      # 3
+                    
+                    # Action output layers
+                    self.action_mean = nn.Linear(256, self.action_space.shape[0])
+                    self.action_log_std = nn.Linear(256, self.action_space.shape[0])
+                    
+                    # Value head
+                    self.value_head = nn.Sequential(
+                        nn.Linear(256, 128),                             # 0
+                        nn.Tanh(),                                       # 1
+                        nn.Linear(128, 1)                                # 2
+                    )
+                    
+                    # Constants from the original model
+                    self.action_scale = torch.tensor(1.0)
+                    self.log_2pi = torch.log(torch.tensor(2.0 * np.pi))
+                    self.sqrt_2 = torch.sqrt(torch.tensor(2.0))
+                    self.eps = torch.tensor(1e-8)
+                    
+                    # Move to device if specified
+                    self.to(self.device)
+                    
+                def to(self, device):
+                    """Move the model to the specified device"""
+                    # Convert string to device if needed
+                    if isinstance(device, str):
+                        device = torch.device(device)
+                    
+                    self.device = device
+                    self.feature_extractor = self.feature_extractor.to(device)
+                    self.shared_trunk_linear1 = self.shared_trunk_linear1.to(device)
+                    self.shared_trunk_norm = self.shared_trunk_norm.to(device)
+                    self.shared_trunk_linear2 = self.shared_trunk_linear2.to(device)
+                    self.action_mean = self.action_mean.to(device)
+                    self.action_log_std = self.action_log_std.to(device)
+                    self.value_head = self.value_head.to(device)
+                    
+                    # Move constants to device too
+                    self.action_scale = self.action_scale.to(device)
+                    self.log_2pi = self.log_2pi.to(device)
+                    self.sqrt_2 = self.sqrt_2.to(device)
+                    self.eps = self.eps.to(device)
+                    
+                    return self
+                    
+                def load(self, path):
+                    """Load parameters from a saved model file"""
+                    print(f"Loading model from {path}...")
+                    try:
+                        # Use 'cpu' string to avoid DirectML issues
+                        checkpoint = torch.load(path, map_location='cpu')
+                        
+                        # Load policy parameters
+                        if 'policy_state_dict' in checkpoint:
+                            state_dict = checkpoint['policy_state_dict']
+                            
+                            print("Found policy state dict with keys:", list(state_dict.keys()))
+                            
+                            # Load constants first if they exist
+                            if 'action_scale' in state_dict and isinstance(state_dict['action_scale'], torch.Tensor):
+                                self.action_scale = state_dict['action_scale'].to(self.device)
+                            if 'log_2pi' in state_dict and isinstance(state_dict['log_2pi'], torch.Tensor):
+                                self.log_2pi = state_dict['log_2pi'].to(self.device)
+                            if 'sqrt_2' in state_dict and isinstance(state_dict['sqrt_2'], torch.Tensor):
+                                self.sqrt_2 = state_dict['sqrt_2'].to(self.device)
+                            if 'eps' in state_dict and isinstance(state_dict['eps'], torch.Tensor):
+                                self.eps = state_dict['eps'].to(self.device)
+                            
+                            # Define direct mappings for network parameters
+                            direct_mappings = {
+                                # Feature extractor
+                                'feature_extractor.0.weight': self.feature_extractor[0].weight,
+                                'feature_extractor.0.bias': self.feature_extractor[0].bias,
+                                'feature_extractor.1.weight': self.feature_extractor[1].weight,
+                                'feature_extractor.1.bias': self.feature_extractor[1].bias,
+                                'feature_extractor.3.weight': self.feature_extractor[3].weight,
+                                'feature_extractor.3.bias': self.feature_extractor[3].bias,
+                                'feature_extractor.4.weight': self.feature_extractor[4].weight,
+                                'feature_extractor.4.bias': self.feature_extractor[4].bias,
+                                'feature_extractor.6.weight': self.feature_extractor[6].weight,
+                                'feature_extractor.6.bias': self.feature_extractor[6].bias,
+                                
+                                # Shared trunk (broken down into individual components)
+                                'shared_trunk.0.weight': self.shared_trunk_linear1.weight,
+                                'shared_trunk.0.bias': self.shared_trunk_linear1.bias,
+                                'shared_trunk.1.weight': self.shared_trunk_norm.weight,
+                                'shared_trunk.1.bias': self.shared_trunk_norm.bias,
+                                'shared_trunk.3.weight': self.shared_trunk_linear2.weight,
+                                'shared_trunk.3.bias': self.shared_trunk_linear2.bias,
+                                
+                                # Action output
+                                'action_mean.weight': self.action_mean.weight,
+                                'action_mean.bias': self.action_mean.bias,
+                                'action_log_std.weight': self.action_log_std.weight,
+                                'action_log_std.bias': self.action_log_std.bias,
+                                
+                                # Value head
+                                'value_head.0.weight': self.value_head[0].weight,
+                                'value_head.0.bias': self.value_head[0].bias,
+                                'value_head.2.weight': self.value_head[2].weight,
+                                'value_head.2.bias': self.value_head[2].bias,
+                            }
+                            
+                            # Load parameters with direct mapping
+                            loaded_params = 0
+                            for name_in_dict, param_in_model in direct_mappings.items():
+                                if name_in_dict in state_dict:
+                                    dict_param = state_dict[name_in_dict]
+                                    # Check if dimensions match
+                                    if dict_param.shape == param_in_model.shape:
+                                        param_in_model.data.copy_(dict_param)
+                                        loaded_params += 1
+                                    else:
+                                        print(f"Shape mismatch for {name_in_dict}: expected {param_in_model.shape}, got {dict_param.shape}")
+                                else:
+                                    print(f"Parameter {name_in_dict} not found in state dict")
+                            
+                            print(f"Successfully loaded {loaded_params} parameters")
+                            print("Model loaded successfully!")
+                            
+                        else:
+                            print("ERROR: No policy state dict found in checkpoint")
+                            
+                    except Exception as e:
+                        import traceback
+                        print(f"Error loading model parameters: {e}")
+                        with open("error_log.txt", "w") as f:
+                            f.write(f"Exception: {str(e)}\n")
+                            f.write(traceback.format_exc())
+                        raise e
+            
+            # Create model instance with CPU
+            model = CustomDirectMLModel(
+                observation_space=env.observation_space,
+                action_space=env.action_space,
+                device="cuda" if torch.cuda.is_available() else "cpu"
+            )
+            
+            # Load the model
+            model.load(model_path)
+            print(f"Custom DirectML model loaded from {model_path}")
+                
+        except Exception as e:
+            print(f"Error loading DirectML model: {e}")
+            # Log error to file
+            with open("error_log.txt", "w") as f:
+                f.write(f"Exception: {str(e)}\n")
+                import traceback
+                f.write(traceback.format_exc())
+            return None
+            
     else:
-        print("No normalization statistics found, evaluating without normalization")
-    
-    # Load the model
-    model = PPO.load(model_path, env=vec_env)
-    print(f"Model loaded from {model_path}")
+        # Standard Stable-Baselines3 model loading
+        print("Using standard Stable-Baselines3 model loading...")
+        # Wrap in VecEnv as required by Stable-Baselines3
+        vec_env = DummyVecEnv([lambda: env])
+        
+        # Check if VecNormalize statistics are available
+        vec_normalize_path = model_path.replace("final_model", "vec_normalize_stats")
+        if os.path.exists(vec_normalize_path):
+            # Load with normalization
+            vec_env = VecNormalize.load(vec_normalize_path, vec_env)
+            vec_env.training = False  # Don't update normalization statistics during evaluation
+            vec_env.norm_reward = False  # Don't normalize rewards during evaluation
+            print("Loaded normalization statistics")
+        else:
+            print("No normalization statistics found, evaluating without normalization")
+        
+        try:
+            # Load the model
+            model = PPO.load(model_path, env=vec_env)
+            print(f"Model loaded from {model_path}")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            # Log error to file
+            with open("error_log.txt", "w") as f:
+                f.write(f"Exception: {str(e)}\n")
+                import traceback
+                f.write(traceback.format_exc())
+            return None
     
     # Initialize metrics
     metrics = {
@@ -1800,15 +2061,26 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, st
         # Reset environment with API compatibility handling
         try:
             # Try new gymnasium API (returns obs, info)
-            obs, info = vec_env.reset()
-            initial_distance = info[0].get('initial_distance', 0.0)
+            if is_directml_model:
+                # DirectML version
+                obs, info = env.reset()
+                initial_distance = info.get('initial_distance', 0.0)
+            else:
+                # Stable-Baselines3 version with VecEnv
+                obs, info = vec_env.reset()
+                initial_distance = info[0].get('initial_distance', 0.0)
         except ValueError:
             # Fall back to older gym API (returns only obs)
-            obs = vec_env.reset()
+            obs = env.reset() if is_directml_model else vec_env.reset()
             # Estimate initial distance as best we can
             state = env.robot._get_state()
             ee_position = state[12:15]
-            initial_distance = np.linalg.norm(ee_position - env.target_position)
+            if hasattr(env, '_target_position'):
+                initial_distance = np.linalg.norm(ee_position - env._target_position)
+            elif hasattr(env, 'target_position'):
+                initial_distance = np.linalg.norm(ee_position - env.target_position)
+            else:
+                initial_distance = 0.0
         
         if verbose:
             print(f"Initial distance to target: {initial_distance*100:.2f}cm")
@@ -1824,18 +2096,27 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, st
             # Get action from model
             action, _ = model.predict(obs, deterministic=True)
             
-            # Actions are now inherently limited by the JointLimitedBox space
-            # No need for additional limit enforcement
-            
             # Step environment with the action
-            obs, reward, done, info = vec_env.step(action)
+            if is_directml_model:
+                # DirectML version with newer Gymnasium API
+                obs, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+                reward_value = reward
+            else:
+                # Stable-Baselines3 version with VecEnv
+                obs, reward, done, info = vec_env.step(action)
+                reward_value = reward[0]
             
             # Update metrics
-            ep_reward += reward[0]
+            ep_reward += reward_value
             ep_steps += 1
             
             try:
-                current_distance = info[0].get('distance', 0.0)
+                # Extract distance from info
+                if is_directml_model:
+                    current_distance = info.get('distance', 0.0)
+                else:
+                    current_distance = info[0].get('distance', 0.0)
             except (IndexError, TypeError):
                 # Fallback if info is not structured as expected
                 current_distance = best_distance
@@ -1849,7 +2130,10 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, st
         
         # Calculate success
         try:
-            success = info[0].get('target_reached', False)
+            if is_directml_model:
+                success = info.get('success', False)
+            else:
+                success = info[0].get('target_reached', False)
         except (IndexError, TypeError):
             success = False
         
@@ -1890,11 +2174,14 @@ def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True, st
     print(f"Best Distance: {metrics['min_distance']*100:.2f}cm")
     
     # Close environment
-    vec_env.close()
+    if not is_directml_model:
+        vec_env.close()
+    else:
+        env.close()
     
     return metrics
 
-def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False, strict_limits=False):
+def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
     """
     Run a predefined evaluation sequence to showcase model capabilities.
     
@@ -1902,7 +2189,6 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False, strict
         model_path: Path to the saved model
         viz_speed: Speed of visualization (seconds between steps)
         save_video: Whether to save a video of the evaluation
-        strict_limits: Legacy parameter, no longer needed with JointLimitedBox
     """
     print(f"Running evaluation sequence for model: {model_path}")
     
@@ -1915,10 +2201,6 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False, strict
         viz_speed=viz_speed,
         verbose=True
     )
-    
-    # Wrap with joint limit enforcer if requested
-    if strict_limits:
-        env = JointLimitEnforcingEnv(env)
     
     # Wrap in VecEnv
     vec_env = DummyVecEnv([lambda: env])
@@ -1935,17 +2217,21 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False, strict
     
     # Setup video recording if requested
     if save_video:
-        import imageio
-        frames = []
-        
-        # Set higher resolution for video
-        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-        p.resetDebugVisualizerCamera(
-            cameraDistance=1.2,
-            cameraYaw=120,
-            cameraPitch=-20,
-            cameraTargetPosition=[0, 0, 0.3]
-        )
+        try:
+            import imageio
+            frames = []
+            
+            # Set higher resolution for video
+            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+            p.resetDebugVisualizerCamera(
+                cameraDistance=1.2,
+                cameraYaw=120,
+                cameraPitch=-20,
+                cameraTargetPosition=[0, 0, 0.3]
+            )
+        except ImportError:
+            print("Warning: imageio not found, video recording will be disabled")
+            save_video = False
     
     # Run demo sequence (5 episodes)
     for ep in range(5):
@@ -2019,13 +2305,70 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False, strict
     
     # Save video if requested
     if save_video:
-        from datetime import datetime
-        video_path = f"./evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        imageio.mimsave(video_path, frames, fps=30)
-        print(f"Video saved to {video_path}")
+        try:
+            from datetime import datetime
+            video_path = f"./evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            imageio.mimsave(video_path, frames, fps=30)
+            print(f"Video saved to {video_path}")
+        except Exception as e:
+            print(f"Error saving video: {e}")
     
     # Close environment
     vec_env.close()
+
+class JointLimitMonitorCallback(BaseCallback):
+    """
+    Callback to monitor whether actions respect joint limits during training.
+    This is essential for ensuring the learning process respects physical constraints.
+    """
+    def __init__(self, log_interval=5000, verbose=0):
+        super(JointLimitMonitorCallback, self).__init__(verbose)
+        self.log_interval = log_interval
+        self.violations = 0
+        self.total_checked = 0
+        self.last_log_time = time.time()
+        
+    def _init_callback(self):
+        # Initialize counters
+        self.violations = 0
+        self.total_checked = 0
+        self.last_log_time = time.time()
+    
+    def _on_step(self):
+        """Check if latest actions respect joint limits."""
+        if self.n_calls % self.log_interval == 0 and hasattr(self.model, 'last_obs'):
+            # Get current actions from the policy
+            actions, _ = self.model.predict(self.model.last_obs, deterministic=False)
+            
+            # Check if actions would result in joint positions within limits
+            env_violations = 0
+            
+            for env_idx, action in enumerate(actions):
+                # Get the environment and check if the unnormalized action respects limits
+                env = self.training_env.envs[env_idx]
+                if hasattr(env, 'action_space') and isinstance(env.action_space, JointLimitedBox):
+                    joint_positions = env.action_space.unnormalize_action(action)
+                    
+                    # Check each joint against its limits
+                    for joint_idx, pos in enumerate(joint_positions):
+                        if joint_idx in env.action_space.joint_limits:
+                            limit_low, limit_high = env.action_space.joint_limits[joint_idx]
+                            if pos < limit_low or pos > limit_high:
+                                env_violations += 1
+                                if self.verbose > 1:  # Only show detailed violations at higher verbosity
+                                    print(f"Joint limit violation: Joint {joint_idx} position {pos:.4f} outside limits [{limit_low:.4f}, {limit_high:.4f}]")
+            
+            self.violations += env_violations
+            self.total_checked += len(actions)
+            
+            # Log at regular intervals
+            if self.verbose > 0 and self.total_checked > 0:
+                violation_rate = (self.violations / self.total_checked) * 100
+                elapsed_time = time.time() - self.last_log_time
+                print(f"Joint limit check: {violation_rate:.2f}% violations detected ({self.violations}/{self.total_checked}) in {elapsed_time:.1f}s")
+                self.last_log_time = time.time()
+        
+        return True
 
 if __name__ == "__main__":
     main() 
