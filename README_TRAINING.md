@@ -8,72 +8,37 @@ This document describes the consolidated training approach for the FANUC robot p
 2. **Simplified Reward Function**: Designed a more stable reward function with fewer hand-tuned components.
 3. **Standardized Model Architecture**: Implemented a simpler, more efficient neural network architecture.
 4. **Improved Memory Management**: Added explicit garbage collection and optimized tensor operations.
-5. **Hardware Agnostic**: Made the code run efficiently across different hardware platforms (CPU, CUDA, DirectML).
+5. **AMD GPU Exclusive**: Optimized exclusively for AMD GPUs through DirectML with specific optimizations for RX 6700S.
 6. **Consistent Joint Limit Handling**: Standardized on the JointLimitedBox action space.
 7. **Better Evaluation Metrics**: Enhanced monitoring and evaluation of training progress.
 8. **Unified Command-Line Interface**: Created a wrapper script (`train_robot.py`) for easier usage.
-9. **AMD GPU Acceleration**: Added support for AMD GPUs through DirectML with optimizations for RX 6700S.
 
 ## Usage
 
 The main entry point for training is now `train_robot.py`, which provides a unified interface for all training-related tasks:
 
 ```bash
-# Start training from scratch (AMD GPU acceleration)
-python train_robot.py --steps 1000000 --use-directml
+# Start training from scratch (AMD GPU acceleration is always used)
+python train_robot.py --steps 1000000
 
-# Continue training from a saved model (AMD GPU acceleration)
-python train_robot.py --load ./models/ppo_20230815_123456/final_model --steps 500000 --use-directml
+# Continue training from a saved model
+python train_robot.py --load ./models/directml_20230815_123456/final_model --steps 500000
 
 # Evaluate a trained model
-python train_robot.py --eval-only --load ./models/ppo_20230815_123456/final_model --eval-episodes 20
+python train_robot.py --eval-only --load ./models/directml_20230815_123456/final_model --eval-episodes 20
 
 # Run a demonstration with a trained model
-python train_robot.py --demo --load ./models/ppo_20230815_123456/final_model --viz-speed 0.05
+python train_robot.py --demo --load ./models/directml_20230815_123456/final_model --viz-speed 0.05
 ```
 
 ### DirectML Models
 
-Models trained with DirectML use a different format and should be run using the same GPU acceleration. The script will automatically detect DirectML-trained models (those with 'directml' in their path) and enable DirectML mode. 
+All models use DirectML format, which is optimized for AMD GPUs. The system automatically detects and loads models with the appropriate settings.
 
 If you encounter issues with model compatibility, make sure to:
-1. Use `--use-directml` flag when loading DirectML-trained models
-2. Check that the model was saved with the correct extension (usually `.pt`)
-3. Verify that the DirectML package is properly installed (`pip install torch-directml`)
-
-### Known Limitations
-
-There are some compatibility issues between DirectML-trained models and the standard implementation. To work around these limitations:
-
-1. **Device Compatibility Issue**: There's a known issue with loading DirectML models related to device handling. The error typically looks like:
-   ```
-   TypeError: '>=' not supported between instances of 'torch.device' and 'int'
-   ```
-   
-   This is caused by a mismatch in how the torch_directml device is handled during model loading. To work around this issue, you need to:
-   
-   ```python
-   # Method 1: Train a new model with the latest version of the code
-   python train_robot.py --steps 50000 --use-directml
-   
-   # Method 2: Use the standard mode for both training and evaluation
-   # This avoids using torch_directml's device object directly
-   python train_robot.py --demo --use-directml --load ./models/ppo_standard_model/final_model
-   ```
-
-2. **Argument Parsing Conflicts**: The demo scripts currently experience argument parsing conflicts. Please use one of these workarounds:
-
-   ```bash
-   # METHOD 1: Load DirectML models using the standard approach with --use-directml flag
-   python train_robot.py --demo --load ./models/ppo_directml_TIMESTAMP/final_model.pt --use-directml
-   
-   # METHOD 2: Use interactive mode to avoid argument conflicts
-   python -c "from train_robot import run_directml_demo; run_directml_demo('./models/ppo_directml_TIMESTAMP/final_model.pt')"
-   ```
-
-3. **Model Naming Convention**: Make sure your DirectML models contain 'directml' in their path for automatic detection.
-
-4. **Consistent Hardware**: Train and evaluate DirectML models on the same hardware (AMD GPU).
+1. Verify the model was saved with the correct extension (usually `.pt`)
+2. Ensure that the DirectML package is properly installed (`pip install torch-directml`)
+3. Check that you're using a compatible AMD GPU
 
 ## Training Parameters
 
@@ -90,15 +55,13 @@ There are some compatibility issues between DirectML-trained models and the stan
 | `--viz-speed` | Visualization speed in seconds | 0.0 |
 | `--verbose` | Enable verbose output | False |
 | `--seed` | Random seed for reproducibility | None |
-| `--use-cuda` | Use CUDA if available | False |
-| `--use-directml` | Use DirectML for AMD GPU acceleration | False |
 | `--parallel` | Number of parallel environments | 1 |
 | `--parallel-viz` | Use parallel visualization | False |
 | `--learning-rate` | Learning rate | 3e-4 |
 
-## AMD GPU Acceleration Setup
+## AMD GPU Acceleration (Required)
 
-The implementation is designed to use AMD GPU acceleration through DirectML, specifically optimized for the RX 6700S GPU. 
+The implementation requires AMD GPU acceleration through DirectML, specifically optimized for the RX 6700S GPU. 
 
 ### Installation
 
@@ -117,47 +80,24 @@ The implementation is designed to use AMD GPU acceleration through DirectML, spe
    python -c "import torch_directml; print(f'Available devices: {torch_directml.device_count()}')" 
    ```
 
-### DirectML Models Compatibility
-
-When working with DirectML models, there are some important compatibility considerations:
-
-1. **Different Model Format**: DirectML models use a different serialization format that's incompatible with standard models. Errors when loading:
-   ```
-   AssertionError: No data found in the saved file
-   ```
-
-2. **Device Handling Issues**: DirectML device objects may cause errors when loading models:
-   ```
-   TypeError: '>=' not supported between instances of 'torch.device' and 'int'
-   ```
-
 ### DirectML Workflow
 
-To avoid compatibility issues, follow this workflow:
+All training, evaluation, and demonstration use DirectML acceleration:
 
-1. **Training with DirectML**:
+1. **Training**:
    ```bash
-   # Always use the main script with --use-directml flag
-   python train_robot.py --steps 50000 --use-directml
+   python train_robot.py --steps 50000
    ```
 
-2. **Evaluating DirectML Models**:
+2. **Evaluating Models**:
    ```bash
-   # IMPORTANT: Always include --use-directml with DirectML models
-   python train_robot.py --eval-only --use-directml --load ./models/ppo_directml_TIMESTAMP/final_model.pt
+   python train_robot.py --eval-only --load ./models/directml_TIMESTAMP/final_model.pt
    ```
 
-3. **Demonstrating DirectML Models**:
+3. **Demonstrating Models**:
    ```bash
-   # IMPORTANT: Always include --use-directml with DirectML models
-   python train_robot.py --demo --use-directml --load ./models/ppo_directml_TIMESTAMP/final_model.pt
+   python train_robot.py --demo --load ./models/directml_TIMESTAMP/final_model.pt
    ```
-
-### Required Flags
-
-For DirectML models, ALWAYS include these flags:
-- `--use-directml`: This is essential for DirectML model compatibility
-- One of these task flags: `--steps N`, `--eval-only`, or `--demo`
 
 ### Successfully Tested Configurations
 
@@ -165,118 +105,24 @@ The following configurations have been tested and confirmed working:
 
 | Task | Command | Notes |
 |------|---------|-------|
-| Training | `python train_robot.py --steps 50000 --use-directml` | Creates a model in `./models/ppo_directml_TIMESTAMP/` |
-| Training (cont.) | `python train_robot.py --steps 20000 --use-directml --load ./models/ppo_directml_TIMESTAMP/final_model.pt` | Continues training from existing model |
-| Evaluation | `python train_robot.py --eval-only --use-directml --load ./models/ppo_directml_TIMESTAMP/final_model.pt` | Evaluates a DirectML model |
-| Demo | `python train_robot.py --demo --use-directml --load ./models/ppo_directml_TIMESTAMP/final_model.pt` | Demonstrates a DirectML model |
+| Training | `python train_robot.py --steps 50000` | Creates a model in `./models/directml_TIMESTAMP/` |
+| Training (cont.) | `python train_robot.py --steps 20000 --load ./models/directml_TIMESTAMP/final_model.pt` | Continues training from existing model |
+| Evaluation | `python train_robot.py --eval-only --load ./models/directml_TIMESTAMP/final_model.pt` | Evaluates a model |
+| Demo | `python train_robot.py --demo --load ./models/directml_TIMESTAMP/final_model.pt` | Demonstrates a model |
 
 ### Best Practices
 
-1. **Always use the `--use-directml` flag** with DirectML models for both training and evaluation
-2. **Keep consistent workflow** - train, evaluate, and demo all with the same implementation
-3. **Check model naming** - DirectML models should contain "directml" in their path for automatic detection
-4. **Manage resources** - For larger models, adjust batch size and number of parallel environments
-5. **Save frequently** - Use a reasonable `--save-freq` value to prevent loss of progress
+1. **Keep consistent workflow** - train, evaluate, and demo all with the same implementation
+2. **Manage resources** - For larger models, adjust batch size and number of parallel environments
+3. **Save frequently** - Use a reasonable `--save-freq` value to prevent loss of progress
 
 ### Troubleshooting
 
-If you encounter problems with DirectML models:
+If you encounter problems with models:
 
-1. **"No data found in saved file"**: You're trying to load a DirectML model without using `--use-directml`
-2. **"'>=' not supported between instances"**: There's a device compatibility issue - use a consistently trained model
-3. **Memory errors**: Reduce batch size or number of parallel environments
-4. **Performance issues**: Check GPU utilization, adjust batch size, and ensure no CPU fallbacks
-
-### Usage Examples
-
-```bash
-# Training a new DirectML model
-python train_robot.py --steps 50000 --use-directml
-
-# Evaluating a DirectML model
-python train_robot.py --eval-only --use-directml --load ./models/ppo_directml_TIMESTAMP/final_model.pt
-
-# Demonstrating a DirectML model
-python train_robot.py --demo --use-directml --load ./models/ppo_directml_TIMESTAMP/final_model.pt --viz-speed 0.02
-```
-
-### Usage
-
-There are three equivalent flags you can use to enable AMD GPU acceleration:
-- `--use-directml`: The standard flag for enabling DirectML acceleration
-- `--use-gpu`: Alternative flag for AMD GPU acceleration
-- `--use-amd`: Alternative flag for AMD GPU acceleration
-
-Example:
-```bash
-python train_robot.py --steps 50000 --use-directml --parallel 2
-```
-
-### Performance Considerations
-
-For optimal performance with AMD GPUs:
-
-1. **Batch Size**: Larger batch sizes (512-1024) often perform better on AMD GPUs compared to smaller ones
-2. **Parallel Environments**: Using 2-4 parallel environments typically gives the best balance
-3. **Memory Management**: The DirectML implementation has optimized memory management for AMD GPUs
-4. **Reduced Precision**: For further speed improvements, you can use FP16 precision (though this is not enabled by default for stability reasons)
-
-### Troubleshooting DirectML
-
-If you encounter issues with DirectML:
-
-1. Make sure you have the latest AMD drivers installed
-2. Verify that `torch-directml` is properly installed and can detect your GPU
-3. Check system memory - DirectML requires sufficient system RAM
-4. If you encounter "out of memory" errors, reduce the batch size or number of parallel environments
-5. For model compatibility issues, use the dedicated DirectML approaches mentioned above
-
-### Workarounds for DirectML Demo Issues
-
-If you're having trouble demonstrating DirectML models due to argument parsing conflicts, use one of these approaches:
-
-1. **Interactive Python Session**:
-   ```python
-   # Start Python interpreter
-   >>> from train_robot import run_directml_demo
-   >>> run_directml_demo("./models/ppo_directml_20250326_202801/final_model.pt", viz_speed=0.02)
-   ```
-
-2. **One-liner Command**:
-   ```bash
-   python -c "import sys; sys.path.append('.'); from train_robot import run_directml_demo; run_directml_demo('./models/ppo_directml_20250326_202801/final_model.pt')"
-   ```
-
-3. **Python Script**:
-   Create a file named `show_model.py` with the following content:
-   ```python
-   #!/usr/bin/env python3
-   import sys
-   from train_robot import run_directml_demo
-   
-   if len(sys.argv) < 2:
-       print("Usage: python show_model.py <model_path> [viz_speed]")
-       sys.exit(1)
-       
-   model_path = sys.argv[1]
-   viz_speed = float(sys.argv[2]) if len(sys.argv) > 2 else 0.02
-   
-   run_directml_demo(model_path, viz_speed)
-   ```
-   
-   Then run it:
-   ```bash
-   python show_model.py ./models/ppo_directml_20250326_202801/final_model.pt 0.02
-   ```
-
-### DirectML Performance Results
-
-Training the same model on AMD RX 6700S vs CPU shows significant performance improvements:
-
-| Hardware | Batch Size | Steps/second | Training Time (1M steps) |
-|----------|------------|--------------|--------------------------|
-| AMD RX 6700S | 256 | ~450 | ~0.6 hours |
-| CPU (16 threads) | 64 | ~120 | ~2.3 hours |
+1. **Memory errors**: Reduce batch size or number of parallel environments
+2. **Performance issues**: Check GPU utilization and adjust batch size
+3. **Model loading errors**: Ensure the model path is correct and the file exists
 
 ## Architecture Details
 
@@ -287,11 +133,11 @@ The `train_robot.py` script serves as a wrapper around the core implementation i
 1. Sets up the correct Python path for module imports
 2. Handles command-line arguments including the convenient `--demo` flag
 3. Provides friendly error handling and a unified interface
-4. Configures DirectML for AMD GPU acceleration when requested
+4. Automatically configures DirectML for AMD GPU acceleration
 
 ### AMD GPU Acceleration
 
-The implementation has been optimized to work with AMD GPUs through DirectML, with specific optimizations for the RX 6700S GPU. Using the `--use-directml` flag enables these optimizations:
+The implementation has been optimized to work with AMD GPUs through DirectML, with specific optimizations for the RX 6700S GPU:
 
 1. **DirectML Configuration**: Sets up optimal performance parameters for AMD GPUs
 2. **Batch Size Optimization**: Uses larger batch sizes with fewer epochs for better AMD GPU utilization
@@ -361,27 +207,15 @@ This mode is perfect for presentations or for quickly testing a model's performa
 
 # FANUC Robot Training - README
 
-This document provides instructions for training and using robot control policies with both standard CPU training and AMD GPU acceleration using DirectML.
+This document provides instructions for training and using robot control policies with AMD GPU acceleration using DirectML.
 
 ## Training Environment Setup
 
 The training environment uses PyBullet to simulate the FANUC LR-Mate robot for positioning tasks.
 
-### Standard Training Setup
+### DirectML Setup (Required)
 
-1. Install standard dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. Run training with default parameters:
-   ```bash
-   python train_robot.py --steps 1000000 --parallel 16
-   ```
-
-### AMD GPU Acceleration Setup
-
-Our implementation supports AMD GPU acceleration through DirectML, specifically optimized for the RX 6700S GPU.
+Our implementation requires AMD GPU acceleration through DirectML, specifically optimized for the RX 6700S GPU.
 
 1. Install DirectML package:
    ```bash
@@ -395,98 +229,69 @@ Our implementation supports AMD GPU acceleration through DirectML, specifically 
    print(f"DirectML device: {torch_directml.device()}")
    ```
 
-3. Run training with AMD GPU acceleration:
+3. Run training:
    ```bash
-   python train_robot.py --steps 1000000 --parallel 16 --use-directml
+   python train_robot.py --steps 1000000 --parallel 16
    ```
-
-Three equivalent flags can be used to enable AMD GPU acceleration:
-- `--use-directml`
-- `--use-gpu`
-- `--use-amd`
 
 ## Running Trained Models
 
-We provide a unified script for running both standard and DirectML-trained models:
+We provide a unified script for running trained models:
 
 ```bash
 python run_model.py --model ./models/your_model_path
 ```
 
-The script automatically detects whether the model is a DirectML model based on the filename (if it contains "directml"). You can override detection with the following flags:
-
-- `--use-directml` (or `--use-gpu` or `--use-amd`): Force DirectML acceleration
+Available options:
 - `--no-gui`: Run without visualization
 - `--episodes N`: Run N demonstration episodes (default: 5)
 - `--speed X`: Set visualization speed (default: 0.02)
 
-Example commands:
-
-```bash
-# Run a standard model
-python run_model.py --model ./models/ppo_standard/final_model
-
-# Run a DirectML model with visualization
-python run_model.py --model ./models/ppo_directml/final_model --episodes 10
-
-# Force DirectML acceleration for any model
-python run_model.py --model ./models/any_model/final_model --use-directml
-```
-
 ## DirectML Workflow
 
-When training or evaluating models with DirectML, make sure to always use the `--use-directml` flag to properly prepare the environment and models for DirectML acceleration.
+All training and evaluation use DirectML acceleration for AMD GPUs.
 
-### Training with DirectML
-
-```bash
-python train_robot.py --use-directml --algo ppo --n-timesteps 100000 --reward-scaler 0.01 --exp-name ppo_directml
-```
-
-### Evaluating DirectML Models
+### Training
 
 ```bash
-python train_robot.py --eval --load ./models/ppo_directml/final_model --use-directml
+python train_robot.py --algo ppo --n-timesteps 100000 --reward-scaler 0.01 --exp-name ppo_directml
 ```
 
-### Demonstrating DirectML Models
+### Evaluating Models
 
 ```bash
-python run_model.py --model ./models/ppo_directml/final_model --use-directml
+python train_robot.py --eval --load ./models/ppo_directml/final_model
 ```
 
-### Required Flags
+### Demonstrating Models
 
-Always include the `--use-directml` flag when:
-- Training a model with DirectML
-- Evaluating a model trained with DirectML
-- Demonstrating a model trained with DirectML
+```bash
+python run_model.py --model ./models/ppo_directml/final_model
+```
 
 ### Successfully Tested Configurations
 
 | Command | Description |
 |---------|-------------|
-| `python train_robot.py --demo --load ./models/ppo_directml/final_model --use-directml` | Demonstrate a DirectML model using the training script |
-| `python train_robot.py --eval --load ./models/ppo_directml/final_model --use-directml` | Evaluate a DirectML model |
-| `python train_robot.py --use-directml --algo ppo --n-timesteps 100000` | Train a model with DirectML |
+| `python train_robot.py --demo --load ./models/ppo_directml/final_model` | Demonstrate a model using the training script |
+| `python train_robot.py --eval --load ./models/ppo_directml/final_model` | Evaluate a model |
+| `python train_robot.py --algo ppo --n-timesteps 100000` | Train a model with DirectML |
 
 ### Best Practices
 
-1. When training with DirectML, set the environment variable `PYTORCH_DIRECTML_VERBOSE=1` to monitor GPU usage
-2. Always save your model with clear naming that indicates it was trained with DirectML
-3. Use consistent device placement when loading and running models
-4. Ensure you're using the most recent DirectML implementation
+1. Set the environment variable `PYTORCH_DIRECTML_VERBOSE=1` to monitor GPU usage
+2. Always save your model with clear naming for better identification
+3. Ensure you're using the most recent DirectML implementation
 
 ### Troubleshooting
 
 - If you encounter "device not found" errors, ensure DirectML is properly installed with `pip list | grep directml`
-- For model loading errors, verify you're using the `--use-directml` flag
 - For slow performance, check your VRAM usage and consider reducing batch sizes
 - If visualization is flickering, try changing the GUI delay with `--viz-speed`
 
 ## Specialized DirectML Demo Script
 
-For models with specific architectures (like our DirectML models), use the specialized demonstration script:
+A specialized demonstration script is provided:
 
 ```bash
 python directml_show.py ./models/ppo_directml/final_model
@@ -543,34 +348,34 @@ This specialized script provides better compatibility with DirectML models and m
 
 For optimal use of AMD GPUs with DirectML:
 
-1. **Batch Size**: Use larger batch sizes (256-1024) compared to CUDA for better performance
+1. **Batch Size**: Use larger batch sizes (256-1024) for better performance
 2. **Parallel Environments**: Use 16-32 parallel environments for training
 3. **Memory Management**: DirectML may use more memory, so monitor usage
 4. **Reduced Precision**: DirectML uses FP32 by default, but can benefit from reduced precision
 
 ## Hyperparameters
 
-The DirectML version uses different hyperparameters optimized for AMD GPUs:
+Optimized hyperparameters for AMD GPUs:
 
-1. **Batch Size**: 256-1024 (vs 64 for standard)
-2. **Training Epochs**: 4 (vs 10 for standard)
-3. **Memory Management**: More aggressive in DirectML version
-4. **Tensor Operations**: More batched operations in DirectML version
+1. **Batch Size**: 256-1024
+2. **Training Epochs**: 4
+3. **Memory Management**: More aggressive memory management
+4. **Tensor Operations**: More batched operations
 
-These hyperparameters are automatically selected when using the `--use-directml` flag. 
+These hyperparameters are automatically selected for optimal performance with AMD GPUs. 
 
 ## Validation and Achievement Summary
 
-After extensive troubleshooting and optimization, we have successfully:
+After extensive optimization, we have successfully:
 
 1. **Implemented DirectML compatibility** - Created a reliable workflow for training and demonstrating models with DirectML
 2. **Resolved model loading issues** - Fixed device placement and parameter mapping challenges
 3. **Created specialized tools** - Built custom scripts for DirectML model demonstration and evaluation
-4. **Achieved excellent performance** - The DirectML model consistently achieves positional accuracy of <0.2 cm
+4. **Achieved excellent performance** - Models consistently achieve positional accuracy of <0.2 cm
 
 ### Performance Metrics
 
-Based on our evaluations, the DirectML model achieves:
+Based on our evaluations, the models achieve:
 - **Average distance to target**: 0.11-0.4 cm
 - **Best distance achieved**: 0.07 cm
 - **Full step completion**: Always completes full 150 steps
@@ -586,4 +391,4 @@ Potential future improvements to the DirectML workflow include:
 
 ### Conclusion
 
-The DirectML implementation provides a viable alternative to CUDA-based training and inference, with comparable performance on the FANUC robot positioning task. The specialized tools developed for this project make it easy to train, evaluate, and demonstrate DirectML models, ensuring full compatibility with the AMD GPU architecture. 
+The implementation provides excellent performance on the FANUC robot positioning task. The specialized tools developed for this project make it easy to train, evaluate, and demonstrate models, ensuring full compatibility with the AMD GPU architecture. 

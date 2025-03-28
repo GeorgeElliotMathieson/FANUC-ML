@@ -26,10 +26,8 @@ setup(
         "seaborn>=0.11.0",
         "imageio>=2.22.0",
         "pillow>=9.0.0",
+        "torch-directml>=0.2.0.dev230426",
     ],
-    extras_require={
-        "directml": ["torch-directml>=0.2.0.dev230426"],
-    },
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",

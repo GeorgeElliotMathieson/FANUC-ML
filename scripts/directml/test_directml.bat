@@ -1,6 +1,6 @@
 @echo off
 
-REM test_directml.bat - Test a DirectML model
+REM test_directml.bat - Test a model (requires AMD GPU with DirectML)
 REM Usage: test_directml.bat [model_path] [episodes]
 
 setlocal enabledelayedexpansion
@@ -15,7 +15,7 @@ if not "%~2"=="" set EPISODES=%~2
 
 echo.
 echo ====================================================================
-echo FANUC Robot - DirectML Model Test
+echo FANUC Robot - DirectML Model Test (Requires AMD GPU)
 echo ====================================================================
 echo.
 echo Model: %MODEL%
@@ -24,5 +24,12 @@ echo.
 
 REM Run the test script from its directory
 python test_directml_model.py --model %MODEL% --episodes %EPISODES%
+if errorlevel 1 (
+    echo.
+    echo ERROR: Test failed with error code %ERRORLEVEL%
+    echo This script requires DirectML and AMD GPU support.
+    echo Make sure torch-directml is installed: pip install torch-directml
+    exit /b 1
+)
 
 endlocal 

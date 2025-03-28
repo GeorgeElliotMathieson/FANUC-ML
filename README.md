@@ -1,15 +1,15 @@
 # FANUC Robot ML Platform
 
-A comprehensive machine learning platform for reinforcement learning with FANUC robot arms, focusing on precise end-effector positioning tasks. Optimized for both CPU and AMD GPU acceleration via DirectML.
+A comprehensive machine learning platform for reinforcement learning with FANUC robot arms, focusing on precise end-effector positioning tasks. Optimized exclusively for AMD GPU acceleration via DirectML.
 
 ## Project Overview
 
-This platform provides a complete framework for applying reinforcement learning to control FANUC robot arms for positioning tasks. The system is designed with a modular architecture, clean Python package structure, and support for both standard training and AMD GPU acceleration.
+This platform provides a complete framework for applying reinforcement learning to control FANUC robot arms for positioning tasks. The system is designed with a modular architecture, clean Python package structure, and requires AMD GPU acceleration via DirectML.
 
 ### Key Features
 
 - **Reinforcement Learning**: Custom-built environments using PPO algorithm
-- **Multi-Platform Support**: Works on both CPU and AMD GPUs (via DirectML)
+- **AMD GPU Acceleration**: Exclusively optimized for AMD GPUs using DirectML
 - **Flexible Evaluation Tools**: Comprehensive visualization and evaluation systems
 - **Modular Design**: Well-structured Python package with clean separation of concerns
 
@@ -57,9 +57,9 @@ fanuc-ml/
 - Python 3.8 or higher
 - PyTorch 1.10 or higher
 - PyBullet
-- (Optional) torch-directml for AMD GPU acceleration
+- **REQUIRED**: torch-directml for AMD GPU acceleration
 
-### Standard Installation
+### Installation Steps
 
 1. Clone the repository:
    ```bash
@@ -67,24 +67,16 @@ fanuc-ml/
    cd fanuc-ml
    ```
 
-2. Install as a package with dependencies:
+2. Install as a package with DirectML dependencies:
    ```bash
-   pip install -e .
+   pip install -e ".[directml]"
    ```
 
-### Installation with AMD GPU Acceleration
-
-For AMD GPU acceleration, install with the DirectML extras:
-
-```bash
-pip install -e ".[directml]"
-```
-
-Or manually install DirectML support:
-
-```bash
-pip install torch-directml
-```
+   Or manually install DirectML support:
+   ```bash
+   pip install -e .
+   pip install torch-directml
+   ```
 
 ### Verify Installation
 
@@ -105,20 +97,17 @@ python tools/test_install.py
 Use the training script with the following options:
 
 ```bash
-# Basic CPU training
+# Training with AMD GPU acceleration 
 python main.py --train --steps 1000000
 
-# Training with AMD GPU acceleration
-python main.py --train --steps 1000000 --directml
-
 # Or use the convenience batch file (Windows)
-scripts/train.bat --steps 1000000 --directml
+scripts/train.bat --steps 1000000
 ```
 
 ### Evaluating a Model
 
 ```bash
-# Basic evaluation
+# Evaluation
 python main.py --eval --load ./models/model_name --eval-episodes 5
 
 # Evaluation with visualization
@@ -131,7 +120,7 @@ scripts/eval.bat --load ./models/model_name --eval-episodes 5
 ### Running a Demo
 
 ```bash
-# Basic demo
+# Demo
 python main.py --demo --load ./models/model_name --viz-speed 0.02
 
 # Or use the convenience batch file (Windows)
@@ -174,7 +163,6 @@ python tools/demos/load_fanuc_robot.py
 | `--viz-speed` | Visualization speed in seconds | 0.0 |
 | `--verbose` | Enable verbose output | False |
 | `--seed` | Random seed for reproducibility | None |
-| `--directml` | Use DirectML for AMD GPU acceleration | False |
 | `--parallel` | Number of parallel environments | 1 |
 | `--learning-rate` | Learning rate | 3e-4 |
 

@@ -30,11 +30,16 @@ def set_seed(seed):
     try:
         import torch
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
+        
+        # Try to set DirectML-specific settings if available
+        try:
+            import torch_directml
+            # DirectML doesn't have specific seed controls like CUDA,
+            # but we can still set the PyTorch seeds
+            torch.manual_seed(seed)
+        except ImportError:
+            # DirectML not available
+            pass
     except ImportError:
         pass
     

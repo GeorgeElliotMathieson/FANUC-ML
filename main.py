@@ -10,6 +10,7 @@ and dispatches to the appropriate functions based on user input.
 
 import os
 import sys
+import time
 import argparse
 
 def print_banner(title):
@@ -18,6 +19,13 @@ def print_banner(title):
     print(f"\n{border}")
     print(f"| {title} |")
     print(f"{border}\n")
+
+def print_usage():
+    """Print usage instructions"""
+    print("\nUsage:")
+    print("  python main.py [options]")
+    print("\nFor help:")
+    print("  python main.py --help")
 
 def parse_args():
     """Parse command line arguments."""
@@ -55,10 +63,7 @@ def parse_args():
     misc_group.add_argument("--verbose", action="store_true", help="Enable verbose output")
     misc_group.add_argument("--seed", type=int, help="Random seed")
     
-    # DirectML options for AMD GPUs
-    directml_group = parser.add_argument_group("DirectML Options (AMD GPUs)")
-    directml_group.add_argument("--directml", action="store_true", 
-                             help="Use DirectML for AMD GPU acceleration")
+    # DirectML is now always enabled - no need for an option
     
     return parser.parse_args()
 
@@ -87,33 +92,22 @@ def main():
             print("Error: Must specify a model path with --load when using --eval or --demo")
             return 1
     
-    # Dispatch based on whether we're using DirectML or not
-    if args.directml:
-        try:
-            # Import DirectML-specific functionality
-            from src.directml import DIRECTML_AVAILABLE, directml_main
-            
-            if not DIRECTML_AVAILABLE:
-                print("Error: DirectML support requested but torch_directml is not installed.")
-                print("Please install with 'pip install torch-directml'")
-                return 1
-            
-            # Run with DirectML
-            print_banner("FANUC Robot Control with DirectML Acceleration")
-            return directml_main(args)
-        except Exception as e:
-            print(f"Error starting DirectML: {e}")
+    try:
+        # Import DirectML-specific functionality
+        from src.directml import DIRECTML_AVAILABLE, directml_main
+        
+        if not DIRECTML_AVAILABLE:
+            print("Error: DirectML support is required but torch_directml is not installed.")
+            print("Please install with 'pip install torch-directml'")
             return 1
-    else:
-        try:
-            # Use standard CPU/CUDA processing
-            from src.train_robot import train_robot_main
-            
-            print_banner("FANUC Robot Control")
-            return train_robot_main(args)
-        except Exception as e:
-            print(f"Error: {e}")
-            return 1
+        
+        # Run with DirectML
+        print_banner("FANUC Robot Control with DirectML Acceleration")
+        return directml_main(args)
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
 
 if __name__ == "__main__":
-    sys.exit(main()) 
+    exit_code = main()
+    sys.exit(exit_code) 

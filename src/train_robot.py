@@ -87,15 +87,13 @@ def parse_args():
     misc_group = parser.add_argument_group("Miscellaneous")
     misc_group.add_argument("--verbose", action="store_true", help="Enable verbose output")
     misc_group.add_argument("--seed", type=int, help="Random seed")
-    misc_group.add_argument("--use-cuda", action="store_true", help="Use CUDA if available")
-    misc_group.add_argument("--use-directml", action="store_true", help="Use DirectML for AMD GPU acceleration")
     
     return parser.parse_args()
 
 def main():
     """
-    Main function to run using stable-baselines3 implementation.
-    This will call the appropriate function based on command-line arguments.
+    Main function that redirects to the DirectML implementation.
+    This function enforces the use of DirectML for AMD GPU acceleration.
     """
     # Parse command line arguments
     args = parse_args()
@@ -104,20 +102,18 @@ def main():
         # Import and set seed
         from src.utils.seed import set_seed
         set_seed(args.seed)
-        
-    # Detect if we should use CUDA
-    if args.use_cuda and torch.cuda.is_available():
-        device = "cuda"
-        print(f"Using CUDA device for training: {torch.cuda.get_device_name(0)}")
-    else:
-        print("Using standard CPU implementation")
-        
-        from src.core.train_robot_rl_positioning_revamped import main as train_main
-        train_main()
+    
+    # Always use DirectML implementation
+    print("Using DirectML for AMD GPU acceleration")
+    
+    # Redirect to the DirectML implementation
+    from src.directml import directml_main
+    return directml_main(args)
 
 def run_directml_demo(model_path, viz_speed=0.02, no_gui=False):
     """
     Run a DirectML-specific demo by calling the DirectML model directly.
+    This function requires AMD GPU with DirectML support.
     """
     try:
         print("\n" + "="*80)
@@ -133,7 +129,7 @@ def run_directml_demo(model_path, viz_speed=0.02, no_gui=False):
         # Check for available DirectML devices
         device_count = torch_directml.device_count()
         if device_count == 0:
-            raise RuntimeError("No DirectML devices detected")
+            raise RuntimeError("No DirectML devices detected. This function requires AMD GPU with DirectML.")
         
         # Create a DirectML device
         dml_device = torch_directml.device()
@@ -284,7 +280,7 @@ def run_directml_demo(model_path, viz_speed=0.02, no_gui=False):
 
 def train_robot_main(args):
     """
-    Main function for training the robot with standard (non-DirectML) implementation.
+    Main function for training the robot with DirectML implementation.
     This is a wrapper to provide a consistent interface from main.py.
     
     Args:
@@ -298,62 +294,17 @@ def train_robot_main(args):
         if hasattr(args, 'load') and args.load:
             args.load = ensure_model_file_exists(args.load)
         
-        # Convert args to a format the existing functions can understand
-        sys_argv = ["train_robot.py"]
+        # For demo mode with DirectML, use the specialized function
+        if args.demo and hasattr(args, 'load') and args.load:
+            return run_directml_demo(
+                args.load, 
+                args.viz_speed if hasattr(args, 'viz_speed') else 0.02,
+                args.no_gui
+            )
         
-        # Handle flags based on mode
-        if args.train:
-            # Training mode settings
-            if hasattr(args, 'load') and args.load:
-                sys_argv.extend(["--load", args.load])
-            if hasattr(args, 'steps'):
-                sys_argv.extend(["--steps", str(args.steps)])
-        elif args.eval:
-            # Evaluation mode settings
-            sys_argv.append("--eval-only")
-            if hasattr(args, 'load') and args.load:
-                sys_argv.extend(["--load", args.load])
-            if hasattr(args, 'eval_episodes'):
-                sys_argv.extend(["--eval-episodes", str(args.eval_episodes)])
-        elif args.demo:
-            # Demo mode settings
-            sys_argv.append("--demo")
-            if hasattr(args, 'load') and args.load:
-                sys_argv.extend(["--load", args.load])
-        
-        # Process common arguments
-        if args.no_gui:
-            sys_argv.append("--no-gui")
-        if hasattr(args, 'viz_speed') and args.viz_speed > 0:
-            sys_argv.extend(["--viz-speed", str(args.viz_speed)])
-        if args.verbose:
-            sys_argv.append("--verbose")
-        if hasattr(args, 'seed') and args.seed is not None:
-            sys_argv.extend(["--seed", str(args.seed)])
-        
-        # Check for DirectML-specific handling
-        if hasattr(args, 'directml') and args.directml:
-            sys_argv.append("--use-directml")
-            
-            # For demo mode with DirectML, use the specialized function
-            if args.demo and hasattr(args, 'load') and args.load:
-                return run_directml_demo(
-                    args.load, 
-                    args.viz_speed if hasattr(args, 'viz_speed') else 0.02,
-                    args.no_gui
-                )
-        
-        # Save the original argv and replace with our constructed one
-        original_argv = sys.argv
-        sys.argv = sys_argv
-        
-        # Call the existing main function
-        try:
-            main()
-            return 0
-        finally:
-            # Restore the original argv
-            sys.argv = original_argv
+        # For all other operations, use the DirectML specific implementation
+        from src.directml import directml_main
+        return directml_main(args)
             
     except Exception as e:
         import traceback

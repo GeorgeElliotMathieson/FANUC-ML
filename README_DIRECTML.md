@@ -1,10 +1,10 @@
 # DirectML Support for FANUC Robot Control
 
-This project includes support for AMD GPU acceleration through the DirectML backend for PyTorch. This document explains how to use DirectML features and optimize your workflow for AMD GPUs.
+This project **requires** AMD GPU acceleration through the DirectML backend for PyTorch. This document explains how to use DirectML features and optimize your workflow for AMD GPUs.
 
 ## Requirements
 
-To use the DirectML features, you need:
+To run this project, you **must** have:
 
 1. Windows 10/11 with an AMD GPU (tested with AMD RX 6700S)
 2. Python 3.8+ 
@@ -22,24 +22,24 @@ pip install torch-directml
 Verify the installation by running:
 
 ```bash
-python tools/test_install.py --directml
+python tools/test_install.py
 ```
 
 ## Using DirectML Features
 
 ### Training with DirectML
 
-To train a model using DirectML acceleration:
+To train a model:
 
 ```bash
-python main.py --train --directml
+python main.py --train
 ```
 
 This will automatically detect your AMD GPU and configure the training process to use DirectML.
 
 ### Evaluating DirectML Models
 
-You can evaluate a trained DirectML model using:
+You can evaluate a trained model using:
 
 ```bash
 scripts/directml/test_directml.bat
@@ -67,17 +67,13 @@ Common issues with DirectML:
 2. **Out of memory errors**: Reduce batch size or model complexity.
 3. **Performance issues**: Check for background processes using GPU resources.
 
-## Model Compatibility
-
-Models trained with DirectML are fully compatible with CPU-based inference and can be used interchangeably. However, for best performance, use the DirectML-specific scripts when working with an AMD GPU.
-
 ## Development Notes
 
-When developing new features that should support DirectML:
+When developing new features:
 
-1. Use the `torch_directml.device()` for tensor operations instead of hardcoding CUDA devices
-2. Use the utility function `is_directml_available()` to check for DirectML support
-3. Wrap DirectML-specific code in try/except blocks to fall back to CPU when needed
+1. Use the `torch_directml.device()` for tensor operations instead of hardcoding device references
+2. Use the utility function `is_directml_available()` to check for DirectML availability
+3. Handle DirectML errors with appropriate error messages rather than fallbacks
 
 ## Reference
 

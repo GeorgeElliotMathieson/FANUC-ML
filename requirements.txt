@@ -11,5 +11,5 @@ seaborn>=0.11.0
 imageio>=2.22.0
 pillow>=9.0.0
 
-# Optional - AMD GPU Acceleration 
-# torch-directml>=0.2.0.dev230426  # Uncomment to enable DirectML support 
+# Required - AMD GPU Acceleration 
+torch-directml>=0.2.0.dev230426

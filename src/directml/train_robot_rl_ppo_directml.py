@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# train_robot_rl_ppo_directml.py
-# Training 5-axis FANUC robot (without gripper) for end-effector positioning using PPO algorithm
-# with DirectML support for AMD RX 6700S GPU
+# train_robot_rl_ppo_directml.py - DirectML-optimized PPO implementation for FANUC robot
 
 import os
+import sys
 import time
 import math
 import json
@@ -18,10 +17,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional
-import sys
 import psutil
 import warnings
 import gc
+import threading
+import traceback
 
 # Configure CPU threading for PyTorch
 # Use all available cores for best performance
@@ -49,9 +49,11 @@ from src.utils.pybullet_utils import (
     load_workspace_data,
     determine_reachable_workspace,
     adjust_camera_for_robots,
-    ensure_joint_limits,
     visualize_target
 )
+
+# Import the ensure_joint_limits function from the correct module
+from src.core.train_robot_rl_positioning_revamped import ensure_joint_limits
 
 # Import the robot environment directly from robot_sim.py
 from src.envs.robot_sim import FANUCRobotEnv
@@ -73,6 +75,8 @@ def setup_directml():
         os.environ["DIRECTML_ENABLE_OPTIMIZATION"] = "1"  # Enable optimizations
         os.environ["DIRECTML_GPU_TRANSFER_BIT_WIDTH"] = "64"  # Use 64-bit transfers
         os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Reduce TF logging
+        os.environ["USE_DIRECTML"] = "1"  # Flag to ensure DirectML is used
+        os.environ["USE_GPU"] = "1"  # Flag to ensure GPU is used
         
         # Try to ensure DirectML can use all available CPU cores efficiently
         os.environ["OMP_NUM_THREADS"] = str(num_threads)
@@ -154,12 +158,12 @@ def setup_directml():
     except ImportError:
         print("ERROR: torch_directml package not found.")
         print("Please install it with: pip install torch-directml")
-        print("Falling back to CPU...")
-        return torch.device("cpu")
+        print("This implementation requires AMD GPU acceleration with DirectML.")
+        sys.exit(1)
     except Exception as e:
         print(f"ERROR setting up DirectML: {e}")
-        print("Falling back to CPU...")
-        return torch.device("cpu")
+        print("This implementation requires AMD GPU acceleration with DirectML.")
+        sys.exit(1)
 
 # PPO implementation adapted for DirectML
 class DirectMLPPO:
@@ -179,7 +183,7 @@ class DirectMLPPO:
         ent_coef=0.0,
         vf_coef=0.5,
         max_grad_norm=0.5,
-        device="cpu",
+        device=None,
         tensorboard_log=None,
         verbose=0,
     ):
@@ -194,6 +198,19 @@ class DirectMLPPO:
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
+        
+        # Check if device is provided and is a DirectML device
+        if device is None:
+            # Try to get a DirectML device
+            try:
+                import torch_directml
+                device = torch_directml.device()
+                print(f"No device specified, using DirectML device: {device}")
+            except Exception as e:
+                raise ValueError(f"DirectML device is required but could not be initialized: {e}")
+        elif not str(device).startswith('privateuseone'):
+            raise ValueError(f"DirectML device is required, but got: {device}")
+            
         self.device = device
         self.tensorboard_log = tensorboard_log
         self.verbose = verbose
@@ -277,12 +294,19 @@ class DirectMLPPO:
         """
         # Create actor-critic network
         class ActorCritic(nn.Module):
-            def __init__(self, observation_space, action_space, device="cpu"):
+            def __init__(self, observation_space, action_space, device):
                 super().__init__()
                 
-                self.device = device
-                self.is_gpu = str(device) != "cpu"
+                # Store spaces
+                self.observation_space = observation_space
+                self.action_space = action_space
+                
+                # Check if we're using DirectML (always should be the case)
                 self.is_directml = str(device).startswith('privateuseone')
+                
+                self.device = device
+                # We're always using GPU now
+                self.is_gpu = True
                 
                 # Register constants to avoid recreating them
                 self.register_buffer("action_scale", torch.tensor(1.0, device=device))
@@ -299,7 +323,7 @@ class DirectMLPPO:
                         self.features_dim = 128  # Same as CustomFeatureExtractor
                         
                         obs_shape = observation_space.shape[0]
-                        # Simple MLP feature extractor to avoid CustomFeatureExtractor's CPU fallbacks
+                        # Simple MLP feature extractor optimized for DirectML performance
                         self.feature_extractor = nn.Sequential(
                             nn.Linear(obs_shape, 128),
                             nn.LayerNorm(128),
@@ -759,14 +783,10 @@ class DirectMLPPO:
         # HYPEROPTIMIZATION: Reduce epochs and increase batch size for DirectML
         # This dramatically reduces the number of individual operations
         # which helps with DirectML's higher overhead per-operation
-        if self.is_directml:
-            # DirectML performs better with larger batches and fewer updates
-            optimal_batch_size = min(max(self.batch_size * 4, 256), buffer_size)
-            epochs = min(4, self.n_epochs)  # Drastically reduce number of epochs
-        else:
-            # CPU can use standard parameters
-            optimal_batch_size = min(self.batch_size, buffer_size)
-            epochs = self.n_epochs
+        
+        # DirectML performs better with larger batches and fewer updates
+        optimal_batch_size = min(max(self.batch_size * 4, 256), buffer_size)
+        epochs = min(4, self.n_epochs)  # Drastically reduce number of epochs
             
         # Calculate number of mini-batches (ensure at least one)
         n_batches = max(buffer_size // optimal_batch_size, 1)
@@ -778,32 +798,12 @@ class DirectMLPPO:
         all_entropies = []
         
         # Prepare tensors once
-        is_gpu = str(self.device) != "cpu"
-        
-        # Convert to tensors with optimized transfers
-        if is_gpu:
-            # Pre-allocate tensors on device
-            obs_tensor = torch.zeros((buffer_size,) + self.observation_space.shape, 
-                                     device=self.device, dtype=torch.float32)
-            act_tensor = torch.zeros((buffer_size,) + self.action_space.shape, 
-                                     device=self.device, dtype=torch.float32)
-            ret_tensor = torch.zeros(buffer_size, device=self.device, dtype=torch.float32)
-            adv_tensor = torch.zeros(buffer_size, device=self.device, dtype=torch.float32)
-            old_log_p_tensor = torch.zeros(buffer_size, device=self.device, dtype=torch.float32)
-            
-            # Copy data to pre-allocated tensors
-            obs_tensor.copy_(torch.as_tensor(observations, device=self.device))
-            act_tensor.copy_(torch.as_tensor(actions, device=self.device))
-            ret_tensor.copy_(torch.as_tensor(returns, device=self.device))
-            adv_tensor.copy_(torch.as_tensor(advantages, device=self.device))
-            old_log_p_tensor.copy_(torch.as_tensor(old_log_probs, device=self.device))
-        else:
-            # For CPU, avoid unnecessary copies
-            obs_tensor = torch.as_tensor(observations, device=self.device)
-            act_tensor = torch.as_tensor(actions, device=self.device)
-            ret_tensor = torch.as_tensor(returns, device=self.device)
-            adv_tensor = torch.as_tensor(advantages, device=self.device)
-            old_log_p_tensor = torch.as_tensor(old_log_probs, device=self.device)
+        # Convert rollout data to tensors
+        obs_tensor = torch.as_tensor(observations, dtype=torch.float32, device=self.device)
+        act_tensor = torch.as_tensor(actions, dtype=torch.float32, device=self.device)
+        adv_tensor = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
+        ret_tensor = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
+        old_log_p_tensor = torch.as_tensor(old_log_probs, dtype=torch.float32, device=self.device)
         
         # Normalize advantages for better stability
         with torch.no_grad():
@@ -830,7 +830,7 @@ class DirectMLPPO:
         all_indices = []
         for _ in range(epochs):
             # Generate random permutation directly on device when possible
-            if is_gpu:
+            if self.is_directml:
                 try:
                     # Try to create permutation directly on GPU
                     epoch_indices = torch.randperm(buffer_size, device=self.device)
@@ -843,7 +843,7 @@ class DirectMLPPO:
             
         # Pre-allocate mini-batch tensors to avoid repeated allocations
         # This is a huge optimization for DirectML
-        if is_gpu:
+        if self.is_directml:
             mb_obs = torch.zeros((batch_size,) + self.observation_space.shape, 
                                  device=self.device, dtype=torch.float32)
             mb_acts = torch.zeros((batch_size,) + self.action_space.shape, 
@@ -869,7 +869,7 @@ class DirectMLPPO:
                 
                 # Extract mini-batch data using index_select for better GPU performance
                 # or using our pre-allocated tensors
-                if is_gpu and actual_batch_size == batch_size:
+                if self.is_directml and actual_batch_size == batch_size:
                     # Fast path using pre-allocated tensors
                     torch.index_select(obs_tensor, 0, mb_inds, out=mb_obs)
                     torch.index_select(act_tensor, 0, mb_inds, out=mb_acts)
@@ -925,23 +925,22 @@ class DirectMLPPO:
         
         # Explicitly synchronize device to ensure all GPU operations complete
         # This prevents CPU grabbing the next task while GPU is still working
-        if is_gpu:
-            if self.is_directml:
-                try:
-                    # Try to use DirectML-specific synchronization
-                    import torch_directml
-                    if hasattr(torch_directml, 'synchronize'):
-                        torch_directml.synchronize()
-                except:
-                    # Fallback sync mechanism - force a small computation and fetch result
-                    dummy = torch.tensor([1.0], device=self.device)
-                    dummy.item()
+        if self.is_directml:
+            try:
+                # Try to use DirectML-specific synchronization
+                import torch_directml
+                if hasattr(torch_directml, 'synchronize'):
+                    torch_directml.synchronize()
+            except:
+                # Fallback sync mechanism - force a small computation and fetch result
+                dummy = torch.tensor([1.0], device=self.device)
+                dummy.item()
         
         # Step learning rate scheduler
         self.scheduler.step()
         
         # Explicitly clear GPU memory to reduce fragmentation
-        if is_gpu:
+        if self.is_directml:
             # Free up tensors explicitly
             del obs_tensor, act_tensor, adv_tensor, ret_tensor, old_log_p_tensor
             
@@ -1114,6 +1113,34 @@ class DirectMLPPO:
             print(f"Training progress plot saved to: {save_path}")
         else:
             plt.show()
+    
+    def load(self, path):
+        """Load model from path"""
+        state_dict = torch.load(path)
+        self.policy_network.load_state_dict(state_dict)
+        print(f"Model loaded from {path}")
+        
+    def predict(self, observation, deterministic=True):
+        """
+        Predict action for a given observation
+        Args:
+            observation: Environment observation
+            deterministic: Whether to use deterministic actions
+        Returns:
+            action: Action to take
+            state: None (unused, for compatibility)
+        """
+        # Convert observation to tensor
+        if isinstance(observation, np.ndarray):
+            observation = torch.as_tensor(observation, device=self.device).float().unsqueeze(0)
+        
+        # Get action from the model
+        with torch.no_grad():
+            action, _, _ = self.policy_network.get_action(observation, deterministic=deterministic)
+        
+        # We still need to convert to numpy for gym environments
+        action_np = action.cpu().numpy().flatten()
+        return action_np, None
 
 # Add the RolloutBuffer class before this point
 class RolloutBuffer:
@@ -1405,8 +1432,15 @@ def train_robot_with_ppo_directml(args):
     # Check if using DirectML
     is_directml = args.gpu
     
-    # Setup DirectML device
-    device = setup_directml() if args.gpu else torch.device("cpu")
+    # Initialize DirectML
+    if args.verbose:
+        print("Setting up DirectML...")
+    
+    # Always use DirectML
+    device = setup_directml()
+    if device is None:
+        print("ERROR: DirectML setup failed")
+        return 1
     print(f"Using device: {device}\n")
     
     # Add timer to measure performance of key operations

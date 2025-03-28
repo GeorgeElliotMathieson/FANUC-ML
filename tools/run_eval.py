@@ -30,10 +30,16 @@ def restore_argparse(original_argv):
     """
     sys.argv = original_argv
 
-def setup_directml() -> Optional[Any]:
+def setup_directml() -> Any:
     """
     Set up DirectML environment and verify its functionality.
-    Returns the DirectML device if successful, None otherwise.
+    Returns the DirectML device if successful, raises exception otherwise.
+    
+    Returns:
+        DirectML device object
+        
+    Raises:
+        RuntimeError: When DirectML is not available or cannot be initialized
     """
     try:
         import torch
@@ -67,13 +73,13 @@ def setup_directml() -> Optional[Any]:
         
     except ImportError as e:
         print(f"ERROR: DirectML package not found: {e}")
-        print("AMD GPU acceleration will not be available.")
+        print("AMD GPU acceleration is required for this evaluation.")
         print("To install DirectML support, run: pip install torch-directml")
-        return None
+        raise RuntimeError(f"DirectML not available: {e}")
     except Exception as e:
         print(f"ERROR initializing DirectML: {e}")
         print(traceback.format_exc())
-        return None
+        raise RuntimeError(f"Failed to initialize DirectML: {e}")
 
 def ensure_model_file_exists(model_path: str) -> str:
     """
@@ -170,11 +176,8 @@ def main():
             generate_directml_visualizations
         )
         
-        # Check for DirectML support
+        # Setup DirectML - will raise an exception if not available
         dml_device = setup_directml()
-        if dml_device is None:
-            print("DirectML not available, using CPU")
-            dml_device = torch.device("cpu")
         
         # Create evaluation environment
         print("\nCreating environment...")
@@ -204,10 +207,10 @@ def main():
             model.load(model_path)
             print("DirectML model loaded successfully")
         else:
-            # Load standard model
+            # Still use DirectML for standard models
             from stable_baselines3 import PPO
-            model = PPO.load(model_path)
-            print("Standard model loaded successfully")
+            model = PPO.load(model_path, device=dml_device)
+            print("Standard model loaded successfully (using DirectML device)")
         
         # Run evaluation episodes
         print(f"\nRunning {episodes} evaluation episodes...")

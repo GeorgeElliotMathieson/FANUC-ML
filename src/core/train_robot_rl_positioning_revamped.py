@@ -1508,7 +1508,6 @@ def parse_args():
     parser.add_argument('--parallel-viz', action='store_true', help='Enable parallel visualization')
     parser.add_argument('--viz-speed', type=float, default=0.0, help='Control visualization speed (delay in seconds)')
     parser.add_argument('--learning-rate', type=float, default=3e-4, help='Learning rate for the optimizer')
-    parser.add_argument('--use-cuda', action='store_true', default=True, help='Use CUDA for training if available')
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('--algorithm', choices=['ppo'], default='ppo', help='RL algorithm to use')
@@ -1529,13 +1528,15 @@ def parse_args():
     if args.no_gui:
         args.gui = False
     
-    # Determine the device to use (CUDA or CPU)
-    if args.use_cuda and torch.cuda.is_available():
-        args.device = "cuda"
-        print("Using CUDA for training (GPU acceleration)")
-    else:
-        args.device = "cpu"
-        print("Using CPU for training (default setting, can be overridden with command line arguments)")
+    # Always use DirectML for GPU acceleration
+    try:
+        import torch_directml
+        args.device = torch_directml.device()
+        print("Using DirectML for AMD GPU acceleration")
+    except ImportError:
+        print("ERROR: DirectML is required but not available")
+        print("Please install torch-directml package: pip install torch-directml")
+        sys.exit(1)
     
     return args
 
@@ -1545,6 +1546,7 @@ def main():
     Parses command line arguments and either trains a new model or evaluates an existing one.
     """
     args = parse_args()
+    # DirectML device is already set up in parse_args()
     
     # Seed if requested
     if args.seed is not None:
@@ -1620,6 +1622,7 @@ def main():
     
     # Print training parameters
     print("\nTraining Parameters:")
+    print(f"Device: {args.device}")
     print(f"Learning Rate: {args.learning_rate}")
     print(f"Timesteps: {args.steps}")
     print(f"n_steps: {args.n_steps}")
@@ -1634,9 +1637,9 @@ def main():
     print("Architecture:", policy_kwargs["net_arch"])
     print()
     
-    # Create the model timestamp for saving
+    # Create the model timestamp for saving - include directml in the name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_dir = f"./models/revamped_{timestamp}"
+    model_dir = f"./models/directml_revamped_{timestamp}"
     os.makedirs(model_dir, exist_ok=True)
     
     # Create callbacks for saving and monitoring
@@ -1677,7 +1680,7 @@ def main():
         verbose=args.verbose,
         policy_kwargs=policy_kwargs,
         seed=args.seed,
-        device=args.device,
+        device=args.device,  # Using DirectML device
         tensorboard_log=f"{model_dir}/tb_logs"
     )
     
@@ -1690,22 +1693,36 @@ def main():
             if not os.path.exists(load_path) and os.path.exists(load_path + ".zip"):
                 load_path = load_path + ".zip"
 
-            # Load the model
-            model = PPO.load(
-                load_path,
-                env=env,
-                device=args.device,
-                custom_objects={
-                    "learning_rate": args.learning_rate,
-                    "n_steps": n_steps_per_env,
-                    "batch_size": batch_size,
-                    "n_epochs": args.n_epochs,
-                    "clip_range": args.clip_range,
-                    "ent_coef": 0.0,
-                    "vf_coef": args.vf_coef,
-                    "max_grad_norm": 0.5,
-                }
-            )
+            # Check if it's a DirectML model based on path
+            is_directml_model = "directml" in load_path.lower()
+            
+            if is_directml_model:
+                # Load with CustomDirectMLModel
+                print("Loading as DirectML model...")
+                model = CustomDirectMLModel(
+                    env.observation_space, 
+                    env.action_space, 
+                    device=args.device
+                )
+                model.load(load_path)
+            else:
+                # Load the standard model - but on DirectML device
+                print("Loading as standard model (on DirectML device)...")
+                model = PPO.load(
+                    load_path,
+                    env=env,
+                    device=args.device,
+                    custom_objects={
+                        "learning_rate": args.learning_rate,
+                        "n_steps": n_steps_per_env,
+                        "batch_size": batch_size,
+                        "n_epochs": args.n_epochs,
+                        "clip_range": args.clip_range,
+                        "ent_coef": 0.0,
+                        "vf_coef": args.vf_coef,
+                        "max_grad_norm": 0.5,
+                    }
+                )
             print("Model loaded successfully!")
 
             # Also check for normalization stats
@@ -1721,7 +1738,7 @@ def main():
             print("Starting with a fresh model...")
     
     # Train the model
-    print("\nStarting training...\n")
+    print("\nStarting training with DirectML acceleration...\n")
     model.learn(
         total_timesteps=args.steps,
         callback=callbacks,
@@ -2175,13 +2192,34 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
         vec_env.training = False
         vec_env.norm_reward = False
     
-    # Load model
-    model = PPO.load(model_path, env=vec_env)
+    # Load model - check if it's a DirectML model based on path
+    is_directml_model = "directml" in model_path.lower()
+    
+    if is_directml_model:
+        try:
+            import torch_directml
+            dml_device = torch_directml.device()
+            # Create the model with the correct arguments
+            model = CustomDirectMLModel(
+                observation_space=env.observation_space, 
+                action_space=env.action_space, 
+                device=dml_device
+            )
+            # Load the model weights
+            model.load(model_path)
+            print(f"Loaded DirectML model from {model_path}")
+        except Exception as e:
+            print(f"Error loading DirectML model: {e}")
+            print("Falling back to standard PPO model")
+            is_directml_model = False
+    
+    if not is_directml_model:
+        model = PPO.load(model_path, env=vec_env)
+        print(f"Loaded standard PPO model from {model_path}")
     
     # Setup video recording if requested
     if save_video:
         try:
-
             import imageio
             frames = []
 
@@ -2189,12 +2227,10 @@ def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
             p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
             p.resetDebugVisualizerCamera(
                     cameraDistance=1.2,
-
                     cameraYaw=120,
                     cameraPitch=-20,
-
                     cameraTargetPosition=[0, 0, 0.3]
-        )
+            )
         except ImportError:
             print("Warning: imageio not found, video recording will be disabled")
             save_video = False
@@ -2347,8 +2383,18 @@ class CustomDirectMLModel:
     - Architecture inference from state dict
     """
     
-    def __init__(self, observation_space, action_space, device="cpu"):
+    def __init__(self, observation_space, action_space, device=None):
         """Initialize the model with the right observation and action spaces"""
+        # Always use DirectML device if no specific device is provided
+        if device is None:
+            try:
+                import torch_directml
+                device = torch_directml.device()
+            except ImportError:
+                print("ERROR: DirectML is required but not available")
+                print("Please install torch-directml package: pip install torch-directml")
+                sys.exit(1)
+                
         self.device = device
         self.observation_space = observation_space
         self.action_space = action_space
@@ -2732,8 +2778,8 @@ class CustomDirectMLModel:
         """
         print(f"Loading model from {path}...")
         try:
-            # Use 'cpu' string to avoid DirectML issues
-            checkpoint = torch.load(path, map_location='cpu')
+            # Load the model using the DirectML device
+            checkpoint = torch.load(path, map_location=self.device)
             
             # Load policy parameters
             if 'policy_state_dict' in checkpoint:
@@ -2931,7 +2977,7 @@ class CustomDirectMLModel:
         
         return param_mapping
 
-def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=True):
+def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=True, save_video=False):
     """
     Wrapper function that bridges the different evaluate_model interfaces
     
@@ -2940,6 +2986,7 @@ def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=
         num_episodes: Number of episodes to evaluate
         visualize: Whether to visualize the evaluation
         verbose: Whether to print progress
+        save_video: Whether to save a video of the evaluation
     """
     # Create environment for evaluation
     env = create_revamped_envs(
@@ -2949,62 +2996,138 @@ def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=
         training_mode=False
     )[0]  # Get the unwrapped environment
     
+    # Wrap in VecEnv for compatibility
+    vec_env = DummyVecEnv([lambda: env])
+    
+    # Set visualization speed
+    viz_speed = 0.02 if visualize else 0.0
+    
     # Check if this is a DirectML model based on path
-    directml = "directml" in model_path.lower()
+    directml_model = "directml" in model_path.lower()
     
-    # Load the model
-    policy = None
-    
-    if directml:
+    # Load model based on type
+    model = None  # Initialize model variable
+    if directml_model:
         try:
             print(f"Loading DirectML model from {model_path}...")
-            # Create a custom model for DirectML
-            directml_model = CustomDirectMLModel(env.observation_space, env.action_space, device='cpu')
+            import torch_directml
+            directml_device = torch_directml.device()
+            model = CustomDirectMLModel(env.observation_space, env.action_space, device=directml_device)
             
             # Load the model parameters
-            if directml_model.load(model_path):
-                # Successfully loaded DirectML model
-                policy = directml_model
+            if model.load(model_path):
                 print("DirectML model loaded successfully!")
             else:
                 raise ValueError("Failed to load DirectML model")
         except Exception as e:
             import traceback
-            error_msg = f"Error loading DirectML model: {str(e)}\n{traceback.format_exc()}"
-            print(error_msg)
-            with open("error_log.txt", "w") as f:
-                f.write(error_msg)
-            return None
+            print(f"Error loading DirectML model: {e}")
+            print(traceback.format_exc())
+            return
     else:
+        # Load standard model
+        model = PPO.load(model_path, env=vec_env)
+    
+    # Setup video recording if requested
+    frames = []
+    if save_video:
         try:
-            # Load a standard model
-            print(f"Loading standard model from {model_path}...")
-            from stable_baselines3 import PPO
-            policy = PPO.load(model_path)
-            print("Standard model loaded successfully!")
+            import imageio
+            
+            # Set higher resolution for video
+            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+            p.resetDebugVisualizerCamera(
+                    cameraDistance=1.2,
+                    cameraYaw=120,
+                    cameraPitch=-20,
+                    cameraTargetPosition=[0, 0, 0.3]
+            )
+        except ImportError:
+            print("Warning: imageio not found, video recording will be disabled")
+            save_video = False
+    
+    # Run demo sequence (5 episodes)
+    for ep in range(5):
+        print(f"\nDemo Episode {ep+1}/5")
+        
+        # Reset environment with API compatibility handling
+        try:
+            # Try new gymnasium API (returns obs, info)
+            obs, info = vec_env.reset()
+            initial_distance = info[0].get('initial_distance', 0.0)
+        except ValueError:
+            # Fall back to older gym API (returns only obs)
+            obs = vec_env.reset()
+            # Estimate initial distance as best we can
+            state = env.robot._get_state()
+            ee_position = state[12:15]
+            initial_distance = np.linalg.norm(ee_position - env.target_position)
+        
+        print(f"Initial distance to target: {initial_distance*100:.2f}cm")
+        
+        done = False
+        step = 0
+        
+        # Pre-episode pause for better visualization
+        if save_video:
+            for _ in range(30):  # Capture 30 frames of initial state
+                img = p.getCameraImage(1200, 800, shadow=1, renderer=p.ER_BULLET_HARDWARE_OPENGL)
+                frames.append(img[2])
+        else:
+            time.sleep(1.0)
+        
+        # Run episode
+        while not done:
+            # Get action from model
+            action, _ = model.predict(obs, deterministic=True)
+            
+            # Actions are now inherently limited by the JointLimitedBox space
+            # No need for additional limit enforcement
+            
+            # Step environment with the action
+            obs, reward, done, info = vec_env.step(action)
+            
+            # Capture frame for video or delay for visualization
+            if save_video:
+                img = p.getCameraImage(1200, 800, shadow=1, renderer=p.ER_BULLET_HARDWARE_OPENGL)
+                frames.append(img[2])
+            else:
+                time.sleep(viz_speed)
+            
+            step += 1
+        
+        # Post-episode pause
+        if save_video:
+            for _ in range(30):  # Capture 30 frames of final state
+                img = p.getCameraImage(1200, 800, shadow=1, renderer=p.ER_BULLET_HARDWARE_OPENGL)
+                frames.append(img[2])
+        else:
+            time.sleep(1.0)
+        
+        # Print episode results
+        try:
+            success = info[0].get('target_reached', False)
+            distance = info[0].get('distance', 0.0)
+        except (IndexError, TypeError):
+            success = False
+            distance = 0.0
+            
+        print(f"Episode {ep+1} - {'SUCCESS' if success else 'FAILURE'}")
+        print(f"  Final distance: {distance*100:.2f}cm")
+        print(f"  Steps: {step}")
+    
+    # Save video if requested
+    if save_video:
+        try:
+            from datetime import datetime
+            video_path = f"./evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            imageio.mimsave(video_path, frames, fps=30)
+            print(f"Video saved to {video_path}")
         except Exception as e:
-            import traceback
-            error_msg = f"Error loading standard model: {str(e)}\n{traceback.format_exc()}"
-            print(error_msg)
-            with open("error_log.txt", "w") as f:
-                f.write(error_msg)
-            return None
+            print(f"Error saving video: {e}")
     
-    # Set up evaluation parameters
-    rollout_steps = 150  # Standard episode length
-    
-    # Call the actual evaluation function
-    return evaluate_model(
-        env=env,
-        policy=policy,
-        rollout_steps=rollout_steps,
-        num_episodes=num_episodes,
-        render=visualize,
-        verbose=verbose,
-        model_file=model_path,
-        directml=directml,
-        info_prefix="[Eval] "
-    )
+    # Close environment
+    vec_env.close()
 
 if __name__ == "__main__":
     main() 

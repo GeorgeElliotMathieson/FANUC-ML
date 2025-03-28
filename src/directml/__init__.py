@@ -28,10 +28,22 @@ def is_available():
     return DIRECTML_AVAILABLE
 
 def get_device():
-    """Get a DirectML device if available, otherwise return None."""
+    """
+    Get a DirectML device or raise an exception if not available.
+    
+    Returns:
+        torch_directml.Device: A DirectML device instance.
+        
+    Raises:
+        RuntimeError: If DirectML is not available or fails to initialize.
+    """
     if DIRECTML_AVAILABLE:
         try:
             return torch_directml.device()
-        except:
-            pass
-    return None
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize DirectML device: {e}")
+    else:
+        raise RuntimeError(
+            "DirectML is not available. Please install torch-directml package: "
+            "pip install torch-directml"
+        )

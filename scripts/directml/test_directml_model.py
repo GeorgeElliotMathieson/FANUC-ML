@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Simple script to test loading and evaluating a DirectML model
+# This script REQUIRES DirectML and AMD GPU support to run
 
 import os
 import sys
@@ -15,10 +16,10 @@ if project_dir not in sys.path:
 
 def test_directml_model(model_path, gui=True, viz_speed=0.02, episodes=1):
     print("\n" + "="*50)
-    print("DirectML Model Test")
+    print("DirectML Model Test (Requires AMD GPU)")
     print("="*50)
     
-    # Try importing DirectML
+    # Try importing DirectML - this is required, do not fall back to CPU
     try:
         import torch_directml
         print("DirectML available, initializing device...")
@@ -35,9 +36,10 @@ def test_directml_model(model_path, gui=True, viz_speed=0.02, episodes=1):
         _ = test_tensor.cpu().numpy()
         print("✓ DirectML test tensor created successfully")
     except Exception as e:
-        print(f"WARNING: Could not initialize DirectML: {e}")
-        print("Falling back to CPU")
-        dml_device = "cpu"
+        print(f"ERROR: Could not initialize DirectML: {e}")
+        print("This script requires DirectML to run. Please ensure torch_directml is installed.")
+        print("Install with: pip install torch-directml")
+        sys.exit(1)
     
     # Now try to load the model
     try:
