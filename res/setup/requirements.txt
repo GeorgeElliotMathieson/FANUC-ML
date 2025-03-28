@@ -1,8 +1,0 @@
-# requirements.txt
-numpy>=1.19.0
-matplotlib>=3.3.0
-pybullet>=3.0.0
-gym>=0.17.0
-stable-baselines3>=1.2.0
-tensorboard>=2.3.0
-torch>=1.7.0

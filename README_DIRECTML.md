@@ -22,9 +22,9 @@ We've enhanced the system with the following features:
    - Summary statistics and visualization across episodes
    - Success rate and performance metrics
 
-4. **Dedicated Evaluation Tools**: We've added specialized tools for evaluating DirectML models:
+4. **Streamlined Evaluation Tools**: We've added specialized tools for evaluating DirectML models:
    - Isolated evaluation script that avoids argument parsing conflicts
-   - Windows batch file for easy evaluation
+   - Windows batch file for easy evaluation with flexible options
    - Comprehensive visualization generation
 
 ## Key Components
@@ -135,7 +135,7 @@ Enhanced error handling includes:
 
 ### Argument Parsing Conflicts
 
-Our specialized evaluation scripts use techniques to avoid argument parsing conflicts:
+Our specialized evaluation script uses techniques to avoid argument parsing conflicts:
 
 1. The `run_eval.py` script temporarily modifies `sys.argv` before importing modules
 2. Arguments are manually parsed to avoid conflicts with imported modules
@@ -155,5 +155,4 @@ Potential future enhancements:
 Current known limitations:
 
 1. Some parameters may not load correctly if the model architecture differs significantly
-2. Visualizations may be limited for very high-dimensional observation spaces
-3. Windows batch files may have path escaping issues on some systems 
+2. Visualizations may be limited for very high-dimensional observation spaces 
