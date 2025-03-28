@@ -1,158 +1,86 @@
-# DirectML Enhancements for FANUC Robot Evaluation
+# DirectML Support for FANUC Robot Control
 
-This document provides details on the enhancements made to the FANUC robot evaluation system to better support DirectML-trained models.
+This project includes support for AMD GPU acceleration through the DirectML backend for PyTorch. This document explains how to use DirectML features and optimize your workflow for AMD GPUs.
 
-## Overview of Improvements
+## Requirements
 
-We've enhanced the system with the following features:
+To use the DirectML features, you need:
 
-1. **Refined Model Structure**: The `CustomDirectMLModel` class has been updated to better match the exact dimensions in saved DirectML models through:
-   - Automatic dimension adaptation that infers model architecture from parameters
-   - Improved parameter loading with appropriate shape checking
-   - Better handling of different model architectures
+1. Windows 10/11 with an AMD GPU (tested with AMD RX 6700S)
+2. Python 3.8+ 
+3. PyTorch 2.0.0+
+4. torch-directml package
 
-2. **Generic Parameter Loading Mechanism**: The system now adapts to different model architectures through:
-   - Flexible parameter mapping with fallbacks for different naming conventions
-   - Architecture inference directly from the state dictionary
-   - Support for models with different layer sizes and structures
+## Installation
 
-3. **Enhanced Visualizations**: Added comprehensive visualization capabilities specific to DirectML models:
-   - Episode-by-episode visualization of rewards, distances, and actions
-   - Observation heatmaps to understand model behavior
-   - Summary statistics and visualization across episodes
-   - Success rate and performance metrics
-
-4. **Streamlined Evaluation Tools**: We've added specialized tools for evaluating DirectML models:
-   - Isolated evaluation script that avoids argument parsing conflicts
-   - Windows batch file for easy evaluation with flexible options
-   - Comprehensive visualization generation
-
-## Key Components
-
-### 1. CustomDirectMLModel Class
-
-The `CustomDirectMLModel` class now features:
-
-- Automatic architecture inference from model state dictionaries
-- Support for tuple and dictionary observations
-- Enhanced parameter mapping system
-- Robust error handling for shape mismatches
-
-### 2. Evaluation Workflow
-
-The evaluation process has been improved with:
-
-- New `evaluate_model_wrapper` function to simplify model loading and evaluation
-- Support for both DirectML and standard models in the same evaluation pipeline
-- Better error handling and logging throughout the process
-- Enhanced rendering capabilities with fallbacks
-
-### 3. Visualization System
-
-The visualization system now generates:
-
-- Episode-specific visualizations for actions, rewards, and distances
-- Observation heatmaps to understand what the model "sees"
-- Summary statistics across episodes with success metrics
-- Markdown documentation of evaluation results
-
-## Usage Guide
-
-### Running Standard Evaluations
-
-To evaluate a model using the standard approach:
+Install the DirectML backend for PyTorch:
 
 ```bash
-python train_robot.py --eval-only --load ./models/ppo_directml_20250326_202801/final_model --eval-episodes 5 --gui
+pip install torch-directml
 ```
 
-### Using the Dedicated Evaluation Tool
-
-For DirectML models, we've created a specialized evaluation script that avoids argument parsing conflicts:
+Verify the installation by running:
 
 ```bash
-python run_eval.py ./models/ppo_directml_20250326_202801/final_model 5 --verbose
+python tools/test_install.py --directml
 ```
 
-Where:
-- First argument: Path to the model file
-- Second argument (optional): Number of episodes to evaluate (default: 5)
-- Options:
-  - `--verbose`: Show detailed output
-  - `--no-gui`: Disable visualization
-  - `--speed=X`: Set visualization speed in seconds (default: 0.02)
+## Using DirectML Features
 
-### Using the Windows Batch File
+### Training with DirectML
 
-On Windows, you can use the provided batch file for even easier evaluation:
+To train a model using DirectML acceleration:
 
 ```bash
-evaluate_directml.bat [model_path] [episodes] [options]
+python main.py --train --directml
 ```
 
-Examples:
+This will automatically detect your AMD GPU and configure the training process to use DirectML.
+
+### Evaluating DirectML Models
+
+You can evaluate a trained DirectML model using:
+
 ```bash
-evaluate_directml.bat  # Uses default model and settings
-evaluate_directml.bat ./models/ppo_directml_20250326_202801/final_model 3  # 3 episodes
-evaluate_directml.bat ./models/my_model 5 "--no-gui --verbose"  # Headless mode with verbose output
+scripts/directml/test_directml.bat
 ```
 
-### Generating Visualizations
+Or for more options:
 
-Visualizations are automatically generated in the `visualizations/directml_TIMESTAMP` directory when evaluating DirectML models.
+```bash
+python scripts/directml/test_directml_model.py --model models/your_model --episodes 5
+```
 
-### Interpreting Results
+### Advanced Configuration
 
-The evaluation generates several key metrics:
+DirectML behavior can be tuned with environment variables:
 
-- **Success Rate**: Percentage of episodes where the robot successfully reached the target
-- **Average Distance**: Mean distance to target across all episodes
-- **Average Reward**: Mean total reward across all episodes
-- **Best Distance**: Closest approach to the target across all episodes
+- `PYTORCH_DIRECTML_VERBOSE`: Set to 1 for verbose output (default: 0)
+- `DIRECTML_ENABLE_OPTIMIZATION`: Enable DirectML optimization (default: 1)
+- `DIRECTML_GPU_TRANSFER_BIT_WIDTH`: Bit width for GPU transfers (default: 64)
 
-## Implementation Notes
+## Troubleshooting
 
-### Model Detection
+Common issues with DirectML:
 
-DirectML models are automatically detected by checking for "directml" in the model path. This triggers the appropriate handling for AMD GPU acceleration.
+1. **No GPU detected**: Make sure your AMD drivers are up to date.
+2. **Out of memory errors**: Reduce batch size or model complexity.
+3. **Performance issues**: Check for background processes using GPU resources.
 
-### Dimension Matching
+## Model Compatibility
 
-The system now handles dimension mismatches gracefully by:
+Models trained with DirectML are fully compatible with CPU-based inference and can be used interchangeably. However, for best performance, use the DirectML-specific scripts when working with an AMD GPU.
 
-1. Inferring the expected architecture from the state dictionary
-2. Identifying parameters that can be loaded directly
-3. Warning about parameters with shape mismatches
-4. Providing defaults for missing parameters
+## Development Notes
 
-### Error Handling
+When developing new features that should support DirectML:
 
-Enhanced error handling includes:
+1. Use the `torch_directml.device()` for tensor operations instead of hardcoding CUDA devices
+2. Use the utility function `is_directml_available()` to check for DirectML support
+3. Wrap DirectML-specific code in try/except blocks to fall back to CPU when needed
 
-- Comprehensive try-except blocks throughout the codebase
-- Detailed error logs with traceback information
-- Graceful fallbacks to CPU when DirectML is unavailable
+## Reference
 
-### Argument Parsing Conflicts
-
-Our specialized evaluation script uses techniques to avoid argument parsing conflicts:
-
-1. The `run_eval.py` script temporarily modifies `sys.argv` before importing modules
-2. Arguments are manually parsed to avoid conflicts with imported modules
-3. Isolated imports to minimize dependencies on the main training code
-
-## Future Improvements
-
-Potential future enhancements:
-
-1. Support for more DirectML-specific optimizations
-2. Additional visualization types for deeper analysis
-3. Interactive visualization dashboard
-4. Support for more complex model architectures
-
-## Known Issues
-
-Current known limitations:
-
-1. Some parameters may not load correctly if the model architecture differs significantly
-2. Visualizations may be limited for very high-dimensional observation spaces 
+For more information on DirectML and PyTorch, see:
+- [torch-directml Documentation](https://github.com/microsoft/DirectML)
+- [AMD ROCm Documentation](https://www.amd.com/en/graphics/servers-solutions-rocm) 

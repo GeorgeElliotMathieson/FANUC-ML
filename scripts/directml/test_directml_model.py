@@ -9,7 +9,7 @@ import pybullet as p
 import torch
 
 # Add the project directory to Python path
-project_dir = os.path.dirname(os.path.abspath(__file__))
+project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
 
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     # Parse command line arguments
     import argparse
     parser = argparse.ArgumentParser(description="Test a DirectML model")
-    parser.add_argument("--model", type=str, default="./models/ppo_directml_20250326_202801/final_model", help="Path to model file")
+    parser.add_argument("--model", type=str, default="../../models/ppo_directml_20250326_202801/final_model", help="Path to model file")
     parser.add_argument("--episodes", type=int, default=2, help="Number of episodes to run")
     parser.add_argument("--no-gui", action="store_true", help="Disable GUI visualization")
     parser.add_argument("--viz-speed", type=float, default=0.02, help="Visualization speed")
