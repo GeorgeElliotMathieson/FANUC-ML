@@ -15,9 +15,10 @@ class FANUCRobotEnv:
     Simplified FANUC robot environment that supports loading URDFs and simulating the robot.
     This is the core robot interface used by various learning environments.
     """
-    def __init__(self, client=None, render=True, verbose=False, max_force=100, dof=5):
+    def __init__(self, client=None, render=True, verbose=False, max_force=100, dof=None):
         self.verbose = verbose
         self.max_force = max_force
+        # dof will be set after loading the robot
         self.dof = dof
         
         # Control gains for position and velocity control
@@ -63,64 +64,77 @@ class FANUCRobotEnv:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_dir = os.path.abspath(os.path.join(current_dir, '../..'))
         
-        # Check for the URDF file in various possible locations, prioritizing the standardized structure
-        possible_paths = [
-            # Standard locations
-            os.path.join(project_dir, "robots", "urdf", "fanuc_lrmate_200ic.urdf"),
-            os.path.join(project_dir, "robots", "urdf", "fanuc.urdf"),
-            os.path.join(project_dir, "robots", "fanuc", "urdf", "fanuc.urdf"),
-            
-            # Legacy fallbacks for backwards compatibility
-            os.path.join(os.path.dirname(__file__), "../../robots/urdf/fanuc_lrmate_200ic.urdf"),
-        ]
+        # Use only the fanuc.urdf with meshes
+        urdf_path = os.path.join(project_dir, "robots", "urdf", "fanuc.urdf")
         
-        # Try each path
-        for urdf_path in possible_paths:
-            if os.path.exists(urdf_path):
-                if self.verbose:
-                    print(f"Loading FANUC robot URDF from: {urdf_path}")
-                robot_id = p.loadURDF(urdf_path, [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
+        if os.path.exists(urdf_path):
+            if self.verbose:
+                print(f"Loading FANUC robot URDF from: {urdf_path}")
+            robot_id = p.loadURDF(urdf_path, [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
+            
+            # After loading the robot, read the joint limits directly from the URDF
+            # This ensures we use the exact limits from the URDF file
+            if robot_id is not None:
+                # Initialize an empty joint_limits dictionary
+                self.joint_limits = {}
                 
-                # After loading the robot, read the joint limits directly from the URDF
-                # This ensures we use the exact limits from the URDF file
-                if robot_id is not None:
-                    # Initialize an empty joint_limits dictionary
-                    self.joint_limits = {}
+                # Get the number of joints
+                num_joints = p.getNumJoints(robot_id, physicsClientId=self.client)
+                
+                # Count revolute joints to determine DOF
+                revolute_joints = []
+                
+                # Extract joint limits for each joint
+                for i in range(num_joints):
+                    joint_info = p.getJointInfo(robot_id, i, physicsClientId=self.client)
                     
-                    # Get the number of joints
-                    num_joints = p.getNumJoints(robot_id, physicsClientId=self.client)
-                    
-                    # Extract joint limits for each joint
-                    for i in range(num_joints):
-                        joint_info = p.getJointInfo(robot_id, i, physicsClientId=self.client)
+                    # Only add revolute joints (type 0) to the joint_limits dictionary
+                    if joint_info[2] == p.JOINT_REVOLUTE:
+                        joint_index = joint_info[0]
+                        lower_limit = joint_info[8]
+                        upper_limit = joint_info[9]
                         
-                        # Only add revolute joints (type 0) to the joint_limits dictionary
-                        if joint_info[2] == p.JOINT_REVOLUTE:
-                            joint_index = joint_info[0]
-                            lower_limit = joint_info[8]
-                            upper_limit = joint_info[9]
-                            
-                            # Store the limits in the dictionary
-                            self.joint_limits[joint_index] = [lower_limit, upper_limit]
-                            
-                            if self.verbose:
-                                print(f"Joint {joint_index} ({joint_info[1].decode('utf-8')}): Limits [{lower_limit:.6f}, {upper_limit:.6f}]")
+                        # Store the limits in the dictionary
+                        self.joint_limits[joint_index] = [lower_limit, upper_limit]
+                        revolute_joints.append(joint_index)
+                        
+                        if self.verbose:
+                            print(f"Joint {joint_index} ({joint_info[1].decode('utf-8')}): Limits [{lower_limit:.6f}, {upper_limit:.6f}]")
                 
+                # Set DOF based on the number of revolute joints if not explicitly specified
+                if self.dof is None:
+                    self.dof = len(revolute_joints)
+                    if self.verbose:
+                        print(f"Detected {self.dof} revolute joints (DOF)")
+            
                 return robot_id
         
         # If we couldn't find the URDF, print a warning and fall back to a simple robot
-        print("WARNING: Could not find FANUC robot URDF file. Falling back to default robot.")
+        print("WARNING: Could not find FANUC robot URDF file at:", urdf_path)
         print("Current working directory:", os.getcwd())
-        print("Searched paths:", possible_paths)
         
         # Fallback to a simple robot for testing
-        return p.loadURDF("kuka_iiwa/model.urdf", [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
+        robot_id = p.loadURDF("kuka_iiwa/model.urdf", [0, 0, 0], useFixedBase=True, physicsClientId=self.client)
+        
+        # Set default DOF for fallback robot if not explicitly specified
+        if self.dof is None:
+            # Count revolute joints in fallback robot
+            num_joints = p.getNumJoints(robot_id, physicsClientId=self.client)
+            revolute_count = 0
+            for i in range(num_joints):
+                joint_info = p.getJointInfo(robot_id, i, physicsClientId=self.client)
+                if joint_info[2] == p.JOINT_REVOLUTE:
+                    revolute_count += 1
+            self.dof = revolute_count
+            
+        return robot_id
     
     def reset(self):
         # Reset to home position
-        home_position = [0, 0, 0, 0, 0]  # All joints at 0 position
+        home_position = [0] * self.dof  # All joints at 0 position
         for i, pos in enumerate(home_position):
-            p.resetJointState(self.robot_id, i, pos)
+            if i < self.dof:
+                p.resetJointState(self.robot_id, i, pos)
         
         # Get current state
         state = self._get_state()

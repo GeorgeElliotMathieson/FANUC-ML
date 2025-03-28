@@ -5,8 +5,7 @@ This directory contains the robot models, including URDF files and mesh assets u
 ## Directory Structure
 
 - `urdf/`: Contains URDF model files for the robots
-  - `fanuc_lrmate_200ic.urdf`: The main URDF file for the LR Mate 200iC robot
-  - `fanuc.urdf`: Alternative URDF model for compatibility with older scripts
+  - `fanuc.urdf`: The main URDF file for the FANUC robot with detailed meshes
 - `meshes/`: Contains STL and other 3D mesh files for the robot parts
 - `fanuc/`: Contains FANUC-specific configurations and auxiliary files
 
@@ -30,7 +29,7 @@ import os
 p.connect(p.GUI)
 
 # Get the path to the URDF file - update path as needed
-urdf_path = os.path.join("robots", "urdf", "fanuc_lrmate_200ic.urdf")
+urdf_path = os.path.join("robots", "urdf", "fanuc.urdf")
 robot_id = p.loadURDF(urdf_path, useFixedBase=True)
 
 # Control the robot

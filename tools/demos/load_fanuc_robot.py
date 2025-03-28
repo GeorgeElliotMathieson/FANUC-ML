@@ -51,7 +51,7 @@ def load_fanuc_robot():
     project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
     
     # Specify the path to the URDF file in the robots/urdf directory
-    urdf_path = os.path.join(project_root, "robots", "urdf", "fanuc_lrmate_200ic.urdf")
+    urdf_path = os.path.join(project_root, "robots", "urdf", "fanuc.urdf")
     
     # Load the robot URDF
     robot_id = p.loadURDF(
@@ -92,15 +92,30 @@ def get_joint_by_name(robot_id, name):
     return None
 
 def get_arm_joint_indices(robot_id):
-    """Get arm joint indices (the 6 main revolute joints)"""
-    joint_names = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+    """Get arm joint indices (the main revolute joints)"""
+    # Get all joints that appear to be main revolute joints
+    num_joints = p.getNumJoints(robot_id)
     indices = []
     
+    # First, try to get joints by known names
+    joint_names = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
     for name in joint_names:
         idx = get_joint_by_name(robot_id, name)
         if idx is not None:
             indices.append(idx)
     
+    # If we found joints by name, return them
+    if indices:
+        return indices
+    
+    # Otherwise, fallback to getting all revolute joints
+    print("Could not find joints by name, falling back to using all revolute joints")
+    for i in range(num_joints):
+        joint_info = p.getJointInfo(robot_id, i)
+        if joint_info[2] == p.JOINT_REVOLUTE:  # Check if joint is revolute
+            indices.append(i)
+    
+    print(f"Found {len(indices)} revolute joints in the robot")
     return indices
 
 def reset_robot_positions(robot_id):
@@ -120,10 +135,16 @@ def move_to_joint_position(robot_id, joint_positions, duration=1.0):
     """Move to specified joint positions over a duration"""
     arm_joints = get_arm_joint_indices(robot_id)
     
-    # Check if we have the correct number of positions
-    if len(joint_positions) != len(arm_joints):
-        print(f"Error: Expected {len(arm_joints)} joint positions, got {len(joint_positions)}")
-        return
+    # Adjust joint positions to match the number of actual joints
+    adjusted_positions = joint_positions.copy()
+    if len(adjusted_positions) > len(arm_joints):
+        # Truncate extra positions
+        print(f"Note: Truncating from {len(adjusted_positions)} positions to {len(arm_joints)} joints")
+        adjusted_positions = adjusted_positions[:len(arm_joints)]
+    elif len(adjusted_positions) < len(arm_joints):
+        # Pad with zeros
+        print(f"Note: Padding from {len(adjusted_positions)} positions to {len(arm_joints)} joints")
+        adjusted_positions.extend([0] * (len(arm_joints) - len(adjusted_positions)))
     
     # Store initial positions for interpolation
     initial_positions = []
@@ -140,7 +161,7 @@ def move_to_joint_position(robot_id, joint_positions, duration=1.0):
         
         # Linear interpolation for each joint
         for i, joint_idx in enumerate(arm_joints):
-            current_pos = initial_positions[i] + t * (joint_positions[i] - initial_positions[i])
+            current_pos = initial_positions[i] + t * (adjusted_positions[i] - initial_positions[i])
             p.setJointMotorControl2(
                 bodyIndex=robot_id,
                 jointIndex=joint_idx,
@@ -239,8 +260,14 @@ def optimize_robot_parameters(robot_id):
     
     print("Robot parameters optimized for stability with original inertia values")
 
-def main():
-    """Main function"""
+def main(keep_running=False):
+    """
+    Main function
+    
+    Args:
+        keep_running (bool): If True, keeps the simulation running after demo completes.
+                           If False, exits after demo completes.
+    """
     # Setup environment
     client_id = setup_environment()
     
@@ -256,15 +283,21 @@ def main():
     # Run demo
     demo_robot_motion(robot_id)
     
-    # Keep simulation running if in GUI mode
-    if SHOW_GUI:
+    # Keep simulation running if in GUI mode and keep_running is True
+    if SHOW_GUI and keep_running:
         print("\nSimulation running. Press Ctrl+C to exit.")
-        while True:
-            p.stepSimulation()
-            time.sleep(TIME_STEP)
+        try:
+            while True:
+                p.stepSimulation()
+                time.sleep(TIME_STEP)
+        except KeyboardInterrupt:
+            print("\nSimulation stopped by user.")
+    else:
+        print("\nDemo completed. Exiting.")
     
     # Disconnect from PyBullet
     p.disconnect()
 
 if __name__ == "__main__":
-    main() 
+    # Set keep_running to False to exit after demo completes
+    main(keep_running=False) 
