@@ -32,6 +32,7 @@ from typing import Dict, List, Tuple, Optional
 import sys
 from stable_baselines3.common.preprocessing import get_action_dim
 import torch as th
+from stable_baselines3.common.utils import set_random_seed
 
 # Global shared variables
 _WORKSPACE_POSITIONS = None
@@ -1540,7 +1541,7 @@ def main():
                     )
                 else:
                     # Evaluate model with standard evaluation
-                    evaluate_model(
+                    evaluate_model_wrapper(
                         model_path=args.load,
                         num_episodes=args.eval_episodes,  # Pass the eval_episodes parameter here
                         visualize=args.gui,
@@ -1717,469 +1718,407 @@ def main():
     # Run a final evaluation
     if args.eval_after_training:
         print("\nRunning final evaluation...")
-        evaluate_model(final_model_path, num_episodes=20, visualize=args.gui and args.viz_speed > 0, verbose=args.verbose)
+        evaluate_model_wrapper(model_path=final_model_path, num_episodes=20, visualize=args.gui and args.viz_speed > 0, verbose=args.verbose)
 
-def evaluate_model(model_path, num_episodes=20, visualize=True, verbose=True):
+def evaluate_model(env, policy, rollout_steps, num_episodes=10, render=False, verbose=True, 
+                   model_file=None, render_cb=None, directml=False, info_prefix=""):
     """
-    Evaluate a trained model and report performance metrics.
+    Evaluate a model using a specified policy.
     
     Args:
-        model_path: Path to the saved model
+        env: Environment to evaluate in
+        policy: Policy to use for evaluation
+        rollout_steps: Maximum number of steps per episode
         num_episodes: Number of episodes to evaluate
-        visualize: Whether to visualize the evaluation
-        verbose: Whether to print detailed output
+        render: Whether to render the environment
+        verbose: Whether to print verbose information
+        model_file: Path to model file (for tracking purposes)
+        render_cb: Optional callback for custom rendering
+        directml: Whether this is a DirectML model
+        info_prefix: Prefix for info messages
         
     Returns:
         Dictionary of evaluation metrics
     """
-    print(f"\nEvaluating model: {model_path}")
+    # Information to track during evaluation
+    total_rewards = []
+    episode_lengths = []
+    success_count = 0
+    avg_distance = 0
+    best_distance = float('inf')
+    worst_distance = 0
+    all_distances = []
+    all_rewards = []
+    all_joint_limits = []
     
-    # Check for model file existence and handle extensions
-    if not os.path.exists(model_path):
-        # Try adding .zip extension (standard format)
-        if os.path.exists(model_path + '.zip'):
-            model_path = model_path + '.zip'
-            print(f"Using model file with .zip extension: {model_path}")
-        # Try adding .pt extension (DirectML format)
-        elif os.path.exists(model_path + '.pt'):
-            model_path = model_path + '.pt'
-            print(f"Using model file with .pt extension: {model_path}")
-        # If nothing exists, try removing extensions
-        elif model_path.endswith('.zip') and os.path.exists(model_path[:-4]):
-            model_path = model_path[:-4]
-            print(f"Using model file without extension: {model_path}")
-        elif model_path.endswith('.pt') and os.path.exists(model_path[:-3]):
-            model_path = model_path[:-3]
-            print(f"Using model file without extension: {model_path}")
-        else:
-            print(f"ERROR: Model file not found at {model_path}")
-            # Log this to the error file
-            with open("error_log.txt", "w") as f:
-                f.write(f"FileNotFoundError: [Errno 2] No such file or directory: '{model_path}'")
-            return None
+    # For tracking
+    episode_data = []
     
-    # Load workspace data if not already loaded
-    if _WORKSPACE_POSITIONS is None:
-        load_workspace_data(verbose=verbose)
+    # Check if render is supported
+    render_supported = render and hasattr(env, 'render')
     
-    # Create environment for evaluation
-    env = RobotPositioningRevampedEnv(
-        gui=visualize,
-        viz_speed=0.01 if visualize else 0.0,
-        verbose=verbose
-    )
-    
-    # Check if it's a DirectML model
-    is_directml_model = 'directml' in model_path.lower() or model_path.endswith('.pt')
-    
-    if is_directml_model:
-        print("Detected DirectML model. Using DirectML-compatible loading...")
-        try:
-            # Create a custom implementation to avoid DirectML dependency issues
-            class CustomDirectMLModel:
-                """
-                Custom implementation of a DirectML model that matches the architecture
-                of the trained model and provides compatible predict method.
-                """
-                
-                def __init__(self, observation_space, action_space, device="cpu"):
-                    """Initialize the model with the right observation and action spaces"""
-                    self.device = device
-                    self.observation_space = observation_space
-                    self.action_space = action_space
-                    
-                    # Initialize networks with structure matching loaded model
-                    self._init_networks()
-                
-                def predict(self, observation, deterministic=True):
-                    """
-                    Get action predictions from the model, compatible with SB3 interface.
-                    
-                    Args:
-                        observation: Environment observation
-                        deterministic: Whether to use deterministic actions
-                        
-                    Returns:
-                        action: Action to take
-                        _: Placeholder for state (None)
-                    """
-                    with torch.no_grad():
-                        # Convert to tensor if it's a numpy array
-                        if isinstance(observation, np.ndarray):
-                            observation = torch.FloatTensor(observation).to(self.device)
-                            if observation.dim() == 1:
-                                observation = observation.unsqueeze(0)
-                        
-                        # Forward pass through each component separately with debugging
-                        features = self.feature_extractor(observation)
-                        
-                        # First layer of shared trunk
-                        shared_features = self.shared_trunk_linear1(features)
-                        shared_features = self.shared_trunk_norm(shared_features)
-                        shared_features = torch.tanh(shared_features)
-                        
-                        # Second layer of shared trunk
-                        shared_features = self.shared_trunk_linear2(shared_features)
-                        
-                        # Get action mean and std
-                        action_mean = self.action_mean(shared_features)
-                        
-                        if deterministic:
-                            action = action_mean
-                        else:
-                            action_log_std = self.action_log_std(shared_features)
-                            action_std = torch.exp(action_log_std)
-                            normal = torch.distributions.Normal(action_mean, action_std)
-                            action = normal.sample()
-                        
-                        # Convert to numpy
-                        action_np = action.cpu().numpy().flatten()
-                        return action_np, None
-                
-                def _init_networks(self):
-                    """Initialize the model architecture to match the loaded weights"""
-                    import torch.nn as nn
-                    
-                    # Feature extractor with 128 dimensions
-                    self.feature_extractor = nn.Sequential(
-                        nn.Linear(self.observation_space.shape[0], 128),  # 0
-                        nn.LayerNorm(128),                               # 1
-                        nn.Tanh(),                                       # 2
-                        nn.Linear(128, 128),                             # 3
-                        nn.LayerNorm(128),                               # 4
-                        nn.Tanh(),                                       # 5
-                        nn.Linear(128, 128)                              # 6
-                    )
-                    
-                    # Shared trunk components broken down to avoid dimension mismatch
-                    self.shared_trunk_linear1 = nn.Linear(128, 128)      # 0
-                    self.shared_trunk_norm = nn.LayerNorm(128)           # 1
-                    # Tanh is applied directly in forward pass
-                    self.shared_trunk_linear2 = nn.Linear(128, 256)      # 3
-                    
-                    # Action output layers
-                    self.action_mean = nn.Linear(256, self.action_space.shape[0])
-                    self.action_log_std = nn.Linear(256, self.action_space.shape[0])
-                    
-                    # Value head
-                    self.value_head = nn.Sequential(
-                        nn.Linear(256, 128),                             # 0
-                        nn.Tanh(),                                       # 1
-                        nn.Linear(128, 1)                                # 2
-                    )
-                    
-                    # Constants from the original model
-                    self.action_scale = torch.tensor(1.0)
-                    self.log_2pi = torch.log(torch.tensor(2.0 * np.pi))
-                    self.sqrt_2 = torch.sqrt(torch.tensor(2.0))
-                    self.eps = torch.tensor(1e-8)
-                    
-                    # Move to device if specified
-                    self.to(self.device)
-                    
-                def to(self, device):
-                    """Move the model to the specified device"""
-                    # Convert string to device if needed
-                    if isinstance(device, str):
-                        device = torch.device(device)
-                    
-                    self.device = device
-                    self.feature_extractor = self.feature_extractor.to(device)
-                    self.shared_trunk_linear1 = self.shared_trunk_linear1.to(device)
-                    self.shared_trunk_norm = self.shared_trunk_norm.to(device)
-                    self.shared_trunk_linear2 = self.shared_trunk_linear2.to(device)
-                    self.action_mean = self.action_mean.to(device)
-                    self.action_log_std = self.action_log_std.to(device)
-                    self.value_head = self.value_head.to(device)
-                    
-                    # Move constants to device too
-                    self.action_scale = self.action_scale.to(device)
-                    self.log_2pi = self.log_2pi.to(device)
-                    self.sqrt_2 = self.sqrt_2.to(device)
-                    self.eps = self.eps.to(device)
-                    
-                    return self
-                    
-                def load(self, path):
-                    """Load parameters from a saved model file"""
-                    print(f"Loading model from {path}...")
-                    try:
-                        # Use 'cpu' string to avoid DirectML issues
-                        checkpoint = torch.load(path, map_location='cpu')
-                        
-                        # Load policy parameters
-                        if 'policy_state_dict' in checkpoint:
-                            state_dict = checkpoint['policy_state_dict']
-                            
-                            print("Found policy state dict with keys:", list(state_dict.keys()))
-                            
-                            # Load constants first if they exist
-                            if 'action_scale' in state_dict and isinstance(state_dict['action_scale'], torch.Tensor):
-                                self.action_scale = state_dict['action_scale'].to(self.device)
-                            if 'log_2pi' in state_dict and isinstance(state_dict['log_2pi'], torch.Tensor):
-                                self.log_2pi = state_dict['log_2pi'].to(self.device)
-                            if 'sqrt_2' in state_dict and isinstance(state_dict['sqrt_2'], torch.Tensor):
-                                self.sqrt_2 = state_dict['sqrt_2'].to(self.device)
-                            if 'eps' in state_dict and isinstance(state_dict['eps'], torch.Tensor):
-                                self.eps = state_dict['eps'].to(self.device)
-                            
-                            # Define direct mappings for network parameters
-                            direct_mappings = {
-                                # Feature extractor
-                                'feature_extractor.0.weight': self.feature_extractor[0].weight,
-                                'feature_extractor.0.bias': self.feature_extractor[0].bias,
-                                'feature_extractor.1.weight': self.feature_extractor[1].weight,
-                                'feature_extractor.1.bias': self.feature_extractor[1].bias,
-                                'feature_extractor.3.weight': self.feature_extractor[3].weight,
-                                'feature_extractor.3.bias': self.feature_extractor[3].bias,
-                                'feature_extractor.4.weight': self.feature_extractor[4].weight,
-                                'feature_extractor.4.bias': self.feature_extractor[4].bias,
-                                'feature_extractor.6.weight': self.feature_extractor[6].weight,
-                                'feature_extractor.6.bias': self.feature_extractor[6].bias,
-                                
-                                # Shared trunk (broken down into individual components)
-                                'shared_trunk.0.weight': self.shared_trunk_linear1.weight,
-                                'shared_trunk.0.bias': self.shared_trunk_linear1.bias,
-                                'shared_trunk.1.weight': self.shared_trunk_norm.weight,
-                                'shared_trunk.1.bias': self.shared_trunk_norm.bias,
-                                'shared_trunk.3.weight': self.shared_trunk_linear2.weight,
-                                'shared_trunk.3.bias': self.shared_trunk_linear2.bias,
-                                
-                                # Action output
-                                'action_mean.weight': self.action_mean.weight,
-                                'action_mean.bias': self.action_mean.bias,
-                                'action_log_std.weight': self.action_log_std.weight,
-                                'action_log_std.bias': self.action_log_std.bias,
-                                
-                                # Value head
-                                'value_head.0.weight': self.value_head[0].weight,
-                                'value_head.0.bias': self.value_head[0].bias,
-                                'value_head.2.weight': self.value_head[2].weight,
-                                'value_head.2.bias': self.value_head[2].bias,
-                            }
-                            
-                            # Load parameters with direct mapping
-                            loaded_params = 0
-                            for name_in_dict, param_in_model in direct_mappings.items():
-                                if name_in_dict in state_dict:
-                                    dict_param = state_dict[name_in_dict]
-                                    # Check if dimensions match
-                                    if dict_param.shape == param_in_model.shape:
-                                        param_in_model.data.copy_(dict_param)
-                                        loaded_params += 1
-                                    else:
-                                        print(f"Shape mismatch for {name_in_dict}: expected {param_in_model.shape}, got {dict_param.shape}")
-                                else:
-                                    print(f"Parameter {name_in_dict} not found in state dict")
-                            
-                            print(f"Successfully loaded {loaded_params} parameters")
-                            print("Model loaded successfully!")
-                            
-                        else:
-                            print("ERROR: No policy state dict found in checkpoint")
-                            
-                    except Exception as e:
-                        import traceback
-                        print(f"Error loading model parameters: {e}")
-                        with open("error_log.txt", "w") as f:
-                            f.write(f"Exception: {str(e)}\n")
-                            f.write(traceback.format_exc())
-                        raise e
+    # For each episode
+    for i in range(num_episodes):
+        if verbose:
+            print(f"{info_prefix}Episode {i+1}/{num_episodes}...")
             
-            # Create model instance with CPU
-            model = CustomDirectMLModel(
-                observation_space=env.observation_space,
-                action_space=env.action_space,
-                device="cuda" if torch.cuda.is_available() else "cpu"
-            )
-            
-            # Load the model
-            model.load(model_path)
-            print(f"Custom DirectML model loaded from {model_path}")
-                
-        except Exception as e:
-            print(f"Error loading DirectML model: {e}")
-            # Log error to file
-            with open("error_log.txt", "w") as f:
-                f.write(f"Exception: {str(e)}\n")
-                import traceback
-                f.write(traceback.format_exc())
-            return None
-            
-    else:
-        # Standard Stable-Baselines3 model loading
-        print("Using standard Stable-Baselines3 model loading...")
-        # Wrap in VecEnv as required by Stable-Baselines3
-        vec_env = DummyVecEnv([lambda: env])
+        # Reset the environment
+        observation, _ = env.reset()
         
-        # Check if VecNormalize statistics are available
-        vec_normalize_path = model_path.replace("final_model", "vec_normalize_stats")
-        if os.path.exists(vec_normalize_path):
-            # Load with normalization
-            vec_env = VecNormalize.load(vec_normalize_path, vec_env)
-            vec_env.training = False  # Don't update normalization statistics during evaluation
-            vec_env.norm_reward = False  # Don't normalize rewards during evaluation
-            print("Loaded normalization statistics")
-        else:
-            print("No normalization statistics found, evaluating without normalization")
+        # Start at zero reward
+        total_reward = 0
         
-        try:
-            # Load the model
-            model = PPO.load(model_path, env=vec_env)
-            print(f"Model loaded from {model_path}")
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            # Log error to file
-            with open("error_log.txt", "w") as f:
-                f.write(f"Exception: {str(e)}\n")
-                import traceback
-                f.write(traceback.format_exc())
-            return None
+        # For tracking the episode
+        episode_rewards = []
+        episode_obs = []
+        episode_actions = []
+        episode_dones = []
+        episode_infos = []
+        
+        # Whether the episode was a success
+        episode_success = False
+        episode_distance = float('inf')
+        within_limits = True
+        
+        # Run a single episode
+        for t in range(rollout_steps):
+            # Store observation
+            episode_obs.append(observation)
+            
+            # If we should render, do so
+            if render_supported:
+                try:
+                    env.render()
+                except (NotImplementedError, Exception) as e:
+                    print(f"Warning: Rendering not supported or failed: {e}")
+                    render_supported = False  # Disable rendering for future steps
+            
+            # Use the policy to predict an action
+            if directml:
+                action, _ = policy.predict(observation, deterministic=True)
+            else:
+                action, _ = policy.predict(observation)
+                
+            # Store action
+            episode_actions.append(action)
+            
+            # Take a step in the environment
+            observation, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+            
+            # Store reward and done
+            episode_rewards.append(reward)
+            episode_dones.append(done)
+            episode_infos.append(info)
+            
+            # Add to total reward
+            total_reward += reward
+            
+            # Custom rendering callback
+            if render_cb:
+                render_cb(env, t, info)
+                
+            # If done, break
+            if done:
+                break
+                
+        # Store the final observation
+        episode_obs.append(observation)
+        
+        # Track success
+        if 'success' in info and info['success']:
+            episode_success = True
+            success_count += 1
+            
+        # Track distance
+        if 'distance' in info:
+            episode_distance = info['distance']
+            avg_distance += episode_distance
+            all_distances.append(episode_distance)
+            best_distance = min(best_distance, episode_distance)
+            worst_distance = max(worst_distance, episode_distance)
+            
+        # Track joint limits
+        if 'positions_within_limits' in info:
+            within_limits = info['positions_within_limits']
+            all_joint_limits.append(within_limits)
+            
+        # Add the episode information
+        episode_data.append({
+            'obs': episode_obs,
+            'actions': episode_actions,
+            'rewards': episode_rewards,
+            'dones': episode_dones,
+            'infos': episode_infos,
+            'total_reward': total_reward,
+            'success': episode_success,
+            'distance': episode_distance,
+            'within_limits': within_limits,
+            'length': len(episode_rewards)
+        })
+        
+        # Add to metrics
+        total_rewards.append(total_reward)
+        episode_lengths.append(len(episode_rewards))
+        all_rewards.extend(episode_rewards)
+        
+        # Print verbose information
+        if verbose:
+            success_str = "Success" if episode_success else "Failure"
+            distance_str = f"{episode_distance:.2f} cm" if episode_distance != float('inf') else "N/A"
+            limits_str = "Within limits" if within_limits else "Exceeded limits"
+            print(f"{info_prefix}  {success_str}, Distance: {distance_str}, Steps: {len(episode_rewards)}, Reward: {total_reward:.2f}, {limits_str}")
     
-    # Initialize metrics
-    metrics = {
-        "success_rate": 0.0,
-        "avg_distance": 0.0,
-        "avg_steps": 0.0,
-        "avg_reward": 0.0,
-        "min_distance": float('inf'),
-        "max_distance": 0.0,
-        "success_episodes": [],
-        "failure_episodes": [],
+    # Calculate metrics
+    success_rate = success_count / num_episodes
+    avg_reward = sum(total_rewards) / num_episodes
+    avg_episode_length = sum(episode_lengths) / num_episodes
+    avg_distance = avg_distance / num_episodes if num_episodes > 0 else float('inf')
+    
+    # Calculate statistics on rewards
+    reward_mean = np.mean(all_rewards) if len(all_rewards) > 0 else 0
+    reward_std = np.std(all_rewards) if len(all_rewards) > 0 else 0
+    reward_min = min(all_rewards) if len(all_rewards) > 0 else 0
+    reward_max = max(all_rewards) if len(all_rewards) > 0 else 0
+    
+    # Print overall results
+    if verbose:
+        print("\n" + "="*50)
+        print(f"{info_prefix}Evaluation Results:")
+        print(f"{info_prefix}  Success Rate: {success_rate:.2%} ({success_count}/{num_episodes})")
+        print(f"{info_prefix}  Average Reward: {avg_reward:.2f}")
+        print(f"{info_prefix}  Average Episode Length: {avg_episode_length:.1f} steps")
+        if all_distances:
+            print(f"{info_prefix}  Average Distance: {avg_distance:.2f} cm")
+            print(f"{info_prefix}  Best Distance: {best_distance:.2f} cm")
+            print(f"{info_prefix}  Worst Distance: {worst_distance:.2f} cm")
+        if all_joint_limits:
+            limits_rate = sum(all_joint_limits) / len(all_joint_limits)
+            print(f"{info_prefix}  Joint Limits Respected: {limits_rate:.2%}")
+        print(f"{info_prefix}  Reward Statistics: mean={reward_mean:.2f}, std={reward_std:.2f}, min={reward_min:.2f}, max={reward_max:.2f}")
+        print("="*50)
+    
+    # Add DirectML specific visualizations if needed
+    if directml and len(episode_data) > 0:
+        try:
+            generate_directml_visualizations(episode_data)
+        except Exception as e:
+            print(f"Error generating DirectML visualizations: {e}")
+    
+    # Return the metrics
+    return {
+        'success_rate': success_rate,
+        'avg_reward': avg_reward,
+        'avg_episode_length': avg_episode_length,
+        'avg_distance': avg_distance,
+        'best_distance': best_distance,
+        'worst_distance': worst_distance,
+        'episode_data': episode_data,
+        'model_file': model_file
     }
+
+def generate_directml_visualizations(episode_data):
+    """
+    Generate visualizations for DirectML model evaluation data
     
-    # Run evaluation episodes
-    total_reward = 0.0
-    total_steps = 0
-    total_distance = 0.0
-    successes = 0
-    
-    for ep in range(num_episodes):
-        if verbose:
-            print(f"\nEvaluation Episode {ep+1}/{num_episodes}")
+    Args:
+        episode_data: List of dictionaries containing episode data
         
-        # Reset environment with API compatibility handling
-        try:
-            # Try new gymnasium API (returns obs, info)
-            if is_directml_model:
-                # DirectML version
-                obs, info = env.reset()
-                initial_distance = info.get('initial_distance', 0.0)
-            else:
-                # Stable-Baselines3 version with VecEnv
-                obs, info = vec_env.reset()
-                initial_distance = info[0].get('initial_distance', 0.0)
-        except ValueError:
-            # Fall back to older gym API (returns only obs)
-            obs = env.reset() if is_directml_model else vec_env.reset()
-            # Estimate initial distance as best we can
-            state = env.robot._get_state()
-            ee_position = state[12:15]
-            if hasattr(env, '_target_position'):
-                initial_distance = np.linalg.norm(ee_position - env._target_position)
-            elif hasattr(env, 'target_position'):
-                initial_distance = np.linalg.norm(ee_position - env.target_position)
-            else:
-                initial_distance = 0.0
+    Returns:
+        Path to the visualization directory
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend
+        import matplotlib.pyplot as plt
+        from datetime import datetime
+        import os
+        import numpy as np
         
-        if verbose:
-            print(f"Initial distance to target: {initial_distance*100:.2f}cm")
+        # Create visualization directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        viz_dir = f"./visualizations/directml_{timestamp}"
+        os.makedirs(viz_dir, exist_ok=True)
         
-        # Initialize episode variables
-        done = False
-        ep_reward = 0.0
-        ep_steps = 0
-        best_distance = initial_distance
-        
-        # Run episode
-        while not done:
-            # Get action from model
-            action, _ = model.predict(obs, deterministic=True)
+        # Generate episode-specific visualizations
+        for i, ep_data in enumerate(episode_data):
+            ep_dir = f"{viz_dir}/episode_{i+1}"
+            os.makedirs(ep_dir, exist_ok=True)
             
-            # Step environment with the action
-            if is_directml_model:
-                # DirectML version with newer Gymnasium API
-                obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-                reward_value = reward
-            else:
-                # Stable-Baselines3 version with VecEnv
-                obs, reward, done, info = vec_env.step(action)
-                reward_value = reward[0]
+            # Convert lists to numpy arrays for visualization
+            rewards = np.array(ep_data['rewards']) if 'rewards' in ep_data and ep_data['rewards'] else np.array([])
+            actions = np.array(ep_data['actions']) if 'actions' in ep_data and ep_data['actions'] else np.array([])
             
-            # Update metrics
-            ep_reward += reward_value
-            ep_steps += 1
+            # Extract distances from info dictionaries
+            distances = []
+            if 'infos' in ep_data and ep_data['infos']:
+                for info in ep_data['infos']:
+                    if 'distance' in info:
+                        distances.append(info['distance'])
+            distances = np.array(distances)
             
-            try:
-                # Extract distance from info
-                if is_directml_model:
-                    current_distance = info.get('distance', 0.0)
+            # Convert observations
+            observations = None
+            if 'obs' in ep_data and ep_data['obs']:
+                # Convert list of observations to numpy array
+                # Skip the last observation which is after the episode ends
+                if len(ep_data['obs']) > 1:
+                    try:
+                        # First try to convert directly
+                        observations = np.array(ep_data['obs'][:-1])
+                    except:
+                        # If that fails, try to handle different shapes
+                        obs_list = []
+                        for obs in ep_data['obs'][:-1]:
+                            # Handle tuple observations
+                            if isinstance(obs, tuple) and len(obs) > 0:
+                                obs = obs[0]
+                            # Convert to numpy if possible
+                            if isinstance(obs, np.ndarray):
+                                obs_list.append(obs)
+                            elif isinstance(obs, list):
+                                obs_list.append(np.array(obs))
+                        
+                        if obs_list:
+                            # Take first dimension if observations have multiple dimensions
+                            if len(obs_list[0].shape) > 1:
+                                observations = np.array([o.flatten() for o in obs_list])
+                            else:
+                                observations = np.array(obs_list)
+            
+            # Plot reward over time
+            if len(rewards) > 0:
+                plt.figure(figsize=(10, 6))
+                plt.plot(rewards)
+                plt.title(f"Episode {i+1} Rewards")
+                plt.xlabel("Step")
+                plt.ylabel("Reward")
+                plt.grid(True)
+                plt.savefig(f"{ep_dir}/rewards.png")
+                plt.close()
+            
+            # Plot distance over time
+            if len(distances) > 0:
+                plt.figure(figsize=(10, 6))
+                plt.plot(distances)
+                plt.title(f"Episode {i+1} Distance to Target")
+                plt.xlabel("Step")
+                plt.ylabel("Distance (cm)")
+                plt.grid(True)
+                plt.savefig(f"{ep_dir}/distances.png")
+                plt.close()
+            
+            # Plot actions over time
+            if len(actions) > 0 and actions.size > 0:
+                plt.figure(figsize=(10, 6))
+                if len(actions.shape) > 1:
+                    for j in range(actions.shape[1]):
+                        plt.plot(actions[:, j], label=f"Action {j+1}")
+                    plt.legend()
                 else:
-                    current_distance = info[0].get('distance', 0.0)
-            except (IndexError, TypeError):
-                # Fallback if info is not structured as expected
-                current_distance = best_distance
+                    plt.plot(actions, label="Action")
+                plt.title(f"Episode {i+1} Actions")
+                plt.xlabel("Step")
+                plt.ylabel("Action Value")
+                plt.grid(True)
+                plt.savefig(f"{ep_dir}/actions.png")
+                plt.close()
             
-            # Update best distance
-            best_distance = min(best_distance, current_distance)
-            
-            # Delay for visualization
-            if visualize:
-                time.sleep(0.01)
+            # Visualization of observations
+            if observations is not None and observations.size > 0:
+                # Only visualize if observations are not too high-dimensional
+                if len(observations.shape) > 1 and observations.shape[1] <= 30:
+                    plt.figure(figsize=(12, 8))
+                    # Plot first 10 dimensions or all if less than 10
+                    for j in range(min(10, observations.shape[1])):
+                        plt.plot(observations[:, j], label=f"Obs {j+1}")
+                    plt.title(f"Episode {i+1} Observations")
+                    plt.xlabel("Step")
+                    plt.ylabel("Value")
+                    plt.legend()
+                    plt.grid(True)
+                    plt.savefig(f"{ep_dir}/observations.png")
+                    plt.close()
+                
+                # Create heatmap of observations if not too large
+                if len(observations.shape) > 1 and observations.shape[1] <= 100:
+                    plt.figure(figsize=(12, 8))
+                    plt.imshow(observations.T, aspect='auto', cmap='viridis')
+                    plt.colorbar(label='Value')
+                    plt.title(f"Episode {i+1} Observation Heatmap")
+                    plt.xlabel("Step")
+                    plt.ylabel("Observation Dimension")
+                    plt.tight_layout()
+                    plt.savefig(f"{ep_dir}/observation_heatmap.png")
+                    plt.close()
         
-        # Calculate success
-        try:
-            if is_directml_model:
-                success = info.get('success', False)
-            else:
-                success = info[0].get('target_reached', False)
-        except (IndexError, TypeError):
-            success = False
+        # Generate summary visualizations
+        plt.figure(figsize=(10, 6))
+        total_rewards = [ep['total_reward'] for ep in episode_data if 'total_reward' in ep]
+        if total_rewards:
+            plt.bar(range(1, len(total_rewards) + 1), total_rewards)
+            plt.title("Total Rewards by Episode")
+            plt.xlabel("Episode")
+            plt.ylabel("Total Reward")
+            plt.grid(axis='y')
+            plt.savefig(f"{viz_dir}/total_rewards.png")
+            plt.close()
         
-        # Update metrics
-        total_reward += ep_reward
-        total_steps += ep_steps
-        total_distance += best_distance
+        plt.figure(figsize=(10, 6))
+        distances = [ep['distance'] for ep in episode_data if 'distance' in ep]
+        if distances:
+            plt.bar(range(1, len(distances) + 1), distances)
+            plt.title("Final Distances by Episode")
+            plt.xlabel("Episode")
+            plt.ylabel("Final Distance (cm)")
+            plt.grid(axis='y')
+            plt.savefig(f"{viz_dir}/final_distances.png")
+            plt.close()
         
-        if success:
-            successes += 1
-            metrics["success_episodes"].append(ep)
-        else:
-            metrics["failure_episodes"].append(ep)
+        plt.figure(figsize=(10, 6))
+        success_count = sum(1 for ep in episode_data if 'success' in ep and ep['success'])
+        if episode_data:
+            success_rate = (success_count / len(episode_data)) * 100
+            plt.bar(['Success', 'Failure'], [success_rate, 100 - success_rate])
+            plt.title("Episode Outcomes")
+            plt.ylabel("Percentage")
+            plt.grid(axis='y')
+            plt.savefig(f"{viz_dir}/success_rate.png")
+            plt.close()
         
-        # Update min/max distances
-        metrics["min_distance"] = min(metrics["min_distance"], best_distance)
-        metrics["max_distance"] = max(metrics["max_distance"], best_distance)
+        # Create a README file
+        with open(f"{viz_dir}/README.md", "w") as f:
+            f.write("# DirectML Model Evaluation Visualizations\n\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(f"## Summary\n\n")
+            f.write(f"- Total episodes: {len(episode_data)}\n")
+            if episode_data:
+                success_rate = (success_count / len(episode_data)) * 100
+                f.write(f"- Success rate: {success_rate:.1f}%\n")
+                if total_rewards:
+                    f.write(f"- Average reward: {np.mean(total_rewards):.2f}\n")
+                if distances:
+                    f.write(f"- Average final distance: {np.mean(distances):.2f} cm\n")
+            f.write(f"\n## Visualization Guide\n\n")
+            f.write("Each episode directory contains:\n\n")
+            f.write("- `rewards.png`: Reward at each step\n")
+            f.write("- `distances.png`: Distance to target at each step\n")
+            f.write("- `actions.png`: Actions taken at each step\n")
+            f.write("- `observations.png`: Observation values over time\n")
+            f.write("- `observation_heatmap.png`: Heatmap of observation dimensions\n\n")
+            f.write("Summary visualizations in the root directory:\n\n")
+            f.write("- `total_rewards.png`: Total reward for each episode\n")
+            f.write("- `final_distances.png`: Final distance for each episode\n")
+            f.write("- `success_rate.png`: Success vs failure rate\n")
         
-        # Print episode results
-        if verbose:
-            print(f"Episode {ep+1} - {'SUCCESS' if success else 'FAILURE'}")
-            print(f"  Best distance: {best_distance*100:.2f}cm")
-            print(f"  Steps: {ep_steps}")
-            print(f"  Reward: {ep_reward:.2f}")
-    
-    # Calculate final metrics
-    metrics["success_rate"] = successes / num_episodes
-    metrics["avg_distance"] = total_distance / num_episodes
-    metrics["avg_steps"] = total_steps / num_episodes
-    metrics["avg_reward"] = total_reward / num_episodes
-    
-    # Print final results
-    print("\nEvaluation Results:")
-    print(f"Success Rate: {metrics['success_rate']*100:.1f}%")
-    print(f"Average Distance: {metrics['avg_distance']*100:.2f}cm")
-    print(f"Average Steps: {metrics['avg_steps']:.1f}")
-    print(f"Average Reward: {metrics['avg_reward']:.2f}")
-    print(f"Best Distance: {metrics['min_distance']*100:.2f}cm")
-    
-    # Close environment
-    if not is_directml_model:
-        vec_env.close()
-    else:
-        env.close()
-    
-    return metrics
+        print(f"DirectML visualizations generated in: {viz_dir}")
+        return viz_dir
+        
+    except Exception as e:
+        import traceback
+        print(f"Error generating visualizations: {e}")
+        print(traceback.format_exc())
+        return None
 
 def run_evaluation_sequence(model_path, viz_speed=0.02, save_video=False):
     """
@@ -2369,6 +2308,675 @@ class JointLimitMonitorCallback(BaseCallback):
                 self.last_log_time = time.time()
         
         return True
+
+class CustomDirectMLModel:
+    """
+    Advanced implementation of a DirectML model that dynamically adapts to 
+    the architecture of the trained model and provides compatible predict method.
+    Features:
+    - Automatic dimension adaptation
+    - Flexible parameter loading
+    - Architecture inference from state dict
+    """
+    
+    def __init__(self, observation_space, action_space, device="cpu"):
+        """Initialize the model with the right observation and action spaces"""
+        self.device = device
+        self.observation_space = observation_space
+        self.action_space = action_space
+        self.input_dim = observation_space.shape[0]
+        self.output_dim = action_space.shape[0]
+        
+        # Initialize networks with placeholder structure
+        # (will be refined after loading state dict)
+        self.architecture = {}
+        self.networks = {}
+        self.constants = {}
+        
+        # We'll initialize the actual networks after analyzing the state dict
+        # to ensure the dimensions exactly match
+    
+    def predict(self, observation, deterministic=True):
+        """
+        Get action predictions from the model, compatible with SB3 interface.
+        
+        Args:
+            observation: Environment observation
+            deterministic: Whether to use deterministic actions
+            
+        Returns:
+            action: Action to take
+            _: Placeholder for state (None)
+        """
+        with torch.no_grad():
+            # Handle different observation types
+            if isinstance(observation, tuple):
+                # For tuple observations, take the first element
+                print(f"Tuple observation detected with {len(observation)} elements")
+                observation = observation[0]
+            elif isinstance(observation, dict):
+                # For dict observations, extract the main observation
+                if 'obs' in observation:
+                    observation = observation['obs']
+                else:
+                    # Try to find the largest tensor or array as the main observation
+                    main_obs = None
+                    max_size = 0
+                    for key, value in observation.items():
+                        if isinstance(value, (np.ndarray, torch.Tensor)):
+                            size = np.prod(value.shape) if hasattr(value, 'shape') else 1
+                            if size > max_size:
+                                max_size = size
+                                main_obs = value
+                    if main_obs is not None:
+                        observation = main_obs
+                    else:
+                        raise ValueError(f"Could not determine main observation from dict: {observation.keys()}")
+            
+            # Convert to tensor if it's a numpy array
+            if isinstance(observation, np.ndarray):
+                observation = torch.FloatTensor(observation).to(self.device)
+                if observation.dim() == 1:
+                    observation = observation.unsqueeze(0)
+            
+            # Check if model is initialized
+            if not hasattr(self, 'initialized') or not self.initialized:
+                raise RuntimeError("Model not initialized. Call load() first!")
+            
+            # Forward pass through feature extractor
+            features = self.feature_extractor(observation)
+            
+            # Forward pass through shared trunk (components applied individually)
+            shared_features = features
+            for module_name in sorted([k for k in self.networks.keys() if k.startswith('shared_trunk')]):
+                module = self.networks[module_name]
+                shared_features = module(shared_features)
+                # Apply activation after linear/norm layers if needed
+                if module_name.endswith('linear') and self.architecture.get('trunk_activation') == 'tanh':
+                    shared_features = torch.tanh(shared_features)
+                elif module_name.endswith('linear') and self.architecture.get('trunk_activation') == 'relu':
+                    shared_features = torch.relu(shared_features)
+            
+            # Get action mean
+            action_mean = self.networks['action_mean'](shared_features)
+            
+            if deterministic:
+                action = action_mean
+            else:
+                action_log_std = self.networks['action_log_std'](shared_features)
+                action_std = torch.exp(action_log_std)
+                normal = torch.distributions.Normal(action_mean, action_std)
+                action = normal.sample()
+            
+            # Convert to numpy
+            action_np = action.cpu().numpy().flatten()
+            return action_np, None
+    
+    def get_features(self, observation):
+        """
+        Extract features from an observation using the model's feature extractor
+        
+        Args:
+            observation: Environment observation
+            
+        Returns:
+            Feature vector
+        """
+        with torch.no_grad():
+            # Convert to tensor if it's a numpy array
+            if isinstance(observation, np.ndarray):
+                observation = torch.FloatTensor(observation).to(self.device)
+                if observation.dim() == 1:
+                    observation = observation.unsqueeze(0)
+            
+            # Extract features
+            features = self.feature_extractor(observation)
+            return features.cpu().numpy()
+    
+    def _infer_architecture(self, state_dict):
+        """
+        Analyze state dict to infer the architecture of the original model
+        
+        Args:
+            state_dict: Model state dict with parameter tensors
+        
+        Returns:
+            Dict with architecture specifications
+        """
+        import torch.nn as nn
+        architecture = {}
+        
+        # Collect all feature extractor layer dimensions
+        fe_dims = []
+        fe_weights = sorted([k for k in state_dict.keys() if k.startswith('feature_extractor') and k.endswith('weight')])
+        for i, key in enumerate(fe_weights):
+            if i == 0:  # Input layer
+                try:
+                    # Check tensor shape and dimensionality
+                    tensor = state_dict[key]
+                    if len(tensor.shape) > 1:
+                        in_dim = tensor.shape[1]  # Input dimension
+                        out_dim = tensor.shape[0]  # Output dimension
+                        fe_dims.append((in_dim, out_dim))
+                    else:
+                        # Skip 1D tensors (like normalization weights)
+                        print(f"Skipping 1D tensor at {key} with shape {tensor.shape}")
+                except (IndexError, AttributeError) as e:
+                    print(f"Warning: Could not extract dimensions from {key} with shape {state_dict[key].shape if hasattr(state_dict[key], 'shape') else 'unknown'}")
+                    # Use default dimensions for the input layer
+                    fe_dims.append((self.input_dim, 128))
+            else:
+                # Check for existing layers
+                if key in state_dict:
+                    try:
+                        # Check tensor shape and dimensionality
+                        tensor = state_dict[key]
+                        if len(tensor.shape) > 1:
+                            in_dim = tensor.shape[1]  # Input dimension
+                            out_dim = tensor.shape[0]  # Output dimension
+                            fe_dims.append((in_dim, out_dim))
+                        else:
+                            # Skip 1D tensors (like normalization weights)
+                            print(f"Skipping 1D tensor at {key} with shape {tensor.shape}")
+                    except (IndexError, AttributeError) as e:
+                        print(f"Warning: Could not extract dimensions from {key} with shape {state_dict[key].shape if hasattr(state_dict[key], 'shape') else 'unknown'}")
+                        # Use default dimensions
+                        if len(fe_dims) > 0:
+                            fe_dims.append((fe_dims[-1][1], fe_dims[-1][1]))
+                        else:
+                            fe_dims.append((self.input_dim, 128))
+        
+        # If no FE dimensions were extracted, use defaults
+        if not fe_dims:
+            print("No feature extractor dimensions found. Using defaults.")
+            fe_dims = [(self.input_dim, 128), (128, 128), (128, 128)]
+            
+        # Collect shared trunk dimensions
+        trunk_dims = []
+        trunk_weights = sorted([k for k in state_dict.keys() if k.startswith('shared_trunk') and k.endswith('weight')])
+        for i, key in enumerate(trunk_weights):
+            if key in state_dict:
+                try:
+                    tensor = state_dict[key]
+                    if len(tensor.shape) > 1:
+                        in_dim = tensor.shape[1]  # Input dimension
+                        out_dim = tensor.shape[0]  # Output dimension
+                        trunk_dims.append((in_dim, out_dim))
+                    else:
+                        # For 1D tensors, use the same dim for in and out
+                        dim = tensor.shape[0]
+                        trunk_dims.append((dim, dim))
+                except (IndexError, AttributeError) as e:
+                    print(f"Warning: Could not extract dimensions from {key} with shape {state_dict[key].shape if hasattr(state_dict[key], 'shape') else 'unknown'}")
+                    # Use default dimensions based on feature extractor output
+                    if i == 0 and fe_dims:
+                        trunk_dims.append((fe_dims[-1][1], 256))
+                    elif trunk_dims:
+                        trunk_dims.append((trunk_dims[-1][1], 256))
+                    else:
+                        trunk_dims.append((128, 256))
+        
+        # If no trunk dimensions were extracted, use defaults
+        if not trunk_dims and fe_dims:
+            print("No shared trunk dimensions found. Using defaults.")
+            trunk_dims = [(fe_dims[-1][1], 256)]
+        elif not trunk_dims:
+            trunk_dims = [(128, 256)]
+            
+        # Determine output dimensions from action networks
+        action_mean_key = 'action_mean.weight'
+        action_output_dim = self.output_dim
+        action_input_dim = trunk_dims[-1][1] if trunk_dims else 256
+        
+        try:
+            if action_mean_key in state_dict:
+                tensor = state_dict[action_mean_key]
+                if len(tensor.shape) > 1:
+                    action_output_dim = tensor.shape[0]
+                    action_input_dim = tensor.shape[1]
+        except (IndexError, AttributeError) as e:
+            print(f"Warning: Could not extract dimensions from {action_mean_key}")
+            # Keep defaults
+        
+        # Determine value head dimensions
+        value_dim = None
+        value_keys = [k for k in state_dict.keys() if k.startswith('value_head') and k.endswith('weight')]
+        if value_keys:
+            try:
+                tensor = state_dict[value_keys[0]]
+                if len(tensor.shape) > 1:
+                    value_dim = tensor.shape[1]
+            except (IndexError, AttributeError) as e:
+                print(f"Warning: Could not extract value head dimensions")
+                value_dim = 128  # Default
+        
+        # Check for activation clues in parameter names
+        has_tanh = any('tanh' in k.lower() for k in state_dict.keys())
+        has_relu = any('relu' in k.lower() for k in state_dict.keys())
+        
+        # Select likely activation function - default to tanh for DirectML models
+        activation = 'tanh'
+        if has_relu:
+            activation = 'relu'
+        elif has_tanh:
+            activation = 'tanh'
+        
+        # Store architecture details
+        architecture['input_dim'] = self.input_dim
+        architecture['output_dim'] = self.output_dim
+        architecture['fe_dims'] = fe_dims
+        architecture['trunk_dims'] = trunk_dims
+        architecture['action_input_dim'] = action_input_dim
+        architecture['action_output_dim'] = action_output_dim
+        architecture['value_dim'] = value_dim or 128  # Default if not found
+        architecture['activation'] = activation
+        architecture['trunk_activation'] = activation
+        
+        # Identify if model uses layer normalization (typical for DirectML models)
+        uses_layernorm = any('layernorm' in k.lower() or '.ln' in k.lower() for k in state_dict.keys())
+        architecture['uses_layernorm'] = uses_layernorm
+        
+        # Analyze state dict keys to identify if it's a custom architecture
+        has_feature_extractor = any('feature_extractor' in k for k in state_dict.keys())
+        has_shared_trunk = any('shared_trunk' in k for k in state_dict.keys())
+        
+        architecture['is_custom_architecture'] = has_feature_extractor and has_shared_trunk
+        
+        return architecture
+    
+    def _build_networks(self):
+        """
+        Build the model networks based on the inferred architecture
+        """
+        import torch.nn as nn
+        
+        # Create feature extractor
+        fe_layers = []
+        fe_in_dim = self.architecture['input_dim']
+        
+        # Get feature extractor dimensions
+        fe_dims = self.architecture.get('fe_dims', [(fe_in_dim, 128), (128, 128), (128, 128)])
+        
+        # Create feature extractor layers
+        for i, (in_dim, out_dim) in enumerate(fe_dims):
+            # Add linear layer
+            fe_layers.append(nn.Linear(in_dim, out_dim))
+            
+            # Add normalization if the model uses it
+            if self.architecture.get('uses_layernorm', True):
+                fe_layers.append(nn.LayerNorm(out_dim))
+            
+            # Add activation except after the last layer
+            if i < len(fe_dims) - 1:
+                if self.architecture.get('activation') == 'tanh':
+                    fe_layers.append(nn.Tanh())
+                else:
+                    fe_layers.append(nn.ReLU())
+        
+        # Create the feature extractor as a sequential model
+        self.feature_extractor = nn.Sequential(*fe_layers)
+        
+        # Get trunk dimensions - ensure we have at least the right input/output
+        trunk_dims = self.architecture.get('trunk_dims', [(fe_dims[-1][1], 128), (128, 256)])
+        if not trunk_dims:
+            trunk_dims = [(fe_dims[-1][1], 256)]
+        
+        # Create shared trunk components as separate modules for more flexibility
+        last_dim = fe_dims[-1][1]  # Output dim of feature extractor
+        
+        # Need to track exact order of modules to apply them correctly in predict()
+        for i, (in_dim, out_dim) in enumerate(trunk_dims):
+            # Check if this is a linear or normalization layer
+            if in_dim != out_dim:  # Likely a linear layer
+                # Add linear layer
+                self.networks[f'shared_trunk_{i}_linear'] = nn.Linear(in_dim, out_dim)
+                last_dim = out_dim
+            else:  # Likely a normalization layer
+                if self.architecture.get('uses_layernorm', True):
+                    self.networks[f'shared_trunk_{i}_norm'] = nn.LayerNorm(in_dim)
+        
+        # Action networks - input dim is the output of the last trunk layer
+        action_input_dim = self.architecture.get('action_input_dim', last_dim)
+        action_output_dim = self.architecture.get('action_output_dim', self.output_dim)
+        
+        self.networks['action_mean'] = nn.Linear(action_input_dim, action_output_dim)
+        self.networks['action_log_std'] = nn.Linear(action_input_dim, action_output_dim)
+        
+        # Value head - if needed
+        if self.architecture.get('value_dim'):
+            value_layers = []
+            value_input_dim = action_input_dim
+            value_hidden_dim = self.architecture.get('value_dim', 128)
+            
+            value_layers.append(nn.Linear(value_input_dim, value_hidden_dim))
+            
+            # Add activation
+            if self.architecture.get('activation') == 'tanh':
+                value_layers.append(nn.Tanh())
+            else:
+                value_layers.append(nn.ReLU())
+                
+            value_layers.append(nn.Linear(value_hidden_dim, 1))
+            
+            self.networks['value_head'] = nn.Sequential(*value_layers)
+        
+        # Add constants
+        self.constants['action_scale'] = torch.tensor(1.0)
+        self.constants['log_2pi'] = torch.log(torch.tensor(2.0 * np.pi))
+        self.constants['sqrt_2'] = torch.sqrt(torch.tensor(2.0))
+        self.constants['eps'] = torch.tensor(1e-8)
+        
+        # Move to device
+        self.to(self.device)
+        
+        # Mark as initialized
+        self.initialized = True
+    
+    def to(self, device):
+        """Move the model components to the specified device"""
+        # Convert string to device if needed
+        if isinstance(device, str):
+            device = torch.device(device)
+        
+        self.device = device
+        
+        # Move feature extractor if it exists
+        if hasattr(self, 'feature_extractor'):
+            self.feature_extractor = self.feature_extractor.to(device)
+        
+        # Move all network components
+        for name, network in self.networks.items():
+            self.networks[name] = network.to(device)
+        
+        # Move constants
+        for name, constant in self.constants.items():
+            if isinstance(constant, torch.Tensor):
+                self.constants[name] = constant.to(device)
+        
+        return self
+    
+    def load(self, path):
+        """
+        Load and adapt to model parameters from a saved model file
+        
+        Args:
+            path: Path to the model file
+        """
+        print(f"Loading model from {path}...")
+        try:
+            # Use 'cpu' string to avoid DirectML issues
+            checkpoint = torch.load(path, map_location='cpu')
+            
+            # Load policy parameters
+            if 'policy_state_dict' in checkpoint:
+                state_dict = checkpoint['policy_state_dict']
+                
+                print("Found policy state dict with keys:", list(state_dict.keys()))
+                
+                # Infer the architecture from the state dict
+                self.architecture = self._infer_architecture(state_dict)
+                print(f"Inferred architecture: {self.architecture}")
+                
+                # Now build the networks based on the inferred architecture
+                self._build_networks()
+                
+                # Load constants first if they exist
+                for name in ['action_scale', 'log_2pi', 'sqrt_2', 'eps']:
+                    if name in state_dict and isinstance(state_dict[name], torch.Tensor):
+                        self.constants[name] = state_dict[name].to(self.device)
+                
+                # Create a mapping from state dict keys to model parameters
+                param_mapping = self._create_parameter_mapping(state_dict)
+                
+                # Load parameters based on the mapping
+                loaded_params = 0
+                mismatched_params = 0
+                
+                for state_dict_key, model_param in param_mapping.items():
+                    if state_dict_key in state_dict:
+                        # Get the parameter from state dict
+                        dict_param = state_dict[state_dict_key]
+                        
+                        # Check if shapes match
+                        if dict_param.shape == model_param.shape:
+                            model_param.data.copy_(dict_param)
+                            loaded_params += 1
+                        else:
+                            print(f"Shape mismatch for {state_dict_key}: expected {model_param.shape}, got {dict_param.shape}")
+                            mismatched_params += 1
+                    else:
+                        # This is less concerning - some keys might not be present in simpler models
+                        if self.architecture.get('is_custom_architecture', True):
+                            print(f"Parameter {state_dict_key} not found in state dict")
+                
+                print(f"Successfully loaded {loaded_params} parameters, with {mismatched_params} mismatches")
+                if loaded_params > 0:
+                    print("Model loaded successfully!")
+                    return True
+                else:
+                    print("Warning: No parameters were loaded. Model may not function correctly.")
+                    return False
+                
+            else:
+                print("ERROR: No policy state dict found in checkpoint")
+                return False
+                
+        except Exception as e:
+            import traceback
+            print(f"Error loading model parameters: {e}")
+            with open("error_log.txt", "w") as f:
+                f.write(f"Exception: {str(e)}\n")
+                f.write(traceback.format_exc())
+            raise e
+    
+    def _create_parameter_mapping(self, state_dict):
+        """
+        Create a mapping from state dict keys to model parameters
+        
+        Args:
+            state_dict: Dictionary of parameter tensors
+        
+        Returns:
+            Dictionary mapping state dict keys to model parameters
+        """
+        param_mapping = {}
+        
+        # Map feature extractor parameters
+        fe_layer_idx = 0
+        for i in range(len(self.feature_extractor)):
+            if hasattr(self.feature_extractor[i], 'weight'):
+                # Try different naming patterns
+                possible_keys = [
+                    f'feature_extractor.{i}.weight',
+                    f'feature_extractor.{fe_layer_idx}.weight',
+                    f'features.{i}.weight',
+                    f'features.{fe_layer_idx}.weight'
+                ]
+                
+                # Find first matching key
+                key = next((k for k in possible_keys if k in state_dict), None)
+                
+                if key:
+                    param_mapping[key] = self.feature_extractor[i].weight
+                    
+                    # Also map the bias if it exists
+                    bias_key = key.replace('weight', 'bias')
+                    if bias_key in state_dict and hasattr(self.feature_extractor[i], 'bias'):
+                        param_mapping[bias_key] = self.feature_extractor[i].bias
+                
+                fe_layer_idx += 1
+        
+        # Map shared trunk parameters
+        for name, module in self.networks.items():
+            if name.startswith('shared_trunk'):
+                # Extract layer index from name
+                parts = name.split('_')
+                idx = int(parts[2]) if len(parts) > 2 else 0
+                
+                # Different naming patterns for trunk layers
+                if 'linear' in name and hasattr(module, 'weight'):
+                    # Try different naming patterns
+                    possible_keys = [
+                        f'shared_trunk.{idx*2}.weight',
+                        f'shared_trunk.{idx}.weight',
+                        f'trunk.{idx*2}.weight',
+                        f'trunk.{idx}.weight'
+                    ]
+                    
+                    # Find first matching key
+                    key = next((k for k in possible_keys if k in state_dict), None)
+                    
+                    if key:
+                        param_mapping[key] = module.weight
+                        
+                        # Also map the bias if it exists
+                        bias_key = key.replace('weight', 'bias')
+                        if bias_key in state_dict and hasattr(module, 'bias'):
+                            param_mapping[bias_key] = module.bias
+                
+                elif 'norm' in name and hasattr(module, 'weight'):
+                    # Try different naming patterns for normalization layers
+                    possible_keys = [
+                        f'shared_trunk.{idx*2+1}.weight',
+                        f'shared_trunk.{idx+1}.weight',
+                        f'trunk.{idx*2+1}.weight',
+                        f'trunk.{idx+1}.weight'
+                    ]
+                    
+                    # Find first matching key
+                    key = next((k for k in possible_keys if k in state_dict), None)
+                    
+                    if key:
+                        param_mapping[key] = module.weight
+                        
+                        # Also map the bias if it exists
+                        bias_key = key.replace('weight', 'bias')
+                        if bias_key in state_dict and hasattr(module, 'bias'):
+                            param_mapping[bias_key] = module.bias
+        
+        # Map action output networks
+        for name in ['action_mean', 'action_log_std']:
+            if name in self.networks:
+                # Try different naming patterns
+                possible_keys = [
+                    f'{name}.weight',
+                    f'{name.replace("action_", "")}.weight',
+                    f'pi_out.weight' if name == 'action_mean' else 'log_std.weight'
+                ]
+                
+                # Find first matching key
+                key = next((k for k in possible_keys if k in state_dict), None)
+                
+                if key:
+                    param_mapping[key] = self.networks[name].weight
+                    
+                    # Also map the bias if it exists
+                    bias_key = key.replace('weight', 'bias')
+                    if bias_key in state_dict:
+                        param_mapping[bias_key] = self.networks[name].bias
+        
+        # Map value head parameters
+        if 'value_head' in self.networks:
+            value_head = self.networks['value_head']
+            
+            # Map each layer of the value head
+            for i in range(len(value_head)):
+                if hasattr(value_head[i], 'weight'):
+                    # Try different naming patterns
+                    possible_keys = [
+                        f'value_head.{i}.weight',
+                        f'value_head.{i*2}.weight',
+                        f'vf.{i}.weight',
+                        f'vf.{i*2}.weight'
+                    ]
+                    
+                    # Find first matching key
+                    key = next((k for k in possible_keys if k in state_dict), None)
+                    
+                    if key:
+                        param_mapping[key] = value_head[i].weight
+                        
+                        # Also map the bias if it exists
+                        bias_key = key.replace('weight', 'bias')
+                        if bias_key in state_dict and hasattr(value_head[i], 'bias'):
+                            param_mapping[bias_key] = value_head[i].bias
+        
+        return param_mapping
+
+def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=True):
+    """
+    Wrapper function that bridges the different evaluate_model interfaces
+    
+    Args:
+        model_path: Path to model file to load
+        num_episodes: Number of episodes to evaluate
+        visualize: Whether to visualize the evaluation
+        verbose: Whether to print progress
+    """
+    # Create environment for evaluation
+    env = create_revamped_envs(
+        num_envs=1,
+        viz_speed=0.02 if visualize else 0.0,
+        parallel_viz=False,
+        training_mode=False
+    )[0]  # Get the unwrapped environment
+    
+    # Check if this is a DirectML model based on path
+    directml = "directml" in model_path.lower()
+    
+    # Load the model
+    policy = None
+    
+    if directml:
+        try:
+            print(f"Loading DirectML model from {model_path}...")
+            # Create a custom model for DirectML
+            directml_model = CustomDirectMLModel(env.observation_space, env.action_space, device='cpu')
+            
+            # Load the model parameters
+            if directml_model.load(model_path):
+                # Successfully loaded DirectML model
+                policy = directml_model
+                print("DirectML model loaded successfully!")
+            else:
+                raise ValueError("Failed to load DirectML model")
+        except Exception as e:
+            import traceback
+            error_msg = f"Error loading DirectML model: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
+            with open("error_log.txt", "w") as f:
+                f.write(error_msg)
+            return None
+    else:
+        try:
+            # Load a standard model
+            print(f"Loading standard model from {model_path}...")
+            from stable_baselines3 import PPO
+            policy = PPO.load(model_path)
+            print("Standard model loaded successfully!")
+        except Exception as e:
+            import traceback
+            error_msg = f"Error loading standard model: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
+            with open("error_log.txt", "w") as f:
+                f.write(error_msg)
+            return None
+    
+    # Set up evaluation parameters
+    rollout_steps = 150  # Standard episode length
+    
+    # Call the actual evaluation function
+    return evaluate_model(
+        env=env,
+        policy=policy,
+        rollout_steps=rollout_steps,
+        num_episodes=num_episodes,
+        render=visualize,
+        verbose=verbose,
+        model_file=model_path,
+        directml=directml,
+        info_prefix="[Eval] "
+    )
 
 if __name__ == "__main__":
     main() 
