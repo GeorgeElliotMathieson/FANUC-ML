@@ -1,0 +1,3 @@
+    def get_features(self, observation):
+        \ \\,  Extract features from an observation using the models feature extractor,  ,  Args:,  observation: Environment observation,  ,  Returns:,  Feature vector,  \\\
+        with torch.no_grad():

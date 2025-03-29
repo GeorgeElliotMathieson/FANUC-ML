@@ -235,16 +235,19 @@ def test_install():
 #########################################
 
 def print_eval_usage():
-    """Print usage instructions for the eval command."""
-    print("Usage: python fanuc_platform.py eval <model_path> [episodes] [options]")
-    print("\nArguments:")
-    print("  model_path    - Path to trained model")
-    print("  episodes      - Number of episodes (default: 10)")
-    print("\nOptions:")
-    print("  --no-gui       - Disable GUI")
-    print("  --verbose      - Show detailed output")
-    print("  --speed=<val>  - Visualization speed (default: 0.02)")
-    print("  --save-video   - Save a video of the evaluation")
+    """Print usage information for evaluation mode"""
+    print("Evaluation Mode Usage:")
+    print("  fanuc-platform eval <model-path> [episodes] [options]")
+    print("")
+    print("Arguments:")
+    print("  model-path  - Path to the trained model file")
+    print("  episodes    - Number of episodes to evaluate (default: 10)")
+    print("")
+    print("Options:")
+    print("  --no-gui     - Disable visualization")
+    print("  --verbose    - Enable verbose output")
+    print("  --speed      - Set visualization speed (default: 0.02)")
+    print("")
 
 def run_evaluation(model_path, episodes=10, use_gui=True, verbose=False):
     """
@@ -511,8 +514,6 @@ def parse_args():
     eval_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     eval_parser.add_argument("--speed", type=float, default=0.02, 
                           help="Visualization speed")
-    eval_parser.add_argument("--save-video", action="store_true", 
-                           help="Save a video of the evaluation")
     
     # Test mode parser
     test_parser = subparsers.add_parser("test", help="Test a model with DirectML")
