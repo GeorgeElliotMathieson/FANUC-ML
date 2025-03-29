@@ -45,11 +45,11 @@ def train_model(model_path=None, steps=500000, visualize=True, eval_after=False,
     # Import the real implementation
     from src.core.training.train import train_model as train_model_impl
     
-    # Delegate to the real implementation
+    # Delegate to the real implementation with corrected parameter names
     return train_model_impl(
-        model_path=model_path,
-        steps=steps,
-        visualize=visualize,
-        eval_after=eval_after,
+        model_dir=model_path,
+        num_timesteps=steps,
+        viz_speed=0.02 if visualize else 0.0,
+        eval_freq=10000 if eval_after else 0,
         verbose=verbose
     ) 

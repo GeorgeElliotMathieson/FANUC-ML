@@ -15,7 +15,8 @@ import pybullet_data  # type: ignore
 from pybullet_utils import bullet_client  # type: ignore
 
 # Define type for PyBullet client
-BulletClient = TypeVar('BulletClient', bound=p.BulletClient)
+# BulletClient = TypeVar('BulletClient', bound=p.BulletClient)
+BulletClient = TypeVar('BulletClient')
 
 # Global variables to track PyBullet connections
 _GUI_CONNECTION_ESTABLISHED: bool = False
@@ -71,7 +72,7 @@ def get_pybullet_client(
     fps: int = 240, 
     options: str = "", 
     training_mode: bool = False
-) -> p.BulletClient:
+) -> Any:
     """
     Create a PyBullet client, either GUI or Direct (headless).
     Automatically creates a new client or returns a cached one if one is available.
@@ -91,7 +92,8 @@ def get_pybullet_client(
         gui = False  # Force headless in training for max performance
         options += ",allowFastDeserialization=1"
         
-    # Create p as a singleton client
+    # Create the client connection based on mode
+    client_id = None
     if gui:
         # Use options string for GUI configuration
         connect_options = options
@@ -101,39 +103,39 @@ def get_pybullet_client(
             connect_options += ",realtime=0"
         
         # Create a specific GUI instance
-        p = p.connect(p.GUI, options=connect_options)
-        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-        p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
+        client_id = p.connect(p.GUI, options=connect_options)
+        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=client_id)
+        p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0, physicsClientId=client_id)
         
         # Configure timestep
-        p.setTimeStep(1.0 / fps)
-        p.setRealTimeSimulation(realtime)
-        p.setPhysicsEngineParameter(enableFileCaching=1)
+        p.setTimeStep(1.0 / fps, physicsClientId=client_id)
+        p.setRealTimeSimulation(realtime, physicsClientId=client_id)
+        p.setPhysicsEngineParameter(enableFileCaching=1, physicsClientId=client_id)
         
         if not realtime:
             # Configure non-blocking visuals
-            p.configureDebugVisualizer(p.COV_ENABLE_SINGLE_STEP_RENDERING, 1)
+            p.configureDebugVisualizer(p.COV_ENABLE_SINGLE_STEP_RENDERING, 1, physicsClientId=client_id)
     else:
         # Performance optimizations for training
         if training_mode:
             # Maximum performance optimizations for training
-            p = p.connect(p.DIRECT)
-            p.setPhysicsEngineParameter(enableFileCaching=1)
-            p.setPhysicsEngineParameter(numSolverIterations=4)  # Reduce solver iterations
-            p.setTimeStep(1.0 / fps)
+            client_id = p.connect(p.DIRECT)
+            p.setPhysicsEngineParameter(enableFileCaching=1, physicsClientId=client_id)
+            p.setPhysicsEngineParameter(numSolverIterations=4, physicsClientId=client_id)  # Reduce solver iterations
+            p.setTimeStep(1.0 / fps, physicsClientId=client_id)
             # Disable expensive computations during training
-            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)
-            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-            p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 0)
-            p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
-            p.setAdditionalSearchPath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0, physicsClientId=client_id)
+            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=client_id)
+            p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 0, physicsClientId=client_id)
+            p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0, physicsClientId=client_id)
+            p.setAdditionalSearchPath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), physicsClientId=client_id)
         else:
             # Standard headless mode
-            p = p.connect(p.DIRECT)
-            p.setTimeStep(1.0 / fps)
-            p.setPhysicsEngineParameter(enableFileCaching=1)
+            client_id = p.connect(p.DIRECT)
+            p.setTimeStep(1.0 / fps, physicsClientId=client_id)
+            p.setPhysicsEngineParameter(enableFileCaching=1, physicsClientId=client_id)
     
-    return p
+    return client_id
 
 def get_shared_pybullet_client(
     gui: bool = False, 
@@ -141,7 +143,7 @@ def get_shared_pybullet_client(
     fps: int = 240, 
     options: str = "",
     training_mode: bool = False
-) -> p.BulletClient:
+) -> Any:
     """
     Get a shared pybullet client instance or create a new one if none exists.
     This is useful for sharing a pybullet client between multiple environments.
@@ -164,7 +166,7 @@ def get_shared_pybullet_client(
         
         # Disconnect any existing connection to avoid leaking resources
         if _SHARED_PYBULLET_CLIENT is not None:
-            _SHARED_PYBULLET_CLIENT.disconnect()
+            p.disconnect(_SHARED_PYBULLET_CLIENT)
             
         # Create a new client with the requested parameters
         _SHARED_PYBULLET_CLIENT = get_pybullet_client(

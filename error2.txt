@@ -1,0 +1,21 @@
+pybullet build time: Mar 14 2025 12:45:24
+C:\Users\14gma\Documents\FANUC-ML-1\train_reachable_model.py:91: DeprecationWarning: The legacy import structure is deprecated. Please import directly from the refactored modules instead.
+  from src.core.training.train import train_model
+Traceback (most recent call last):
+  File "C:\Users\14gma\Documents\FANUC-ML-1\src\core\training\train.py", line 131, in create_revamped_envs
+    env = RobotPositioningRevampedEnv(**env_params)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: RobotPositioningRevampedEnv.__init__() got an unexpected keyword argument 'use_curriculum'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\14gma\Documents\FANUC-ML-1\train_reachable_model.py", line 105, in main
+    model = train_model(
+            ^^^^^^^^^^^^
+  File "C:\Users\14gma\Documents\FANUC-ML-1\src\core\training\train.py", line 272, in train_model
+    envs = create_revamped_envs(n_envs=n_envs, viz_speed=viz_speed, **env_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\14gma\Documents\FANUC-ML-1\src\core\training\train.py", line 139, in create_revamped_envs
+    raise RuntimeError(f"Failed to create environment {i}: {e}")
+RuntimeError: Failed to create environment 0: RobotPositioningRevampedEnv.__init__() got an unexpected keyword argument 'use_curriculum'

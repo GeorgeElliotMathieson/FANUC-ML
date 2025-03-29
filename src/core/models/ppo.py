@@ -45,6 +45,13 @@ class CustomPPO(PPO):
             device: Device to run the model on
             _init_setup_model: Whether to build the network at initialization
         """
+        # Fix policy_kwargs device issue - standard PPO doesn't accept device in policy_kwargs
+        if policy_kwargs is not None and 'device' in policy_kwargs:
+            # Store device for our use but remove it from policy_kwargs
+            self._device = policy_kwargs.pop('device')
+        else:
+            self._device = device
+            
         # Remove create_eval_env which is causing a linter error
         super(CustomPPO, self).__init__(
             policy=policy,

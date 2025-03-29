@@ -1,0 +1,16 @@
+pybullet build time: Mar 14 2025 12:45:24
+Traceback (most recent call last):
+  File "C:\Users\14gma\Documents\FANUC-ML-1\train_optimized.py", line 30, in <module>
+    from src.core.training.train import train_model
+  File "C:\Users\14gma\Documents\FANUC-ML-1\src\core\__init__.py", line 23, in <module>
+    from . import training
+  File "C:\Users\14gma\Documents\FANUC-ML-1\src\core\training\__init__.py", line 15, in <module>
+    from src.core.training.train import (
+  File "C:\Users\14gma\Documents\FANUC-ML-1\src\core\training\train.py", line 21, in <module>
+    from src.utils.pybullet_utils import get_visualization_settings_from_env, get_directml_settings_from_env
+  File "C:\Users\14gma\Documents\FANUC-ML-1\src\utils\__init__.py", line 65, in <module>
+    from .pybullet_utils import (
+  File "C:\Users\14gma\Documents\FANUC-ML-1\src\utils\pybullet_utils.py", line 75, in <module>
+    ) -> p.BulletClient:
+         ^^^^^^^^^^^^^^
+AttributeError: module 'pybullet' has no attribute 'BulletClient'

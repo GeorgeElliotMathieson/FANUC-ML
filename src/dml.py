@@ -404,7 +404,7 @@ def directml_main(args):
     return 0
 
 # Import the real implementation instead of duplicating code
-from src.core.models.directml_model import CustomDirectMLModel
+# from src.core.models.directml_model import CustomDirectMLModel
 
 # Evaluate a model with DirectML
 def evaluate_model_directml(model_path, num_episodes=10, visualize=True, verbose=False, max_steps=1000, viz_speed=0.02):

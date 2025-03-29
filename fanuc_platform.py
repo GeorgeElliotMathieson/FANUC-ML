@@ -48,11 +48,15 @@ def main():
     args = parse_args()
     
     if args.command == 'train':
-        return train_model(
-            model_path=args.model_path,
-            steps=args.steps,
-            visualize=not args.no_gui,
-            eval_after=args.eval_after,
+        # Import the implementation directly
+        from src.core.training.train import train_model as train_model_impl
+        
+        # Call the implementation directly with the correct parameter names
+        return train_model_impl(
+            model_dir=args.model_path,
+            num_timesteps=args.steps,
+            viz_speed=0.02 if not args.no_gui else 0.0,
+            eval_freq=10000 if args.eval_after else 0,
             verbose=args.verbose
         )
     elif args.command == 'eval':

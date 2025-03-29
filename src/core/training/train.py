@@ -263,8 +263,14 @@ def train_model(
             print("Using curriculum learning.")
         env_kwargs['use_curriculum'] = True
     
-    # Create the training environments
-    envs = create_revamped_envs(n_envs=n_envs, viz_speed=viz_speed, **env_kwargs)
+    # Prevent duplicate viz_speed parameter
+    if 'viz_speed' in env_kwargs:
+        # Create the training environments
+        envs = create_revamped_envs(n_envs=n_envs, **env_kwargs)
+    else:
+        # Create the training environments
+        envs = create_revamped_envs(n_envs=n_envs, viz_speed=viz_speed, **env_kwargs)
+    
     print(f"Created vector environment with {n_envs} parallel environments")
     
     # Set up directories

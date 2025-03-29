@@ -334,7 +334,18 @@ class RobotPositioningRevampedEnv(gym.Env):
     """
     metadata = {'render.modes': ['human']}
     
-    def __init__(self, gui=False, max_episode_steps=150, verbose=False, viz_speed=0.0, training_mode=True):
+    def __init__(self, gui=False, max_episode_steps=150, verbose=False, viz_speed=0.0, training_mode=True, use_curriculum=False):
+        """
+        Initialize the revamped robot positioning environment.
+        
+        Args:
+            gui: Whether to use visualization
+            max_episode_steps: Maximum number of steps per episode
+            verbose: Whether to print verbose output
+            viz_speed: Visualization speed (seconds per step)
+            training_mode: Whether we're in training mode or evaluation mode
+            use_curriculum: Whether to use curriculum learning
+        """
         super().__init__()
         
         # Store parameters
@@ -344,6 +355,7 @@ class RobotPositioningRevampedEnv(gym.Env):
         self.viz_speed = viz_speed
         self.training_mode = training_mode  # Track if in training or evaluation mode
         self.is_evaluating = not training_mode  # For compatibility with older code
+        self.use_curriculum = use_curriculum  # Whether to use curriculum learning
         
         # Import function here to avoid circular imports
         from src.utils.pybullet_utils import get_shared_pybullet_client
@@ -377,16 +389,17 @@ class RobotPositioningRevampedEnv(gym.Env):
         
         # Determine reachable workspace
         max_reach, workspace_bounds = determine_reachable_workspace(
-            self.robot, 
+            self.robot.robot_id,  # Pass the robot_id instead of the robot object
             n_samples=1000, 
-            visualize=verbose
+            visualize=verbose,
+            client_id=self.client_id
         )
         
         # Calculate workspace center from bounds
         workspace_center = [
-            (workspace_bounds['x'][0] + workspace_bounds['x'][1]) / 2.0,
-            (workspace_bounds['y'][0] + workspace_bounds['y'][1]) / 2.0,
-            (workspace_bounds['z'][0] + workspace_bounds['z'][1]) / 2.0
+            (workspace_bounds['x_min'] + workspace_bounds['x_max']) / 2.0,
+            (workspace_bounds['y_min'] + workspace_bounds['y_max']) / 2.0,
+            (workspace_bounds['z_min'] + workspace_bounds['z_max']) / 2.0
         ]
         
         self.workspace_bounds = workspace_bounds
@@ -490,15 +503,21 @@ class RobotPositioningRevampedEnv(gym.Env):
                 # Sample random joint positions within limits
                 joint_positions = []
                 for i in range(self.dof):
-                    lower, upper = self.robot.joint_limits[i]
-                    # Add a small safety margin to avoid joint limits
-                    margin = 0.01  # Larger margin for exploration
-                    safe_lower = lower + margin
-                    safe_upper = upper - margin
-                    joint_positions.append(np.random.uniform(safe_lower, safe_upper))
+                    # Make sure the key exists in joint_limits dictionary
+                    if i in self.robot.joint_limits:
+                        lower, upper = self.robot.joint_limits[i]
+                        # Add a small safety margin to avoid joint limits
+                        margin = 0.01  # Larger margin for exploration
+                        safe_lower = lower + margin
+                        safe_upper = upper - margin
+                        joint_positions.append(np.random.uniform(safe_lower, safe_upper))
+                    else:
+                        # Default values if joint limits not available
+                        joint_positions.append(0.0)
                 
                 # Set the joints and get end effector position
-                self.robot.step((joint_positions, None))
+                velocities = [0.0] * self.dof  # Add zero velocities for all joints
+                self.robot.step((joint_positions, velocities))
                 end_effector_pos = self.robot._get_state()[12:15]
                 
                 # Check if the position is valid (not in collision and inside workspace bounds)
@@ -535,35 +554,51 @@ class RobotPositioningRevampedEnv(gym.Env):
     def _is_position_reachable(self, position):
         """Check if a position is reachable by the robot."""
         # Check if position is within workspace bounds
-        for i in range(3):
-            if position[i] < self.workspace_bounds[i][0] or position[i] > self.workspace_bounds[i][1]:
-                return False
+        axes = ['x', 'y', 'z']
+        for i, axis in enumerate(axes):
+            min_key = f'{axis}_min'
+            max_key = f'{axis}_max'
+            if min_key in self.workspace_bounds and max_key in self.workspace_bounds:
+                if position[i] < self.workspace_bounds[min_key] or position[i] > self.workspace_bounds[max_key]:
+                    return False
+            else:
+                # If the bounds are not properly defined, we can't verify
+                pass
         
         # If we have IK enabled, we can also verify using IK
         if hasattr(self, 'robot'):
-            # Save current state
-            current_joints = [self.robot._get_state()[i*2] for i in range(self.dof)]
-            
-            # Try to compute IK
-            ik_solution = p.calculateInverseKinematics(
-                self.robot.robot_id, 
-                self.robot.dof-1, 
-                position
-            )
-            
-            # Reset to original state
-            for i in range(self.dof):
-                p.resetJointState(self.robot.robot_id, i, current_joints[i])
-            
-            # Check if IK solution is valid (all values are finite)
-            if all(np.isfinite(ik_solution)):
-                # Check if solution respects joint limits
-                for i, angle in enumerate(ik_solution[:self.dof]):
-                    lower, upper = self.robot.joint_limits[i]
-                    if angle < lower or angle > upper:
-                        return False
-                return True
-            return False
+            try:
+                # Save current state
+                current_joints = [self.robot._get_state()[i*2] for i in range(self.dof)]
+                
+                # Try to compute IK
+                ik_solution = p.calculateInverseKinematics(
+                    self.robot.robot_id, 
+                    self.robot.dof-1, 
+                    position,
+                    physicsClientId=self.client_id
+                )
+                
+                # Reset to original state
+                for i in range(self.dof):
+                    p.resetJointState(self.robot.robot_id, i, current_joints[i], physicsClientId=self.client_id)
+                
+                # Check if IK solution is valid (all values are finite)
+                if all(np.isfinite(ik_solution)):
+                    # Check if solution respects joint limits
+                    all_within_limits = True
+                    for i, angle in enumerate(ik_solution[:self.dof]):
+                        if i in self.robot.joint_limits:
+                            lower, upper = self.robot.joint_limits[i]
+                            if angle < lower or angle > upper:
+                                all_within_limits = False
+                                break
+                    return all_within_limits
+                return False
+            except Exception as e:
+                if self.verbose:
+                    print(f"Error in IK calculation: {e}")
+                return False
         
         # Default to True if we can't verify with IK
         return True
@@ -575,9 +610,9 @@ class RobotPositioningRevampedEnv(gym.Env):
         """
         if not self.reachable_positions:
             # Fallback to uniform sampling if no reachable positions collected
-            x = np.random.uniform(self.workspace_bounds[0][0], self.workspace_bounds[0][1])
-            y = np.random.uniform(self.workspace_bounds[1][0], self.workspace_bounds[1][1])
-            z = np.random.uniform(self.workspace_bounds[2][0], self.workspace_bounds[2][1])
+            x = np.random.uniform(self.workspace_bounds['x_min'], self.workspace_bounds['x_max'])
+            y = np.random.uniform(self.workspace_bounds['y_min'], self.workspace_bounds['y_max'])
+            z = np.random.uniform(self.workspace_bounds['z_min'], self.workspace_bounds['z_max'])
             return np.array([x, y, z])
         
         # Select pool of positions based on curriculum level
@@ -664,8 +699,12 @@ class RobotPositioningRevampedEnv(gym.Env):
         else:
             action_with_noise = action
         
+        # Store the current action for the next observation
+        self.previous_action = action_with_noise.copy()
+        
         # Apply action with joint limits enforced by the action space
-        super().step(action_with_noise)
+        # Call the robot's step method directly instead of super().step()
+        self.robot.step(action_with_noise)
         
         # Add safety margin to make sure we're not too close to the limits
         safety_margin = 0.001  # in radians (about 0.06 degrees)
@@ -673,21 +712,27 @@ class RobotPositioningRevampedEnv(gym.Env):
         
         # Ensure positions are within safety limits
         for i in range(self.dof):
-            lower, upper = self.robot.joint_limits[i]
-            safe_lower = lower + safety_margin
-            safe_upper = upper - safety_margin
-            
-            if current_joint_positions[i] < safe_lower:
-                current_joint_positions[i] = safe_lower
-                if self.verbose:
-                    print(f"WARNING: Joint {i} position {current_joint_positions[i]} below safe limit {safe_lower}, clamping to safe limit")
-            elif current_joint_positions[i] > safe_upper:
-                current_joint_positions[i] = safe_upper
-                if self.verbose:
-                    print(f"WARNING: Joint {i} position {current_joint_positions[i]} above safe limit {safe_upper}, clamping to safe limit")
+            if i in self.robot.joint_limits:
+                lower, upper = self.robot.joint_limits[i]
+                safe_lower = lower + safety_margin
+                safe_upper = upper - safety_margin
+                
+                if current_joint_positions[i] < safe_lower:
+                    current_joint_positions[i] = safe_lower
+                    if self.verbose:
+                        print(f"WARNING: Joint {i} position {current_joint_positions[i]} below safe limit {safe_lower}, clamping to safe limit")
+                elif current_joint_positions[i] > safe_upper:
+                    current_joint_positions[i] = safe_upper
+                    if self.verbose:
+                        print(f"WARNING: Joint {i} position {current_joint_positions[i]} above safe limit {safe_upper}, clamping to safe limit")
         
         # Set the joints to the safe positions
-        self.robot.step((current_joint_positions, None))
+        velocities = [0.0] * self.dof  # Add zero velocities
+        self.robot.step((current_joint_positions, velocities))
+        
+        # Slow down visualization if requested
+        if self.gui and self.viz_speed > 0:
+            time.sleep(self.viz_speed)
         
         # Get observation, reward, and done flag
         terminated = False
@@ -740,7 +785,12 @@ class RobotPositioningRevampedEnv(gym.Env):
         
         # Progressive reward: give more reward as we get closer to the target
         progress_reward = 0.0
-        previous_distance = self.previous_distance if hasattr(self, 'previous_distance') else distance
+        
+        # When previous_distance is not set (first step), use current distance
+        previous_distance = getattr(self, 'previous_distance', None)
+        if previous_distance is None:
+            previous_distance = distance
+            
         distance_improvement = previous_distance - distance
         
         # Store current distance for next step
