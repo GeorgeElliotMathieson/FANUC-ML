@@ -32,7 +32,7 @@ def set_seed(seed):
         
         # Try to set DirectML-specific settings if available
         try:
-            import torch_directml
+            import torch_directml  # type: ignore
             # DirectML doesn't have specific seed controls like CUDA,
             # but we can still set the PyTorch seeds
             torch.manual_seed(seed)
@@ -44,7 +44,7 @@ def set_seed(seed):
     
     # Try to set TensorFlow's random seed if available
     try:
-        import tensorflow as tf
+        import tensorflow as tf  # type: ignore
         tf.random.set_seed(seed)
     except ImportError:
         pass
@@ -54,7 +54,7 @@ def set_seed(seed):
     
     # Try to set other libraries' seeds if needed
     try:
-        import gym
+        import gym  # type: ignore
         gym.utils.seeding.np_random(seed)
     except (ImportError, AttributeError):
         pass

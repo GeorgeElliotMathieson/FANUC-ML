@@ -22,17 +22,21 @@ project_dir = os.path.abspath(os.path.dirname(__file__))
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
 
-# Set environment variables for DirectML
-os.environ['FANUC_DIRECTML'] = '1'
-os.environ['USE_DIRECTML'] = '1'
-os.environ['USE_GPU'] = '1'
+# Import the utility first so we can use it to set environment variables
+from src.core.utils import get_directml_settings_from_env
+
+# Set environment variables for DirectML if not already set
+if not get_directml_settings_from_env():
+    os.environ['FANUC_DIRECTML'] = '1'
+    os.environ['USE_DIRECTML'] = '1'
+    os.environ['USE_GPU'] = '1'
 
 # Import functionality from refactored modules
 from src.core.utils import print_banner, print_usage
 from src.core.install import test_install
-from src.core.evaluation import evaluate_model_wrapper as run_evaluation
+from src.core.evaluation.evaluate import evaluate_model_wrapper
 from src.core.testing import run_test, print_test_usage
-from src.core.training import train_model
+from src.core.training.train import train_model
 from src.core.cli import parse_args
 
 # Import print usage functions
@@ -47,23 +51,29 @@ def main():
         return train_model(
             model_path=args.model_path,
             steps=args.steps,
-            use_gui=not args.no_gui,
+            visualize=not args.no_gui,
             eval_after=args.eval_after,
             verbose=args.verbose
         )
     elif args.command == 'eval':
-        return run_evaluation(
+        results = evaluate_model_wrapper(
             model_path=args.model_path,
-            num_episodes=args.episodes,
+            num_episodes=args.num_episodes,
             visualize=not args.no_gui,
-            verbose=args.verbose
+            verbose=args.verbose,
+            max_steps=getattr(args, 'max_steps', 1000),
+            viz_speed=getattr(args, 'speed', 0.02)
         )
+        # Return 0 if successful (results is not None), 1 otherwise
+        return 0 if results is not None else 1
     elif args.command == 'test':
         return run_test(
             model_path=args.model_path,
-            episodes=args.episodes,
-            use_gui=not args.no_gui,
-            verbose=args.verbose
+            num_episodes=args.num_episodes,
+            visualize=not args.no_gui,
+            verbose=args.verbose,
+            max_steps=getattr(args, 'max_steps', 1000),
+            viz_speed=getattr(args, 'speed', 0.02)
         )
     elif args.command == 'install':
         return test_install()

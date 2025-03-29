@@ -14,61 +14,86 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 def print_eval_usage():
     """Print usage information for evaluation mode."""
     print("Evaluation Mode Usage:")
-    print("  python fanuc_platform.py eval <model-path> [episodes] [options]")
+    print("  python fanuc_platform.py eval <model-path> [num_episodes] [options]")
     print("")
     print("Arguments:")
-    print("  model-path  - Path to the trained model file")
-    print("  episodes    - Number of episodes to evaluate (default: 10)")
+    print("  model-path    - Path to the trained model file")
+    print("  num_episodes  - Number of episodes to evaluate (default: 10)")
     print("")
     print("Options:")
-    print("  --no-gui     - Disable visualization")
-    print("  --verbose    - Enable verbose output")
-    print("  --speed      - Set visualization speed (default: 0.02)")
+    print("  --no-gui       - Disable visualization")
+    print("  --verbose      - Enable verbose output")
+    print("  --speed        - Set visualization speed (default: 0.02)")
+    print("  --max-steps    - Maximum steps per episode before timeout (default: 1000)")
     print("")
 
-def create_eval_environment(gui=True, viz_speed=0.02, verbose=False):
+def create_eval_environment(visualize=True, viz_speed=0.02, verbose=False):
     """
     Create an environment for model evaluation.
     
     Args:
-        gui: Whether to use visualization
+        visualize: Whether to use visualization (can be overridden by FANUC_VISUALIZE env var)
         viz_speed: Visualization speed (seconds per step)
-        verbose: Whether to print verbose output
+        verbose: Whether to print verbose output (can be overridden by FANUC_VERBOSE env var)
         
     Returns:
         Evaluation environment
     """
     # Dynamic import to avoid circular imports
-    from src.core.env import JointLimitEnforcingEnv
+    try:
+        from src.core.env import JointLimitEnforcingEnv
+        from src.utils.pybullet_utils import get_visualization_settings_from_env
+    except ImportError as e:
+        raise ImportError(f"Failed to import required modules for evaluation: {e}")
+    
+    # Check environment variables to potentially override parameters
+    try:
+        env_visualize, env_verbose = get_visualization_settings_from_env()
+        # Use environment values if variables are explicitly set
+        if 'FANUC_VISUALIZE' in os.environ:
+            visualize = env_visualize
+            if verbose:
+                print(f"Using FANUC_VISUALIZE environment variable: {visualize}")
+        if 'FANUC_VERBOSE' in os.environ:
+            verbose = env_verbose
+            print(f"Using FANUC_VERBOSE environment variable: {verbose}")
+    except Exception as e:
+        if verbose:
+            print(f"Warning: Error getting environment variables: {e}")
+            print("Using provided function parameters instead")
     
     # Handle import of RobotPositioningRevampedEnv with try-except
     try:
         from src.envs.robot_sim import RobotPositioningRevampedEnv
-    except ImportError:
+    except ImportError as e:
         if verbose:
-            print("Warning: Could not import RobotPositioningRevampedEnv, falling back to RobotPositioningEnv")
+            print(f"Warning: Could not import RobotPositioningRevampedEnv: {e}")
+            print("Falling back to RobotPositioningEnv")
         try:
             from src.envs.robot_sim import RobotPositioningEnv as RobotPositioningRevampedEnv
-        except ImportError:
-            raise ImportError("Could not import robot environment classes from src.envs.robot_sim")
+        except ImportError as e2:
+            raise ImportError(f"Could not import robot environment classes from src.envs.robot_sim: {e2}")
     
-    # Create the environment
-    env = RobotPositioningRevampedEnv(
-        gui=gui,
-        viz_speed=viz_speed,
-        verbose=verbose,
-        training_mode=False
-    )
-    
-    # Apply joint limit enforcement wrapper
-    env = JointLimitEnforcingEnv(env)
-    
-    # Vectorize for compatibility with SB3
-    vec_env = DummyVecEnv([lambda: env])
-    
-    return vec_env
+    # Create the environment - passing visualize to gui parameter for consistency
+    try:
+        env = RobotPositioningRevampedEnv(
+            gui=visualize,  # Using visualize parameter for gui
+            viz_speed=viz_speed,
+            verbose=verbose,
+            training_mode=False
+        )
+        
+        # Apply joint limit enforcement wrapper
+        env = JointLimitEnforcingEnv(env)
+        
+        # Vectorize for compatibility with SB3
+        vec_env = DummyVecEnv([lambda: env])
+        
+        return vec_env
+    except Exception as e:
+        raise RuntimeError(f"Failed to create evaluation environment: {e}")
 
-def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=False):
+def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=False, max_steps=1000, viz_speed=0.02):
     """
     Wrapper for model evaluation that loads the model and runs evaluation.
     
@@ -77,6 +102,8 @@ def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=
         num_episodes: Number of evaluation episodes
         visualize: Whether to use visualization
         verbose: Whether to print verbose output
+        max_steps: Maximum number of steps per episode before timing out
+        viz_speed: Visualization speed (seconds per step)
         
     Returns:
         Dictionary of evaluation results
@@ -89,8 +116,8 @@ def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=
     
     # Create environment for evaluation
     env = create_eval_environment(
-        gui=visualize,
-        viz_speed=0.02 if visualize else 0.0,
+        visualize=visualize,
+        viz_speed=viz_speed if visualize else 0.0,
         verbose=verbose
     )
     
@@ -106,20 +133,23 @@ def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=
     
     # Load the model
     try:
-        if verbose:
-            print(f"Loading model from {model_path}")
+        print(f"Attempting to load model from {model_path} using CustomPPO...")
         model = CustomPPO.load(model_path, env=env)
+        print(f"Successfully loaded model from {model_path} using CustomPPO")
     except Exception as e:
-        print(f"Error loading model: {e}")
-        # Try DirectML model as fallback
+        print(f"Error loading model with PPO: {e}")
         try:
             from src.core.models import CustomDirectMLModel
-            if verbose:
-                print("Trying DirectML model...")
+            print("Attempting to load model using DirectML...")
             model = CustomDirectMLModel(env.observation_space, env.action_space)
-            model.load(model_path)
+            success = model.load(model_path)
+            if not success:
+                print(f"Failed to load model as DirectML model")
+                return None
+            print(f"Successfully loaded model from {model_path} using CustomDirectMLModel")
         except Exception as e2:
-            print(f"Error loading model as DirectML model: {e2}")
+            print(f"Error loading model as DirectML: {e2}")
+            print(f"Could not load model from {model_path} using any available model class")
             return None
     
     # Run evaluation
@@ -128,12 +158,14 @@ def evaluate_model_wrapper(model_path, num_episodes=10, visualize=True, verbose=
         env=env,
         num_episodes=num_episodes,
         visualize=visualize,
-        verbose=verbose
+        verbose=verbose,
+        max_steps=max_steps,
+        viz_speed=viz_speed
     )
     
     return results
 
-def evaluate_model(model, env, num_episodes=10, visualize=True, verbose=False):
+def evaluate_model(model, env, num_episodes=10, visualize=True, verbose=False, max_steps=1000, viz_speed=0.02):
     """
     Evaluate a model on the environment.
     
@@ -143,6 +175,8 @@ def evaluate_model(model, env, num_episodes=10, visualize=True, verbose=False):
         num_episodes: Number of evaluation episodes
         visualize: Whether to use visualization
         verbose: Whether to print verbose output
+        max_steps: Maximum number of steps per episode before timing out
+        viz_speed: Visualization speed (seconds per step) - passed to env during creation
         
     Returns:
         Dictionary of evaluation results
@@ -188,21 +222,26 @@ def evaluate_model(model, env, num_episodes=10, visualize=True, verbose=False):
             episode_reward += reward[0]
             episode_length += 1
             
-            # Check for success and distance
+            # Check for success and distance - handle different info formats
+            current_info = None
             if isinstance(info, list) and len(info) > 0:
-                info = info[0]  # Get info from first environment
-                if 'success' in info:
-                    episode_success = info['success']
-                if 'distance' in info:
-                    episode_distance = min(episode_distance, info['distance'])
+                current_info = info[0]  # Get info from first environment
+            elif isinstance(info, dict):
+                current_info = info
+                
+            if current_info is not None:
+                if 'success' in current_info:
+                    episode_success = episode_success or current_info['success'] # Once successful, stays successful
+                if 'distance' in current_info:
+                    episode_distance = min(episode_distance, current_info['distance'])
                     
                 # Print step information if verbose
                 if verbose and episode_length % 10 == 0:
                     print(f"  Step {episode_length}: reward={reward[0]:.3f}, "
-                          f"distance={info.get('distance', None):.4f}m")
+                          f"distance={current_info.get('distance', float('inf')):.4f}m")
             
             # Break early if episode times out
-            if episode_length >= 1000:  # Timeout
+            if episode_length >= max_steps:  # Timeout
                 if verbose:
                     print("  Episode timed out.")
                 break
@@ -258,30 +297,35 @@ def evaluate_model(model, env, num_episodes=10, visualize=True, verbose=False):
     
     return results
 
-def evaluate_model_directml(model_path, num_episodes=10, visualize=True, verbose=False):
+def evaluate_model_directml(model_path, num_episodes=10, visualize=True, verbose=False, max_steps=1000, viz_speed=0.02):
     """
     Evaluate a model using DirectML.
     
-    This is a compatibility function for the DirectML-specific implementation.
+    This is a compatibility function that redirects to the DirectML-specific implementation.
     
     Args:
         model_path: Path to the model to evaluate
         num_episodes: Number of evaluation episodes
         visualize: Whether to use visualization
         verbose: Whether to print verbose output
+        max_steps: Maximum number of steps per episode before timing out
+        viz_speed: Visualization speed (seconds per step)
         
     Returns:
         Dictionary of evaluation results
     """
-    # This is a wrapper that uses the main evaluation function
-    return evaluate_model_wrapper(
+    # Import and use the DirectML-specific implementation
+    from src.dml import evaluate_model_directml as dml_evaluate_model
+    return dml_evaluate_model(
         model_path=model_path,
         num_episodes=num_episodes,
         visualize=visualize,
-        verbose=verbose
+        verbose=verbose,
+        max_steps=max_steps,
+        viz_speed=viz_speed
     )
 
-def run_evaluation_sequence(model_path, viz_speed=0.02):
+def run_evaluation_sequence(model_path, viz_speed=0.02, max_steps=200):
     """
     Run an evaluation sequence with visualization for the model.
     
@@ -291,6 +335,7 @@ def run_evaluation_sequence(model_path, viz_speed=0.02):
     Args:
         model_path: Path to the model to evaluate
         viz_speed: Speed of visualization (seconds per step)
+        max_steps: Maximum number of steps per position before timing out
         
     Returns:
         Dictionary of evaluation results
@@ -305,21 +350,32 @@ def run_evaluation_sequence(model_path, viz_speed=0.02):
     print_banner(f"Evaluation Sequence: {model_path}")
     
     # Create environment with visualization
-    env = create_eval_environment(gui=True, viz_speed=viz_speed, verbose=True)
+    env = create_eval_environment(
+        visualize=True,
+        viz_speed=viz_speed,
+        verbose=True
+    )
     
     # Load the model
     try:
         from src.core.models import CustomPPO
+        print(f"Attempting to load model from {model_path} using CustomPPO...")
         model = CustomPPO.load(model_path, env=env)
+        print(f"Successfully loaded model from {model_path} using CustomPPO")
     except Exception as e:
         print(f"Error loading model with PPO: {e}")
         try:
             from src.core.models import CustomDirectMLModel
-            print("Trying DirectML model...")
+            print("Attempting to load model using DirectML...")
             model = CustomDirectMLModel(env.observation_space, env.action_space)
-            model.load(model_path)
+            success = model.load(model_path)
+            if not success:
+                print(f"Failed to load model as DirectML model")
+                return None
+            print(f"Successfully loaded model from {model_path} using CustomDirectMLModel")
         except Exception as e2:
             print(f"Error loading model as DirectML: {e2}")
+            print(f"Could not load model from {model_path} using any available model class")
             return None
     
     # Define a set of test positions
@@ -343,7 +399,7 @@ def run_evaluation_sequence(model_path, viz_speed=0.02):
             # For VecEnv, get the underlying env
             raw_env = env.envs[0]
             # Set target manually
-            raw_env.target_pos = np.array(target_pos)
+            raw_env.target_position = np.array(target_pos)
             raw_env._sample_target = lambda: np.array(target_pos)
         except Exception as e:
             print(f"Warning: Could not set target position: {e}")
@@ -355,7 +411,7 @@ def run_evaluation_sequence(model_path, viz_speed=0.02):
         steps = 0
         min_distance = float('inf')
         
-        while not done and steps < 200:
+        while not done and steps < max_steps:
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, info = env.step(action)
             
@@ -373,7 +429,14 @@ def run_evaluation_sequence(model_path, viz_speed=0.02):
                     print(f"  Success! Distance: {min_distance:.4f}m in {steps} steps")
                     break
         
-        if not done or (isinstance(info, list) and len(info) > 0 and not info[0].get('success', False)):
+        # Determine success status more robustly
+        success = False
+        if isinstance(info, list) and len(info) > 0:
+            success = info[0].get('success', False)
+        elif isinstance(info, dict):
+            success = info.get('success', False)
+            
+        if not success:
             print(f"  Failed. Best distance: {min_distance:.4f}m in {steps} steps")
             
         # Store results
@@ -382,8 +445,9 @@ def run_evaluation_sequence(model_path, viz_speed=0.02):
             'min_distance': min_distance,
             'steps': steps,
             'reward': total_reward,
-            'success': done and (isinstance(info, list) and len(info) > 0 and info[0].get('success', False))
+            'success': success  # Use the success value we determined above
         }
+        
         results.append(result)
     
     # Print summary

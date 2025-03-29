@@ -3,7 +3,7 @@ Visualization utilities for robot environment.
 """
 
 import numpy as np
-import pybullet as p
+import pybullet as p  # type: ignore
 
 def visualize_target(position, client_id):
     """
@@ -137,19 +137,23 @@ def remove_visualization(vis_ids, client_id):
         for vis_id in vis_ids:
             try:
                 p.removeUserDebugItem(vis_id, physicsClientId=client_id)
-            except:
+            except Exception as e:
                 # Some visualization objects might be bodies, not debug items
                 try:
                     p.removeBody(vis_id, physicsClientId=client_id)
-                except:
+                except Exception as e2:
+                    if hasattr(p, 'getConnectionInfo') and p.getConnectionInfo(client_id)['connectionMethod'] == p.GUI:
+                        print(f"Warning: Could not remove visualization ID {vis_id}: {e2}")
                     pass
     else:
         # Single ID
         try:
             p.removeUserDebugItem(vis_ids, physicsClientId=client_id)
-        except:
+        except Exception as e:
             # Might be a body, not a debug item
             try:
                 p.removeBody(vis_ids, physicsClientId=client_id)
-            except:
+            except Exception as e2:
+                if hasattr(p, 'getConnectionInfo') and p.getConnectionInfo(client_id)['connectionMethod'] == p.GUI:
+                    print(f"Warning: Could not remove visualization ID {vis_ids}: {e2}")
                 pass 

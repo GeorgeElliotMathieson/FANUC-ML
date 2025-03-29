@@ -16,6 +16,7 @@ from src.core.training.callbacks import (
     TrainingMonitorCallback,
     JointLimitMonitorCallback
 )
+from src.utils.pybullet_utils import get_visualization_settings_from_env
 
 def print_train_usage():
     """Print usage instructions for the train command."""
@@ -27,12 +28,12 @@ def print_train_usage():
     print("  steps         - Number of training steps (default: 500000)")
     print("")
     print("Options:")
-    print("  --no-gui       - Disable GUI")
+    print("  --no-gui       - Disable visualization")
     print("  --eval-after   - Run evaluation after training")
     print("  --verbose      - Show detailed output")
     print("")
 
-def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, training_mode=True):
+def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, training_mode=True, use_env_vars=True):
     """
     Create environment(s) for training or evaluation.
     
@@ -41,53 +42,89 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, training
         viz_speed: Visualization speed (seconds per step)
         parallel_viz: Whether to use parallel visualization
         training_mode: Whether this is used for training (affects exploration)
+        use_env_vars: Whether to use environment variables for settings
         
     Returns:
         List of environment instances
     """
     # Dynamic import to avoid circular imports
-    from src.core.env import JointLimitEnforcingEnv
+    try:
+        from src.core.env import JointLimitEnforcingEnv
+    except ImportError as e:
+        raise ImportError(f"Failed to import JointLimitEnforcingEnv: {e}")
+    
+    # Check for visualization settings from environment variables if requested
+    env_visualize = None
+    env_verbose = None
+    if use_env_vars:
+        try:
+            from src.utils.pybullet_utils import get_visualization_settings_from_env
+            env_visualize, env_verbose = get_visualization_settings_from_env()
+        except Exception as e:
+            print(f"Warning: Could not get visualization settings from environment: {e}")
+            print("Using default values: visualize=True, verbose=False")
+            env_visualize = True
+            env_verbose = False
     
     # Handle import of RobotPositioningRevampedEnv with try-except
     try:
         from src.envs.robot_sim import RobotPositioningRevampedEnv
-    except ImportError:
-        print("Warning: Could not import RobotPositioningRevampedEnv, falling back to RobotPositioningEnv")
+    except ImportError as e:
+        print(f"Warning: Could not import RobotPositioningRevampedEnv: {e}")
+        print("Falling back to RobotPositioningEnv")
         try:
             from src.envs.robot_sim import RobotPositioningEnv as RobotPositioningRevampedEnv
-        except ImportError:
-            raise ImportError("Could not import robot environment classes from src.envs.robot_sim")
+        except ImportError as e2:
+            raise ImportError(f"Could not import robot environment classes from src.envs.robot_sim: {e2}")
     
     envs = []
     
     for i in range(num_envs):
-        # Create the environment
-        env = RobotPositioningRevampedEnv(
-            gui=(viz_speed > 0) and (i == 0 or parallel_viz),
-            viz_speed=viz_speed,
-            verbose=False,
-            parallel_viz=parallel_viz,
-            rank=i,
-            offset_x=0.5 * i if parallel_viz else 0.0,
-            training_mode=training_mode
-        )
+        # Determine if visualization should be used
+        use_gui = (viz_speed > 0) and (i == 0 or parallel_viz)
+        # Override with environment variable if available
+        if use_env_vars and env_visualize is not None and i == 0:
+            use_gui = env_visualize
         
-        # Apply joint limit enforcement wrapper
-        env = JointLimitEnforcingEnv(env)
+        # Determine verbosity
+        use_verbose = False  # Default to false
+        # Override with environment variable if available
+        if use_env_vars and env_verbose is not None and i == 0:
+            use_verbose = env_verbose
+            
+        # Create the environment with error handling
+        try:
+            env = RobotPositioningRevampedEnv(
+                gui=use_gui,
+                viz_speed=viz_speed,
+                verbose=use_verbose,
+                parallel_viz=parallel_viz,
+                rank=i,
+                offset_x=0.5 * i if parallel_viz else 0.0,
+                training_mode=training_mode
+            )
+            
+            # Apply joint limit enforcement wrapper
+            env = JointLimitEnforcingEnv(env)
+            
+            # Add to list
+            envs.append(env)
+        except Exception as e:
+            raise RuntimeError(f"Failed to create environment {i}: {e}")
         
-        # Add to list
-        envs.append(env)
+    if not envs:
+        raise RuntimeError("No environments were created")
         
     return envs
 
-def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, verbose=False):
+def train_model(model_path=None, steps=500000, visualize=True, eval_after=False, verbose=False):
     """
     Train a new FANUC robot model with DirectML acceleration.
     
     Args:
         model_path: Path to save the model (default: auto-generated)
         steps: Number of training steps
-        use_gui: Whether to use the PyBullet GUI
+        visualize: Whether to use visualization
         eval_after: Whether to run evaluation after training
         verbose: Whether to show detailed progress
         
@@ -108,8 +145,9 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, v
         # If there's no directory in the path, ensure the models directory exists
         os.makedirs("models", exist_ok=True)
     
-    # Set environment variables
-    os.environ['FANUC_GUI'] = '1' if use_gui else '0'
+    # Set environment variables for child processes and components that read them
+    # These are used by functions like get_visualization_settings_from_env
+    os.environ['FANUC_VISUALIZE'] = '1' if visualize else '0'
     os.environ['FANUC_VERBOSE'] = '1' if verbose else '0'
     
     # Create a variable for the model
@@ -117,11 +155,27 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, v
     
     try:
         # Ensure DirectML is available if specified
-        if 'directml' in model_path.lower():
-            from src.dml import is_available
+        if 'directml' in model_path.lower() or os.environ.get('FANUC_DIRECTML') == '1' or os.environ.get('USE_DIRECTML') == '1':
+            from src.dml import is_available, setup_directml
             if not is_available():
-                print("ERROR: DirectML is not available in this environment.")
-                print("Install DirectML with: pip install torch-directml")
+                print("\nERROR: DirectML is not available in this environment.")
+                print("This implementation requires an AMD GPU with DirectML support.")
+                print("Please install DirectML with: pip install torch-directml")
+                print("Then verify your installation with: python fanuc_platform.py install")
+                return 1
+                
+            # Initialize DirectML
+            try:
+                dml_device = setup_directml()
+                if verbose:
+                    print(f"DirectML initialized successfully on device: {dml_device}")
+            except Exception as e:
+                print(f"\nERROR: DirectML initialization failed: {e}")
+                print("This implementation requires DirectML to be properly initialized.")
+                print("Please verify your installation with: python fanuc_platform.py install")
+                if verbose:
+                    import traceback
+                    print(traceback.format_exc())
                 return 1
             
         # Set random seed for reproducibility
@@ -129,11 +183,11 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, v
         
         # Create environments
         num_envs = 4  # Number of parallel environments
-        viz_speed = 0.02 if use_gui else 0.0
+        viz_speed = 0.02 if visualize else 0.0
         envs = create_revamped_envs(
             num_envs=num_envs,
             viz_speed=viz_speed,
-            parallel_viz=use_gui,
+            parallel_viz=visualize,
             training_mode=True
         )
         
@@ -175,7 +229,20 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, v
         # Print training parameters
         if verbose:
             print("\nTraining Parameters:")
-            print(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+            # Check for DirectML first, then CUDA, then fall back to CPU
+            device_type = "cpu"
+            if os.environ.get('USE_DIRECTML') == '1':
+                try:
+                    import torch_directml  # type: ignore
+                    device_type = "directml"
+                except ImportError:
+                    print("Warning: USE_DIRECTML is set but torch_directml is not available")
+                    if torch.cuda.is_available():
+                        device_type = "cuda"
+            elif torch.cuda.is_available():
+                device_type = "cuda"
+            
+            print(f"Device: {device_type}")
             print(f"Learning Rate: {3e-4}")
             print(f"Timesteps: {steps}")
             print(f"n_steps: {n_steps}")
@@ -301,8 +368,10 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, v
             evaluate_model_wrapper(
                 model_path=final_model_path,
                 num_episodes=5,
-                visualize=use_gui,
-                verbose=verbose
+                visualize=visualize,
+                verbose=verbose,
+                max_steps=1000,
+                viz_speed=viz_speed if visualize else 0.0
             )
         
         return 0
@@ -332,7 +401,7 @@ def train_revamped_robot(args):
     return train_model(
         model_path=args.model_path,
         steps=args.steps,
-        use_gui=not args.no_gui,
+        visualize=not args.no_gui,
         eval_after=args.eval_after,
         verbose=args.verbose
     ) 

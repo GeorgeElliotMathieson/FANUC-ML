@@ -2,18 +2,56 @@
 # pybullet_utils.py
 # Utility functions for PyBullet visualizations and robot simulation
 
-import pybullet as p
+import pybullet as p  # type: ignore
 import numpy as np
 import time
 import os
+import threading
 from typing import List, Tuple, Dict, Optional, Union
 
 # Global variables to track PyBullet connections
-_GUI_CONNECTION_ESTABLISHED = False
-_GUI_CLIENT_ID = None
+_GUI_CONNECTION_ESTABLISHED: bool = False
+_GUI_CLIENT_ID: Optional[int] = None
 
-# Global variable to track client ID for shared client
-_SHARED_CLIENT_ID = None
+# Global variable to track client ID for shared client and lock for thread safety
+_SHARED_CLIENT_ID: Optional[int] = None
+_SHARED_CLIENT_LOCK = threading.Lock()
+
+def get_visualization_settings_from_env():
+    """
+    Get visualization and verbosity settings from environment variables.
+    
+    Checks for FANUC_VISUALIZE and FANUC_VERBOSE environment variables and 
+    returns their values as booleans. Handles different formats of boolean values.
+    
+    Returns:
+        Tuple of (visualize, verbose) as booleans
+    """
+    try:
+        # Get visualization setting from environment variable
+        visualize = os.environ.get('FANUC_VISUALIZE')
+        if visualize is not None:
+            # Convert various string formats to boolean
+            visualize = visualize.lower() in ('1', 'true', 'yes', 'y', 'on', 't')
+        else:
+            # Default value if not set
+            visualize = True
+        
+        # Get verbosity setting from environment variable
+        verbose = os.environ.get('FANUC_VERBOSE')
+        if verbose is not None:
+            # Convert various string formats to boolean
+            verbose = verbose.lower() in ('1', 'true', 'yes', 'y', 'on', 't')
+        else:
+            # Default value if not set
+            verbose = False
+        
+        return visualize, verbose
+    except Exception as e:
+        # Handle errors - default to visualization on, verbosity off
+        print(f"Warning: Error getting visualization settings from environment: {e}")
+        print("Using default values: visualization=True, verbose=False")
+        return True, False
 
 def get_pybullet_client(render=False):
     """
@@ -49,27 +87,39 @@ def get_shared_pybullet_client(render=False):
     """
     global _SHARED_CLIENT_ID
     
-    # Check if we already have a shared client
-    if _SHARED_CLIENT_ID is not None:
-        # Check if it's still connected
+    # Use lock to ensure thread safety when accessing shared client
+    with _SHARED_CLIENT_LOCK:
+        # Check if we already have a shared client
+        if _SHARED_CLIENT_ID is not None:
+            # Check if it's still connected
+            try:
+                p.getConnectionInfo(_SHARED_CLIENT_ID)
+                return _SHARED_CLIENT_ID
+            except Exception as e:
+                # Connection was lost, reset the client ID
+                print(f"Connection to shared client lost: {e}")
+                _SHARED_CLIENT_ID = None
+        
+        # Create a new client
         try:
-            p.getConnectionInfo(_SHARED_CLIENT_ID)
+            if render:
+                _SHARED_CLIENT_ID = p.connect(p.GUI)
+            else:
+                _SHARED_CLIENT_ID = p.connect(p.DIRECT)
+            
+            # Configure basic simulation properties
+            p.setGravity(0, 0, -9.81, physicsClientId=_SHARED_CLIENT_ID)
+            p.setRealTimeSimulation(0, physicsClientId=_SHARED_CLIENT_ID)
+            
             return _SHARED_CLIENT_ID
-        except:
-            # Connection was lost, reset the client ID
-            _SHARED_CLIENT_ID = None
-    
-    # Create a new client
-    if render:
-        _SHARED_CLIENT_ID = p.connect(p.GUI)
-    else:
-        _SHARED_CLIENT_ID = p.connect(p.DIRECT)
-    
-    # Configure basic simulation properties
-    p.setGravity(0, 0, -9.81, physicsClientId=_SHARED_CLIENT_ID)
-    p.setRealTimeSimulation(0, physicsClientId=_SHARED_CLIENT_ID)
-    
-    return _SHARED_CLIENT_ID
+        except Exception as e:
+            print(f"Error creating shared PyBullet client: {e}")
+            # In case of failure, return a new non-shared client as fallback
+            try:
+                return get_pybullet_client(render)
+            except:
+                # Last resort - if everything fails
+                raise RuntimeError(f"Failed to create any PyBullet client: {e}")
 
 def configure_visualization(client_id, clean_viz=True):
     """

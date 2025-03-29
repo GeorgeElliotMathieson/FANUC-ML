@@ -258,60 +258,72 @@ class JointLimitMonitorCallback(BaseCallback):
         
     def _on_step(self):
         """Called at each step during training."""
-        # Check if we have environment info
-        if self.locals and "infos" in self.locals and len(self.locals["infos"]) > 0:
-            info = self.locals["infos"][0]  # Get info from first environment
-            
-            # Check for positions_within_limits
-            if "positions_within_limits" in info:
-                within_limits = info["positions_within_limits"]
-                if not within_limits:
-                    self.violation_steps += 1
-                    self.episode_violations += 1
+        try:
+            # Check if we have environment info
+            if self.locals and "infos" in self.locals and len(self.locals["infos"]) > 0:
+                info = self.locals["infos"][0]  # Get info from first environment
+                
+                # Check for positions_within_limits
+                if "positions_within_limits" in info:
+                    within_limits = info["positions_within_limits"]
+                    if not within_limits:
+                        self.violation_steps += 1
+                        self.episode_violations += 1
+                        
+                        # Check for joint positions and joint limits
+                        try:
+                            if ("joint_positions" in info and 
+                                hasattr(self.training_env, "envs") and 
+                                len(self.training_env.envs) > 0 and
+                                hasattr(self.training_env.envs[0], "unwrapped") and
+                                hasattr(self.training_env.envs[0].unwrapped, "robot")):
+                                robot = self.training_env.envs[0].unwrapped.robot
+                                if hasattr(robot, "joint_limits"):
+                                    joint_positions = info["joint_positions"]
+                                    for i, pos in enumerate(joint_positions):
+                                        if i in robot.joint_limits:
+                                            limit_low, limit_high = robot.joint_limits[i]
+                                            if pos < limit_low or pos > limit_high:
+                                                if i not in self.total_violations_by_joint:
+                                                    self.total_violations_by_joint[i] = 0
+                                                self.total_violations_by_joint[i] += 1
+                        except (IndexError, AttributeError, KeyError) as e:
+                            if self.verbose > 1:
+                                print(f"Warning: Error checking joint limits: {e}")
+                
+                self.total_steps += 1
+                self.episode_steps += 1
+                
+                # Check for episode termination
+                if "terminal_observation" in info:
+                    # Reset episode counters
+                    self.episode_violations = 0
+                    self.episode_steps = 0
                     
-                    # Check for joint positions and joint limits
-                    if "joint_positions" in info and hasattr(self.training_env.envs[0].unwrapped, "robot"):
-                        robot = self.training_env.envs[0].unwrapped.robot
-                        if hasattr(robot, "joint_limits"):
-                            joint_positions = info["joint_positions"]
-                            for i, pos in enumerate(joint_positions):
-                                if i in robot.joint_limits:
-                                    limit_low, limit_high = robot.joint_limits[i]
-                                    if pos < limit_low or pos > limit_high:
-                                        if i not in self.total_violations_by_joint:
-                                            self.total_violations_by_joint[i] = 0
-                                        self.total_violations_by_joint[i] += 1
-            
-            self.total_steps += 1
-            self.episode_steps += 1
-            
-            # Check for episode termination
-            if "terminal_observation" in info:
-                # Reset episode counters
-                self.episode_violations = 0
-                self.episode_steps = 0
-                
-        # Log periodically
-        if self.log_interval and self.n_calls % self.log_interval == 0:
-            if self.total_steps > 0:
-                violation_rate = self.violation_steps / self.total_steps
-                
-                # Sort joints by violation count
-                sorted_violations = sorted(
-                    self.total_violations_by_joint.items(),
-                    key=lambda x: x[1],
-                    reverse=True
-                )
-                
-                if self.verbose > 0:
-                    print("\nJoint Limit Monitor:")
-                    print(f"  Steps: {self.total_steps}")
-                    print(f"  Violations: {self.violation_steps}")
-                    print(f"  Violation rate: {violation_rate:.2%}")
+            # Log periodically
+            if self.log_interval and self.n_calls % self.log_interval == 0:
+                if self.total_steps > 0:
+                    violation_rate = self.violation_steps / self.total_steps
                     
-                    if sorted_violations:
-                        print("  Violations by joint:")
-                        for joint, count in sorted_violations:
-                            print(f"    Joint {joint}: {count} violations ({count/self.total_steps:.2%})")
-                            
+                    # Sort joints by violation count
+                    sorted_violations = sorted(
+                        self.total_violations_by_joint.items(),
+                        key=lambda x: x[1],
+                        reverse=True
+                    )
+                    
+                    if self.verbose > 0:
+                        print("\nJoint Limit Monitor:")
+                        print(f"  Steps: {self.total_steps}")
+                        print(f"  Violations: {self.violation_steps}")
+                        print(f"  Violation rate: {violation_rate:.2%}")
+                        
+                        if sorted_violations:
+                            print("  Violations by joint:")
+                            for joint, count in sorted_violations:
+                                print(f"    Joint {joint}: {count} violations ({count/self.total_steps:.2%})")
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"Error in JointLimitMonitorCallback: {e}")
+                
         return True 

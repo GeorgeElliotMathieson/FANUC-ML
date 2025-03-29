@@ -71,8 +71,8 @@ def ensure_model_file_exists(model_path: str) -> str:
 def is_directml_available():
     """Check if DirectML is available for GPU acceleration."""
     try:
-        import torch_directml
-        return True
+        from src.dml import is_available
+        return is_available()
     except ImportError:
         return False
 
@@ -83,11 +83,41 @@ def get_directml_device():
     Returns:
         DirectML device if available, None otherwise
     """
-    if is_directml_available():
-        try:
-            import torch_directml
-            return torch_directml.device()
-        except Exception as e:
-            print(f"Error creating DirectML device: {e}")
-            return None
-    return None 
+    try:
+        from src.dml import get_device
+        return get_device()
+    except (ImportError, RuntimeError) as e:
+        print(f"Error getting DirectML device: {e}")
+        return None
+
+def get_directml_settings_from_env():
+    """
+    Get DirectML settings from environment variables.
+    
+    Checks for FANUC_DIRECTML, USE_DIRECTML, and USE_GPU environment variables
+    and returns whether DirectML should be used.
+    
+    Returns:
+        bool: Whether to use DirectML
+    """
+    try:
+        # Check for any of the environment variables that would indicate DirectML usage
+        use_directml = (
+            os.environ.get('FANUC_DIRECTML', '0').lower() in ('1', 'true', 'yes', 'y', 'on', 't') or
+            os.environ.get('USE_DIRECTML', '0').lower() in ('1', 'true', 'yes', 'y', 'on', 't') or
+            os.environ.get('USE_GPU', '0').lower() in ('1', 'true', 'yes', 'y', 'on', 't')
+        )
+        
+        return use_directml
+    except KeyError as e:
+        print(f"Warning: Environment variable error: {e}")
+        print("Using default value: directml=False")
+        return False
+    except ValueError as e:
+        print(f"Warning: Could not parse environment variable value: {e}")
+        print("Using default value: directml=False")
+        return False
+    except Exception as e:
+        print(f"Warning: Error getting DirectML settings from environment: {e}")
+        print("Using default value: directml=False")
+        return False 

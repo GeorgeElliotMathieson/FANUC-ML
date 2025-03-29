@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # robot_sim.py - FANUC robot simulation environment
-import pybullet as p
-import pybullet_data
+import pybullet as p  # type: ignore
+import pybullet_data  # type: ignore
 import time
 import numpy as np
 import os
 import sys
-import gymnasium as gym
-from gymnasium import spaces
+import gymnasium as gym  # type: ignore
+from gymnasium import spaces  # type: ignore
 
 # Import from the utils module
 from src.utils.pybullet_utils import get_pybullet_client, configure_visualization, determine_reachable_workspace
@@ -295,31 +295,22 @@ class FANUCRobotEnv:
         if self.client is not None:
             p.disconnect(self.client)
 
-# Get a shared PyBullet client
+# DEPRECATED: Use the function from src.utils.pybullet_utils instead
+# This function is kept here only for backward compatibility
 def get_shared_pybullet_client(render=True):
     """
     Get or create a shared PyBullet client.
-    This ensures we have a single PyBullet instance across the entire application.
+    This is a deprecated function. Use src.utils.pybullet_utils.get_shared_pybullet_client instead.
     """
-    # Check if PyBullet is already connected
-    if p.isConnected():
-        # Get existing client ID
-        client_id = p.getConnectionInfo()['connectionId']
-        print(f"Using existing PyBullet client with ID: {client_id}")
-        return client_id
-    
-    # No existing connection, create a new one
-    if render:
-        client_id = p.connect(p.GUI)
-        print(f"Connected to PyBullet in GUI mode with client ID: {client_id}")
-    else:
-        client_id = p.connect(p.DIRECT)
-        print(f"Connected to PyBullet in DIRECT mode with client ID: {client_id}")
-    
-    # Configure PyBullet
-    p.setGravity(0, 0, -9.81, physicsClientId=client_id)
-    
-    return client_id
+    from src.utils.pybullet_utils import get_shared_pybullet_client as utils_get_shared_client
+    import warnings
+    warnings.warn(
+        "This get_shared_pybullet_client function in robot_sim.py is deprecated. "
+        "Please use src.utils.pybullet_utils.get_shared_pybullet_client instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    return utils_get_shared_client(render=render)
 
 # Test the environment
 if __name__ == "__main__":
@@ -622,7 +613,9 @@ class RobotPositioningRevampedEnv(gym.Env):
                 if hasattr(self, 'target_visual_id') and self.target_visual_id is not None:
                     try:
                         p.removeBody(self.target_visual_id, physicsClientId=self.client_id)
-                    except:
+                    except Exception as e:
+                        if self.verbose:
+                            print(f"Warning: Could not remove previous target visual: {e}")
                         pass
                 
                 # Create new target visualization

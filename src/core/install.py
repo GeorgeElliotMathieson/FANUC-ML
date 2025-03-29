@@ -98,15 +98,16 @@ def test_install():
     
     if not directml_ok:
         print("\nERROR: DirectML support is not available.")
-        print("This implementation requires AMD GPU with DirectML support.")
+        print("This implementation requires an AMD GPU with DirectML support.")
         print("Install with: pip install torch-directml")
+        print("Then verify your installation with: python fanuc_platform.py install")
         return 1
     
     # Test DirectML
     print("\nTesting DirectML AMD GPU detection:")
     try:
         import torch
-        import torch_directml
+        import torch_directml  # type: ignore
         
         # Check for DirectML devices
         device_count = torch_directml.device_count()

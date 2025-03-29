@@ -5,8 +5,8 @@ import os
 import time
 import math
 import numpy as np
-import pybullet as p
-import pybullet_data
+import pybullet as p  # type: ignore
+import pybullet_data  # type: ignore
 
 # Configuration
 SHOW_GUI = True           # Set to False for headless mode
@@ -135,8 +135,25 @@ def move_to_joint_position(robot_id, joint_positions, duration=1.0):
     """Move to specified joint positions over a duration"""
     arm_joints = get_arm_joint_indices(robot_id)
     
+    # Make defensive copy of joint_positions
+    if joint_positions is None:
+        print("Warning: joint_positions is None, defaulting to zeros")
+        adjusted_positions = [0] * len(arm_joints)
+    else:
+        # Convert to list if numpy array
+        if hasattr(joint_positions, 'tolist'):
+            adjusted_positions = joint_positions.tolist()
+        # Create a copy to avoid modifying the original
+        elif isinstance(joint_positions, list):
+            adjusted_positions = joint_positions.copy()
+        else:
+            try:
+                adjusted_positions = list(joint_positions)
+            except (TypeError, ValueError):
+                print(f"Warning: Could not convert joint_positions to list. Using zeros.")
+                adjusted_positions = [0] * len(arm_joints)
+    
     # Adjust joint positions to match the number of actual joints
-    adjusted_positions = joint_positions.copy()
     if len(adjusted_positions) > len(arm_joints):
         # Truncate extra positions
         print(f"Note: Truncating from {len(adjusted_positions)} positions to {len(arm_joints)} joints")
@@ -146,6 +163,22 @@ def move_to_joint_position(robot_id, joint_positions, duration=1.0):
         print(f"Note: Padding from {len(adjusted_positions)} positions to {len(arm_joints)} joints")
         adjusted_positions.extend([0] * (len(arm_joints) - len(adjusted_positions)))
     
+    # Validate against joint limits
+    for i, joint_idx in enumerate(arm_joints):
+        joint_info = p.getJointInfo(robot_id, joint_idx)
+        lower_limit = joint_info[8]
+        upper_limit = joint_info[9]
+        
+        # Check if joint has limits (some joints may have limits set to 0, 0)
+        # Using math.isclose is more reliable for floating point comparison
+        has_limits = not (math.isclose(lower_limit, upper_limit) and math.isclose(lower_limit, 0.0))
+        
+        if has_limits and (adjusted_positions[i] < lower_limit or adjusted_positions[i] > upper_limit):
+            original_value = adjusted_positions[i]
+            adjusted_positions[i] = max(lower_limit, min(upper_limit, adjusted_positions[i]))
+            print(f"Warning: Joint {i} value {original_value:.4f} out of limits [{lower_limit:.4f}, {upper_limit:.4f}], "
+                  f"adjusted to {adjusted_positions[i]:.4f}")
+    
     # Store initial positions for interpolation
     initial_positions = []
     for idx in arm_joints:
@@ -153,7 +186,7 @@ def move_to_joint_position(robot_id, joint_positions, duration=1.0):
         initial_positions.append(joint_state[0])
     
     # Calculate number of steps based on duration and time step
-    steps = int(duration / TIME_STEP)
+    steps = max(1, int(duration / TIME_STEP))
     
     # Interpolate and move
     for step in range(steps):
@@ -186,7 +219,8 @@ def demo_robot_motion(robot_id):
     
     # Reset to home position
     reset_robot_positions(robot_id)
-    time.sleep(1.0) if SHOW_GUI else None
+    if SHOW_GUI:
+        time.sleep(1.0)
     
     # Define a series of joint positions for the demo
     positions = [
@@ -206,7 +240,8 @@ def demo_robot_motion(robot_id):
     for i, pos in enumerate(positions):
         print(f"Moving to position {i+1}/{len(positions)}")
         move_to_joint_position(robot_id, pos, duration=1.5)
-        time.sleep(0.5) if SHOW_GUI else None
+        if SHOW_GUI:
+            time.sleep(0.5)
     
     print("Demo completed!")
 

@@ -5,7 +5,7 @@ Custom action spaces for robot control that enforce joint limits.
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-import pybullet as p
+import pybullet as p  # type: ignore
 
 def ensure_joint_limits(robot, joint_positions):
     """
@@ -13,11 +13,15 @@ def ensure_joint_limits(robot, joint_positions):
     
     Args:
         robot: The robot environment instance
-        joint_positions: Array of joint positions to check and enforce
+        joint_positions: Array or list of joint positions to check and enforce
         
     Returns:
         Array of joint positions with limits enforced
     """
+    # Ensure we have a numpy array to avoid issues with copy() on lists
+    if not isinstance(joint_positions, np.ndarray):
+        joint_positions = np.array(joint_positions, dtype=np.float32)
+    
     limited_positions = joint_positions.copy()
     
     for i, pos in enumerate(joint_positions):
@@ -196,14 +200,17 @@ class JointLimitEnforcingEnv(gym.Wrapper):
                 # Enforce joint limits
                 limited_positions = ensure_joint_limits(self.robot, new_joint_positions)
                 
-                # Create zero velocities for the robot step
-                zero_velocities = [0.0] * len(limited_positions)
+                # Convert the limited positions to deltas relative to current positions for the env.step
+                limited_deltas = []
+                for i, limited_pos in enumerate(limited_positions):
+                    limited_delta = limited_pos - current_joint_positions[i]
+                    limited_deltas.append(limited_delta)
                 
-                # Call the original step method with enforced limits
-                next_state = self.robot.step((limited_positions, zero_velocities))
+                # Create modified action with limited deltas
+                modified_action = np.array(limited_deltas, dtype=action.dtype)
                 
-                # Pass to parent step with the original action (the environment will re-apply limits internally)
-                return self.env.step(action)
+                # Pass the modified action to the environment
+                return self.env.step(modified_action)
             else:
                 # Fallback if the environment doesn't match our expected structure
                 return self.env.step(action) 
