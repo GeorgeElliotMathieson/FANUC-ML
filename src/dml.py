@@ -125,7 +125,6 @@ def setup_directml():
         
         # Create a demo tensor to verify the device works
         try:
-            import torch
             test_tensor = torch.ones((2, 3), device=_DIRECTML_DEVICE)
             print(f"Test tensor created on DirectML device: {test_tensor.device}")
             print("DirectML setup successful!")
@@ -202,6 +201,10 @@ class DirectMLPPO:
     def _build_network(self):
         """Build the neural network for the PPO agent"""
         try:
+            # Make sure torch is imported
+            import torch
+            import torch.nn as nn
+            
             # Get observation shape
             if hasattr(self.observation_space, 'shape'):
                 obs_shape = self.observation_space.shape
@@ -270,6 +273,9 @@ class DirectMLPPO:
             Tuple of (action, None) to match SB3 API
         """
         try:
+            # Ensure torch is imported
+            import torch
+            
             # Handle different observation types
             if isinstance(observation, np.ndarray):
                 if len(observation.shape) == 1:
@@ -525,8 +531,8 @@ def evaluate_model_directml(model_path, num_episodes=10, visualize=True, verbose
         
         # Use evaluation wrapper as fallback
         try:
-            from src.core.evaluation.evaluate import evaluate_model
-            results = evaluate_model(
+            from src.core.evaluation.evaluate import evaluate_model_wrapper
+            results = evaluate_model_wrapper(
                 model_path=model_path,
                 num_episodes=num_episodes,
                 visualize=visualize,
@@ -758,6 +764,14 @@ def train_robot_with_ppo_directml(total_timesteps=500000, model_path=None, verbo
             if verbose:
                 import traceback
                 print(traceback.format_exc())
+            return None
+        
+        # Make sure DirectML is imported
+        try:
+            import torch_directml  # type: ignore
+        except ImportError as e:
+            print(f"\nERROR: Failed to import torch_directml: {e}")
+            print("Please install it with: pip install torch-directml")
             return None
         
         # In a real implementation, this would create the environment and model
