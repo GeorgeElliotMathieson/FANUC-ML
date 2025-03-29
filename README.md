@@ -91,6 +91,12 @@ All operations use the single unified script with the following format:
 ```bash
 # For all operations (AMD GPU with DirectML)
 fanuc.bat [mode] [options]
+
+# If using PowerShell, use:
+.\fanuc.bat [mode] [options]
+
+# Alternatively, you can run directly with Python:
+python fanuc_platform.py [mode] [options]
 ```
 
 Where `mode` can be one of:
@@ -161,6 +167,22 @@ These options work with all commands:
 - `--episodes N` - Number of episodes (for eval/test)
 - `--steps N` - Number of training steps (for train)
 - `--eval` - Run evaluation after training (for train)
+
+### Troubleshooting
+
+#### Command Execution Issues
+
+- **PowerShell Users**: When using PowerShell, prefix batch files with `.\` (e.g., `.\fanuc.bat install`)
+- **Command Not Found**: If you encounter issues with the batch file, you can run commands directly with Python: `python fanuc_platform.py [command] [options]`
+- **Permission Issues**: On some systems, you may need to adjust execution policies for running batch files. Try running PowerShell as administrator.
+
+#### DirectML Issues
+
+Common issues with DirectML:
+
+1. **No GPU detected**: Make sure your AMD drivers are up to date.
+2. **Out of memory errors**: Reduce batch size or model complexity.
+3. **Performance issues**: Check for background processes using GPU resources.
 
 ## Robot Model Specifications
 
@@ -330,14 +352,6 @@ DirectML behavior can be fine-tuned with environment variables:
 - `PYTORCH_DIRECTML_VERBOSE`: Set to 1 for verbose output (default: 0)
 - `DIRECTML_ENABLE_OPTIMIZATION`: Enable DirectML optimization (default: 1)
 - `DIRECTML_GPU_TRANSFER_BIT_WIDTH`: Bit width for GPU transfers (default: 64)
-
-### Troubleshooting
-
-Common issues with DirectML:
-
-1. **No GPU detected**: Make sure your AMD drivers are up to date.
-2. **Out of memory errors**: Reduce batch size or model complexity.
-3. **Performance issues**: Check for background processes using GPU resources.
 
 ## License
 

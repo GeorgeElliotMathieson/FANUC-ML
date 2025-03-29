@@ -23,7 +23,7 @@ if "%command%"=="" (
     echo FANUC Robot ML Platform (DirectML Edition)
     echo ======================================
     echo.
-    echo Usage: fanuc.bat [command] [options]
+    echo Usage: .\fanuc.bat [command] [options]
     echo.
     echo Commands:
     echo   install         - Test installation and verify DirectML availability
@@ -32,18 +32,18 @@ if "%command%"=="" (
     echo   test            - Run quick test on a model
     echo.
     echo For help with a specific command:
-    echo   fanuc.bat [command] --help
+    echo   .\fanuc.bat [command] --help
     echo.
     echo Examples:
-    echo   fanuc.bat install
-    echo   fanuc.bat train --steps 1000000 --no-gui
-    echo   fanuc.bat eval models/my_model --episodes 20
-    echo   fanuc.bat test models/my_model
+    echo   .\fanuc.bat install
+    echo   .\fanuc.bat train --steps 1000000 --no-gui
+    echo   .\fanuc.bat eval models/my_model --episodes 20
+    echo   .\fanuc.bat test models/my_model
     echo.
     exit /b 1
 )
 
-REM Set DirectML environment variable to ensure DirectML is used
+REM Set DirectML environment variables to ensure DirectML is used
 set FANUC_DIRECTML=1
 set USE_DIRECTML=1
 set USE_GPU=1

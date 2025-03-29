@@ -410,7 +410,13 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, v
         model_path = f"models/fanuc-{timestamp}-directml"
     
     # Create models directory if it doesn't exist
-    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    if "/" in model_path or "\\" in model_path:
+        directory = os.path.dirname(model_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+    else:
+        # If there's no directory in the path, ensure the models directory exists
+        os.makedirs("models", exist_ok=True)
     
     # Print banner with settings
     print_banner("Training FANUC Robot Model with DirectML")
@@ -486,7 +492,9 @@ def parse_args():
     subparsers = parser.add_subparsers(dest="mode", help="Operation mode")
     
     # Train mode parser
-    train_parser = subparsers.add_parser("train", help="Train a model with DirectML")
+    train_parser = subparsers.add_parser("train", 
+                                         help="Train a model with DirectML",
+                                         description="Train a FANUC robot model using DirectML acceleration")
     train_parser.add_argument("model_path", nargs="?", help="Path to save the model (optional)")
     train_parser.add_argument("steps", nargs="?", type=int, default=500000, 
                              help="Number of training steps")
