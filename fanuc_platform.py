@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-DirectML-Only Entry Point for FANUC Robot ML Platform
+FANUC Robot ML Platform - Unified Implementation (DirectML Edition)
 
-This script provides a single entry point for all FANUC Robot ML Platform operations
-specifically optimized for AMD GPUs with DirectML acceleration:
+This script provides the implementation for all FANUC Robot ML Platform operations,
+with a single entry point through fanuc.bat:
 
 1. Training models with DirectML acceleration
 2. Evaluating models with DirectML acceleration
 3. Testing models with DirectML acceleration
 4. Installation verification and DirectML troubleshooting
 
-This file has been streamlined to focus only on DirectML functionality.
+This implementation is optimized specifically for AMD GPUs with DirectML acceleration.
 """
 
 import os
@@ -131,7 +131,7 @@ def test_install():
         "src.core",
         "src.envs",
         "src.utils",
-        "src.directml_core"
+        "src.dml"
     ]
     
     # Dependencies
@@ -212,7 +212,7 @@ def test_install():
         print(f"  ✓ Successfully initialized DirectML device: {device}")
         
         # Check for AMD GPU info
-        from src.directml_core import setup_directml
+        from src.dml import setup_directml
         dml_device = setup_directml()
         
         print("\nDirectML setup successful!")
@@ -278,7 +278,7 @@ def run_evaluation(model_path, episodes=10, use_gui=True, verbose=False):
     
     # Load DirectML components
     try:
-        from src.directml_core import evaluate_model_directml
+        from src.dml import evaluate_model_directml
         
         # Check that the required module exists
         if 'evaluate_model_directml' not in globals() and not hasattr(evaluate_model_directml, '__call__'):
@@ -356,7 +356,7 @@ def run_test(model_path, episodes=1, use_gui=True, verbose=False):
     os.environ['FANUC_VERBOSE'] = '1' if verbose else '0'
     
     try:
-        from src.directml_core import test_model_directml
+        from src.dml import test_model_directml
         
         print("Loading model and environment...")
         
@@ -430,10 +430,10 @@ def train_model(model_path=None, steps=500000, use_gui=True, eval_after=False, v
     # Train with DirectML
     try:
         # Use DirectML for training
-        from src.directml_core import train_robot_with_ppo_directml
+        from src.dml import train_robot_with_ppo_directml
         
         # Check if DirectML is available
-        from src.directml_core import is_available
+        from src.dml import is_available
         if not is_available():
             print("ERROR: DirectML is not available in this environment.")
             print("Install DirectML with: pip install torch-directml")

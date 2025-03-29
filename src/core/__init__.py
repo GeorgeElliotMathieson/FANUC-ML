@@ -5,15 +5,15 @@ Contains the main implementation of the robot environment, training algorithms,
 and evaluation logic for positioning tasks.
 """
 
-# Export key components from the positioning revamped module
+# Export key components from the robot trainer module
 try:
-    from .train_robot_rl_positioning_revamped import (
-        RobotPositioningRevampedEnv,
+    from .robot_trainer import (
+        RobotPositioningEnv,
         CustomFeatureExtractor,
         JointLimitedBox,
         JointLimitEnforcingEnv,
-        create_revamped_envs,
-        train_revamped_robot,
+        create_envs,
+        train_robot,
         evaluate_model,
         run_evaluation_sequence,
         CustomPPO

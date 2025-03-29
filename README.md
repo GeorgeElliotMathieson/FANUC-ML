@@ -1,4 +1,4 @@
-# FANUC Robot ML Platform (DirectML-Only)
+# FANUC Robot ML Platform (DirectML Edition)
 
 A comprehensive machine learning platform for reinforcement learning with FANUC robot arms, focusing on precise end-effector positioning tasks. Optimized exclusively for AMD GPU acceleration via DirectML.
 
@@ -14,51 +14,42 @@ This platform provides a complete framework for applying reinforcement learning 
 - **Modular Design**: Well-structured Python package with clean separation of concerns
 - **Unified Interface**: Single entry point for all operations
 
-## Optimized Consolidated Codebase
+## Streamlined Architecture
 
-This project has been streamlined to provide a unified interface for all operations:
+This project has been streamlined to provide a single unified interface for all operations:
 
-- **Unified Entry Points**: 
-  - `fanuc.bat` - Primary script for all DirectML operations
-  - Legacy scripts for backward compatibility
-- **Single Python Implementation**: Core functionality is consolidated in `fanuc_platform.py`
+- **Single Entry Point**: 
+  - `fanuc.bat` - The only script needed for all operations (train, evaluate, test, install)
+- **Consolidated Implementation**: Core functionality in `fanuc_platform.py` and `dml.py`
 - **Simplified Usage**: Consistent parameter handling across all modes
-- **Reduced Complexity**: Eliminated redundant scripts and consolidated functionality
 
 ## Directory Structure
 
 ```
 fanuc-ml/
-├── fanuc.bat            # Primary script for all DirectML operations
-├── directml.bat         # Backward compatibility script (forwards to fanuc.bat)
+├── fanuc.bat            # Single entry point for all operations
 ├── fanuc_platform.py    # Unified implementation for all operations
-├── evaluate_model.bat   # Backward compatibility for DirectML model evaluation
-├── test_model.bat       # Backward compatibility for DirectML testing
-├── evaluate_directml.bat # Backward compatibility for DirectML evaluation
-├── test_directml.bat    # Backward compatibility for DirectML testing
-├── CONSOLIDATION.md     # Documentation of consolidation efforts
-├── DIRECTML_CONVERSION.md # Documentation of DirectML-only conversion
+├── README.md            # This comprehensive documentation
 ├── pyproject.toml       # Modern Python package configuration
 ├── requirements.txt     # Core dependencies
 ├── robots/              # Robot model files
 │   ├── urdf/            # URDF robot descriptions
 │   ├── meshes/          # 3D mesh files for robots
-│   └── README.md        # Robot models documentation
 ├── src/                 # Source code (main package)
 │   ├── __init__.py      # Package definition
 │   ├── core/            # Core training and simulation code
-│   ├── directml_core.py # DirectML implementation
+│   │   ├── __init__.py  # Core module definition
+│   │   └── robot_trainer.py  # Main training implementation
+│   ├── dml.py           # DirectML implementation
 │   ├── envs/            # Environment implementations
 │   ├── utils/           # Utility functions
 │   │   ├── __init__.py  # Core utilities including seeding
 │   │   └── pybullet_utils.py # PyBullet helper functions
-│   └── README.md        # Source code documentation
 ├── tools/               # Utility tools and demos
 │   └── demos/           # Robot demonstration scripts
 ├── models/              # Trained model storage
 ├── plots/               # Training plots and graphs
-├── visualizations/      # Evaluation visualizations
-└── docs/                # Documentation
+└── visualizations/      # Evaluation visualizations
 ```
 
 ## Installation
@@ -95,7 +86,7 @@ fanuc.bat install
 
 ## Usage
 
-All operations use the unified script with the following format:
+All operations use the single unified script with the following format:
 
 ```bash
 # For all operations (AMD GPU with DirectML)
@@ -138,6 +129,28 @@ fanuc.bat test models/my_model
 fanuc.bat test models/my_model --episodes 3 --verbose
 ```
 
+### Demo Scripts
+
+The platform includes demo scripts for exploring robot functionality:
+
+```bash
+# Run the FANUC robot demo
+python tools/demos/load_fanuc_robot.py
+```
+
+#### Available Demos
+
+- `load_fanuc_robot.py` - Basic script to load a FANUC robot in PyBullet and demonstrate joint motion with a sequence of predefined poses.
+
+#### Demo Features
+
+- Robot loading and visualization
+- Joint control and movement
+- Simulation parameter optimization
+- Examples of how to interact with the PyBullet API
+
+These demos serve as practical examples for developers who want to understand the low-level robot control without diving into the full reinforcement learning framework.
+
 ### Common Options
 
 These options work with all commands:
@@ -148,6 +161,33 @@ These options work with all commands:
 - `--episodes N` - Number of episodes (for eval/test)
 - `--steps N` - Number of training steps (for train)
 - `--eval` - Run evaluation after training (for train)
+
+## Robot Model Specifications
+
+The FANUC robot models have:
+- 6 revolute joints for the arm
+- Accurate inertial properties from the original FANUC specifications
+- Realistic joint limits and constraints
+- Properly configured collision geometries for simulation
+
+### Using Robot Models in Your Projects
+
+To use these robot models in your own PyBullet projects:
+
+```python
+import pybullet as p
+import os
+
+# Initialize PyBullet
+p.connect(p.GUI)
+
+# Get the path to the URDF file - update path as needed
+urdf_path = os.path.join("robots", "urdf", "fanuc.urdf")
+robot_id = p.loadURDF(urdf_path, useFixedBase=True)
+
+# Control the robot
+# ...
+```
 
 ## Training Parameters and Options
 
@@ -177,7 +217,7 @@ The training implementation uses a consolidated architecture with:
 Models are saved with timestamp-based naming in the `models/` directory:
 
 ```
-models/fanuc-20250401-120523-directml/  # DirectML model trained on April 1, 2025
+models/fanuc-20250401-120523/  # Model trained on April 1, 2025
 ```
 
 ### Monitoring and Evaluation
@@ -204,15 +244,33 @@ fanuc.bat test --help
 
 ## Development
 
-### Project Structure
+### Module Structure
 
-The project uses a modern Python package structure:
+The codebase is organized into logical modules:
 
-- `src/` - Main package directory containing all source code
-- `src/core/` - Core functionality for robot control and training
-- `src/directml_core.py` - AMD GPU-specific implementations
-- `src/envs/` - Environment implementations for robot simulation
-- `src/utils/` - Utility functions and tools
+- `core/`: Core reinforcement learning algorithms and training logic
+  - `robot_trainer.py`: Main implementation of the PPO-based robot positioning task
+
+- `dml.py`: DirectML support for AMD GPU acceleration
+  - Contains DirectML-specific implementations and utilities
+  - Implements DirectML-optimized model loading and inference
+
+- `envs/`: Robot environment implementations
+  - Contains PyBullet-based robot simulation environments
+
+- `utils/`: Utility functions and helpers
+  - Contains PyBullet helpers and general utilities
+
+### Module Dependencies
+
+The modules are designed with the following dependency flow:
+
+```
+fanuc_platform.py → src/dml.py → src/core/robot_trainer.py
+                              → src/envs/robot_sim.py
+                            
+src/utils/* ← used by all modules
+```
 
 ### Extending the Platform
 
@@ -222,28 +280,22 @@ To extend the platform with new features:
 2. Update the unified `fanuc_platform.py` for new functionality
 3. Add docstrings for all public functions and classes
 
-## License
+### Development Guidelines
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+When adding new tools:
 
-## Acknowledgements
+1. Add new functionality to the consolidated `fanuc_platform.py` file instead of creating separate scripts
+2. Add demonstration scripts to the tools/demos subdirectory
+3. Include comprehensive documentation in each script
+4. Maintain consistent naming schemes and coding standards
+5. Follow the established modular architecture
 
-- [PyBullet](https://pybullet.org/) - Used for physics simulation
-- [PyTorch](https://pytorch.org/) - Deep learning framework
-- [Stable Baselines3](https://github.com/DLR-RM/stable-baselines3) - RL algorithms
-- [torch-directml](https://github.com/microsoft/DirectML) - AMD GPU acceleration
+### Naming Conventions
 
-## Additional Documentation
-
-For more detailed information, refer to:
-- [Consolidation Documentation](CONSOLIDATION.md) - Details on code consolidation efforts
-- [DirectML Conversion](DIRECTML_CONVERSION.md) - Details on the conversion to DirectML-only
-
-## Models
-
-The repository includes pre-trained models:
-
-- `models/fanuc-ml-directml` - DirectML trained model 
+- Module names: lowercase with underscores (e.g., `robot_sim.py`)
+- Class names: CamelCase (e.g., `FANUCRobotEnv`)
+- Functions and methods: lowercase with underscores (e.g., `train_robot()`)
+- Constants: UPPERCASE with underscores (e.g., `MAX_STEPS`)
 
 ## DirectML Implementation Details
 
@@ -271,16 +323,6 @@ The DirectML implementation provides several key components:
    - `PYTORCH_DIRECTML_VERBOSE=1` - Controls verbosity of DirectML operations
    - `DIRECTML_ENABLE_OPTIMIZATION=1` - Enables DirectML optimization (default)
 
-### High-Level Architecture
-
-```
-fanuc.bat → fanuc_platform.py → src/directml_core.py
-```
-
-- `fanuc.bat`: Entry point script that sets DirectML environment variables
-- `fanuc_platform.py`: Unified platform script that handles all operations
-- `src/directml_core.py`: Core DirectML implementation with AMD-specific optimizations
-
 ### Advanced Configuration
 
 DirectML behavior can be fine-tuned with environment variables:
@@ -297,10 +339,20 @@ Common issues with DirectML:
 2. **Out of memory errors**: Reduce batch size or model complexity.
 3. **Performance issues**: Check for background processes using GPU resources.
 
-### Development Notes
+## License
 
-When developing new features:
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-1. Use the `torch_directml.device()` for tensor operations
-2. Handle DirectML errors with appropriate error messages
-3. Add your implementation to the `src/directml_core.py` module for consistency 
+## Acknowledgements
+
+- [PyBullet](https://pybullet.org/) - Used for physics simulation
+- [PyTorch](https://pytorch.org/) - Deep learning framework
+- [Stable Baselines3](https://github.com/DLR-RM/stable-baselines3) - RL algorithms
+- [torch-directml](https://github.com/microsoft/DirectML) - AMD GPU acceleration
+- [sezan92/Fanuc](https://github.com/sezan92/Fanuc.git) - Original robot model base
+
+## Pre-trained Models
+
+The repository includes pre-trained models:
+
+- `models/fanuc-ml-amd` - DirectML trained model 

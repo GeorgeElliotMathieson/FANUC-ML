@@ -9,8 +9,8 @@ __version__ = "0.1.0"
 __author__ = "FANUC ML Team"
 
 # Import key DirectML functionality
-from .directml_core import is_available as is_directml_available
-from .directml_core import setup_directml, get_device
+from .dml import is_available as is_directml_available
+from .dml import setup_directml, get_device
 
 # Core modules are imported directly from their packages
 # See src/core/__init__.py for core exports
