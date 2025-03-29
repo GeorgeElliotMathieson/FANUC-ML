@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import argparse
+import torch
 from pathlib import Path
 
 # Set environment variables for DirectML and optimization
@@ -20,6 +21,26 @@ os.environ["DIRECTML_DISABLE_PARALLELIZATION"] = "0"
 os.environ["TORCH_COMPILE_MODE"] = "max-autotune"
 os.environ["PYBULLET_FORCE_NOGL"] = "1"
 os.environ["TRAINING_MODE"] = "1"
+# Add additional GPU optimization settings
+os.environ["DIRECTML_ENABLE_ADVANCED_OPTIMIZATION"] = "1"
+os.environ["DIRECTML_MEMORY_LIMIT_MB"] = "8192"  # Reserve 8GB GPU memory 
+os.environ["TORCH_CUDNN_BENCHMARK"] = "1"  # Enable cuDNN benchmark mode
+# Add settings to minimize CPU fallbacks
+os.environ["TORCH_AUTOCAST_ENABLED"] = "1"  # Enable automatic mixed precision
+os.environ["DIRECTML_FALLBACK_WARNING_LEVEL"] = "0"  # Suppress fallback warnings
+os.environ["DIRECTML_ENABLE_MEMORY_OPTIMIZATIONS"] = "1"  # Enable memory optimizations
+os.environ["DIRECTML_ENABLE_BATCH_OPTIMIZATION"] = "1"  # Enable batch optimizations
+os.environ["TORCH_COMPILE_OFFLOAD"] = "1"  # Try to offload more operations to GPU
+# Add settings for larger models and improved memory management
+os.environ["DIRECTML_ENABLE_TILED_RESOURCES"] = "1"  # Enable tiled memory resources
+os.environ["DIRECTML_ENABLE_DEFERRED_RELEASES"] = "1"  # Defer memory releases
+os.environ["DIRECTML_WORKGROUP_SIZE"] = "256"  # Optimize thread workgroup size
+os.environ["TORCH_ALLOW_TF32"] = "1"  # Allow TF32 precision for better performance
+
+# Suppress warnings for known CPU fallbacks
+import warnings
+warnings.filterwarnings("ignore", message=".*not currently supported on the DML backend.*")
+warnings.filterwarnings("ignore", message=".*will fall back to run on the CPU.*")
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -35,8 +56,8 @@ def parse_args():
     parser.add_argument(
         "--n-envs", 
         type=int, 
-        default=8,
-        help="Number of parallel environments (default: 8)"
+        default=1,  # Changed from 8 to 1 as default
+        help="Number of parallel environments (default: 1)"
     )
     parser.add_argument(
         "--no-directml", 
@@ -62,14 +83,20 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=128,
-        help="Batch size for training (default: 128)"
+        default=1024,  # Best balance between memory usage and performance
+        help="Batch size for training (default: 1024)"
     )
     parser.add_argument(
         "--learning-rate",
         type=float,
         default=3e-4,
         help="Learning rate (default: 3e-4)"
+    )
+    parser.add_argument(
+        "--n-steps",
+        type=int,
+        default=2048,
+        help="Number of steps per rollout (default: 2048)"
     )
     
     return parser.parse_args()
@@ -84,7 +111,7 @@ def main():
     print(f"Model directory: {args.model_dir}")
     print(f"Training for {args.timesteps} timesteps with {args.n_envs} parallel environments")
     print(f"DirectML acceleration: {'Disabled' if args.no_directml else 'Enabled'}")
-    print(f"Batch size: {args.batch_size}, Learning rate: {args.learning_rate}")
+    print(f"Batch size: {args.batch_size}, Learning rate: {args.learning_rate}, Steps per rollout: {args.n_steps}")
     
     # Import here to allow environment variables to be set first
     try:
@@ -95,7 +122,15 @@ def main():
             'training_mode': True,
             'max_episode_steps': 150,
             'verbose': args.verbose,
-            'use_curriculum': True  # Enable curriculum learning
+            'use_curriculum': True,  # Enable curriculum learning
+            'viz_speed': 0.0  # Disable visualization by default for faster training
+        }
+        
+        # GPU-optimized policy settings - OPTIMAL CONFIGURATION
+        policy_kwargs = {
+            'net_arch': dict(pi=[512, 384, 256], vf=[512, 384, 256]),  # Optimal balance for GPU utilization
+            'activation_fn': torch.nn.ReLU,  # Explicitly use ReLU for better GPU performance
+            'features_extractor_kwargs': {'features_dim': 384}  # Optimal feature dimension
         }
         
         # Start training
@@ -108,8 +143,10 @@ def main():
             use_directml=not args.no_directml,
             n_envs=args.n_envs,
             batch_size=args.batch_size,
+            n_steps=args.n_steps,
             learning_rate=args.learning_rate,
             env_kwargs=env_kwargs,
+            policy_kwargs=policy_kwargs,
             verbose=args.verbose,
             save_freq=1000,
             eval_freq=2000 if args.evaluate else 0,

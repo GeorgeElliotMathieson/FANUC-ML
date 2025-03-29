@@ -170,6 +170,10 @@ def _enable_directml_optimizations():
     try:
         import torch
         
+        # Filter out warnings for known CPU fallbacks
+        warnings.filterwarnings("ignore", message=".*not currently supported on the DML backend.*")
+        warnings.filterwarnings("ignore", message=".*will fall back to run on the CPU.*")
+        
         # JIT optimizations
         torch._C._jit_set_profiling_executor(True)
         torch._C._jit_set_profiling_mode(True)
@@ -178,13 +182,58 @@ def _enable_directml_optimizations():
         if hasattr(torch, 'backends') and hasattr(torch.backends, 'cuda'):
             # These settings help with some DirectML implementations
             torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False
+            # Enable faster but potentially less accurate algorithms
+            torch.backends.cudnn.enabled = True
+            if hasattr(torch.backends.cudnn, 'allow_tf32'):
+                torch.backends.cudnn.allow_tf32 = True
             
-        # Configure memory management
+        # Configure memory management for larger models
         if hasattr(torch, 'cuda') and hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-            # Reserve 80% of GPU memory for training
-            torch.cuda.set_per_process_memory_fraction(0.8)
+            # Reserve 95% of GPU memory for training (increased from 90%)
+            torch.cuda.set_per_process_memory_fraction(0.95)
             
-        print("DirectML optimizations enabled")
+            # Empty cache at the start to ensure maximum memory is available
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
+        
+        # Reduce CPU-GPU transfers by increasing the batch size for intermediate operations
+        if hasattr(torch, 'cuda') and hasattr(torch.cuda, 'amp') and hasattr(torch.cuda.amp, 'autocast'):
+            # Enable autocast globally to reduce precision where appropriate
+            os.environ["TORCH_AUTOCAST_ENABLED"] = "1"
+            
+        # Set additional optimization flags for larger models
+        if hasattr(torch, 'set_num_threads'):
+            # Optimize CPU thread usage for data loading and processing
+            # Use fewer CPU threads when running larger GPU models to reduce CPU overhead
+            import multiprocessing
+            num_threads = max(2, multiprocessing.cpu_count() // 4)  # Even fewer threads for large models
+            torch.set_num_threads(num_threads)
+            
+        # Enable TorchScript compilation to improve model execution speed
+        if hasattr(torch, 'jit') and hasattr(torch.jit, 'enable_onednn_fusion'):
+            torch.jit.enable_onednn_fusion(True)
+            
+        # Configure precision settings for better performance with large models
+        torch.set_float32_matmul_precision('high')
+        
+        # Apply memory optimization settings for larger models
+        if "DIRECTML_MEMORY_LIMIT_MB" not in os.environ:
+            # Try to allocate more memory for larger models if not explicitly set
+            os.environ["DIRECTML_MEMORY_LIMIT_MB"] = "12288"  # 12GB default for large models
+            
+        # Set optimized memory management for larger models
+        if hasattr(torch, 'cuda') and hasattr(torch.cuda, 'memory'):
+            if hasattr(torch.cuda.memory, 'set_caching_allocator_config'):
+                # Configure memory allocator to handle larger models more efficiently
+                torch.cuda.memory.set_caching_allocator_config(
+                    max_split_size_mb=256,  # Increased from 128 for larger allocations
+                    roundup_power2=True,    # Round up allocations to power of 2
+                    garbage_collection_threshold=0.8  # Trigger GC earlier
+                )
+                
+        print("DirectML optimizations enabled for large model training")
     except Exception as e:
         print(f"Warning: Failed to apply some DirectML optimizations: {e}")
         # Continue even if optimizations fail

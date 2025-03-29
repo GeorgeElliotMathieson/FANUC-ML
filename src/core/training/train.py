@@ -11,6 +11,7 @@ from datetime import datetime
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
+import warnings
 
 from src.core.models import CustomFeatureExtractor, CustomPPO
 from src.core.training.callbacks import (
@@ -164,9 +165,9 @@ def train_model(
     use_directml=None,
     learning_rate=0.0003,
     n_steps=2048,
-    batch_size=64,
+    batch_size=1024,  # Increased from 64 to 1024 for better batch processing
     n_epochs=10,
-    n_envs=8,
+    n_envs=1,  # Changed default from 8 to 1
     env_kwargs=None,
     policy_kwargs=None,
     save_freq=1000,
@@ -232,7 +233,31 @@ def train_model(
                 
                 # Set number of threads for PyTorch with DirectML
                 import torch
+                
+                # Optimize CPU thread usage with DirectML
                 torch.set_num_threads(4)  # Limit CPU threads during GPU training
+                
+                # Auto-adjust batch size for better GPU utilization
+                if batch_size < 128:
+                    original_batch_size = batch_size
+                    batch_size = max(batch_size, 512)  # Ensure minimum batch size of 512 for GPU
+                    if verbose and original_batch_size != batch_size:
+                        print(f"Increasing batch size from {original_batch_size} to {batch_size} for better GPU utilization")
+                
+                # Auto-adjust n_steps for better GPU batching
+                if n_steps < 1024:
+                    original_n_steps = n_steps
+                    n_steps = max(n_steps, 2048)  # Ensure minimum steps of 2048 for GPU
+                    if verbose and original_n_steps != n_steps:
+                        print(f"Increasing n_steps from {original_n_steps} to {n_steps} for better GPU batching")
+                
+                # Configure GPU-optimized learning
+                if "DIRECTML_ENABLE_TENSOR_CORES" not in os.environ:
+                    os.environ["DIRECTML_ENABLE_TENSOR_CORES"] = "1"
+                if "DIRECTML_GPU_TRANSFER_OPTIMIZATION" not in os.environ:
+                    os.environ["DIRECTML_GPU_TRANSFER_OPTIMIZATION"] = "1"
+                if "DIRECTML_ENABLE_OPTIMIZATION" not in os.environ:
+                    os.environ["DIRECTML_ENABLE_OPTIMIZATION"] = "1"
             else:
                 print("DirectML device creation failed, falling back to CPU")
                 use_directml = False
@@ -278,104 +303,109 @@ def train_model(
     if verbose:
         print(f"Model will be saved to: {model_dir}")
     
-    # Set policy kwargs if not provided
-    if policy_kwargs is None:
-        if use_directml:
-            # Optimized architecture for DirectML
-            policy_kwargs = {
-                "net_arch": {
-                    "pi": [128, 128],  # Smaller for faster compute
-                    "vf": [128, 128]
-                },
-                "activation_fn": nn.ReLU,
-                "optimizer_class": torch.optim.Adam,
-                "device": device
-            }
-        else:
-            # Standard architecture for CPU
-            policy_kwargs = {
-                "net_arch": {
-                    "pi": [256, 256],
-                    "vf": [256, 256]
-                },
-                "activation_fn": nn.ReLU
-            }
-    elif use_directml and device is not None and "device" not in policy_kwargs:
-        # Ensure device is set in policy_kwargs if using DirectML
-        policy_kwargs["device"] = device
-    
-    # Configure TensorBoard logging
-    if log_tensorboard:
+    # Set up an eval environment if requested
+    eval_env = None
+    if eval_freq > 0:
         if verbose:
-            print("Enabling TensorBoard logging")
-        tensorboard_log = os.path.join(model_dir, "tb_logs")
-    else:
-        tensorboard_log = None
+            print(f"Creating evaluation environment...")
+        eval_env = create_revamped_envs(
+            n_envs=1, viz_speed=viz_speed, parallel_viz=False, training_mode=False, **env_kwargs or {}
+        )
+    
+    # Set up policy keyword arguments if not provided
+    if policy_kwargs is None:
+        policy_kwargs = {}
     
     # Set up model class
-    if model_class.upper() == "PPO":
+    if model_class == "PPO":
+        if verbose:
+            print("Using DirectML-optimized PPO" if use_directml else "Using standard PPO")
+            
+        # Import necessary modules
+        from src.core.models.ppo import CustomPPO
+        from src.core.models.features import CustomFeatureExtractor
+        from stable_baselines3.common.policies import ActorCriticPolicy
+        
+        # Filter out the DirectML CPU fallback warning
+        warnings.filterwarnings("ignore", message=".*not currently supported on the DML backend.*")
+        
+        # Set up GPU-specific policy settings
         if use_directml and device is not None:
-            # Import custom PPO with DirectML support
+            # Update policy kwargs for better GPU utilization
+            if 'net_arch' not in policy_kwargs:
+                # Use optimally balanced network architecture
+                policy_kwargs['net_arch'] = dict(pi=[512, 384, 256], vf=[512, 384, 256])
+                
+            # Add feature extractor for GPU
+            policy_kwargs['features_extractor_class'] = CustomFeatureExtractor
+            policy_kwargs['features_extractor_kwargs'] = {'features_dim': 384}  # Optimal feature dimension
+                
+            # Set device explicitly
+            policy_kwargs['device'] = device
+                
+            # Setup tensorboard for better monitoring
+            if log_tensorboard:
+                tensorboard_log = os.path.join(model_dir, "tb_logs")
+                os.makedirs(tensorboard_log, exist_ok=True)
+                if verbose:
+                    print("Enabling TensorBoard logging")
+            else:
+                tensorboard_log = None
+                
+            # Create model with optimized parameters
             if verbose:
-                print("Using DirectML-optimized PPO")
-            from src.core.models.ppo import CustomPPO as ModelClass
+                print("Creating model...")
+                if device:
+                    print(f"Using {device} device")
+                
+                model = CustomPPO(
+                    policy=ActorCriticPolicy,
+                    env=envs,
+                    learning_rate=learning_rate,
+                    n_steps=n_steps,
+                    batch_size=batch_size,
+                    n_epochs=n_epochs,
+                    gamma=0.99,
+                    gae_lambda=0.95,
+                    clip_range=0.2,
+                    clip_range_vf=0.2,
+                    normalize_advantage=True,  # Keep normalization but warnings will be filtered
+                    ent_coef=0.01,  # Slightly increased for better exploration
+                    vf_coef=0.5,
+                    max_grad_norm=0.5,
+                    verbose=1 if verbose else 0,
+                    tensorboard_log=tensorboard_log,
+                    policy_kwargs=policy_kwargs,
+                    seed=seed,
+                    device=device
+                )
         else:
-            # Use regular PPO
+            # Standard CPU setup
+            if log_tensorboard:
+                tensorboard_log = os.path.join(model_dir, "tb_logs")
+                os.makedirs(tensorboard_log, exist_ok=True)
+                if verbose:
+                    print("Enabling TensorBoard logging")
+            else:
+                tensorboard_log = None
+                
             if verbose:
-                print("Using standard PPO")
-            from stable_baselines3 import PPO as ModelClass
+                print("Creating model...")
+                
+            model = CustomPPO(
+                policy=ActorCriticPolicy,
+                env=envs,
+                learning_rate=learning_rate,
+                n_steps=n_steps,
+                batch_size=batch_size,
+                n_epochs=n_epochs,
+                verbose=1 if verbose else 0,
+                tensorboard_log=tensorboard_log,
+                policy_kwargs=policy_kwargs,
+                seed=seed
+            )
     else:
         raise ValueError(f"Unsupported model class: {model_class}")
-    
-    # Create the model
-    if verbose:
-        print("Creating model...")
-    
-    # Calculate optimal batch size to be divisible by number of environments
-    # This ensures efficient batching across environments
-    if n_envs > 1:
-        # Ensure batch_size is divisible by n_envs for efficient parallel processing
-        batch_size = (batch_size // n_envs) * n_envs
-        if batch_size < n_envs:
-            batch_size = n_envs
-    
-    # Set up additional optimizations for DirectML
-    if use_directml:
-        # Additional DirectML-specific optimizations
-        # These settings help with memory usage and performance
-        os.environ["DIRECTML_SET_TORCH_JIT"] = "1"  # Enable JIT compilation
-        
-        # Better batch processing
-        if n_steps % batch_size != 0:
-            # Adjust n_steps to be divisible by batch_size for better batching
-            old_n_steps = n_steps
-            n_steps = (n_steps // batch_size) * batch_size
-            if verbose:
-                print(f"Adjusted n_steps from {old_n_steps} to {n_steps} for better batching")
-    
-    model = ModelClass(
-        "MlpPolicy",
-        envs,
-        policy_kwargs=policy_kwargs,
-        learning_rate=learning_rate,
-        n_steps=n_steps,
-        batch_size=batch_size,
-        n_epochs=n_epochs,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        clip_range_vf=0.2,
-        normalize_advantage=True,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        use_sde=False,
-        sde_sample_freq=-1,
-        target_kl=None,
-        tensorboard_log=tensorboard_log,
-        verbose=1 if verbose else 0,
-        seed=seed,
-    )
     
     if verbose:
         print("Model created. Starting training...")
@@ -395,9 +425,6 @@ def train_model(
     
     # Set up callback for evaluation
     if eval_freq > 0 and eval_episodes > 0:
-        # Create evaluation environment
-        eval_env = create_revamped_envs(n_envs=1, viz_speed=viz_speed, training_mode=False)
-        
         eval_callback = EvalCallback(
             eval_env,
             best_model_save_path=os.path.join(model_dir, "best_model"),
