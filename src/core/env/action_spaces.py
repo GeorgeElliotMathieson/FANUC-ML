@@ -142,6 +142,9 @@ class JointLimitedBox(spaces.Box):
         """
         joint_positions = np.zeros(len(normalized_action), dtype=np.float32)
         
+        # Use a small safety margin to avoid hitting exact limits
+        safety_margin = 0.001  # 0.001 radians (about 0.06 degrees)
+        
         for i, norm_action in enumerate(normalized_action):
             if i in self.joint_limits:
                 # Clip to ensure we stay within normalized range
@@ -151,8 +154,10 @@ class JointLimitedBox(spaces.Box):
                 mid = self.joint_mids[i]
                 range_half = self.joint_ranges[i]
                 
-                # Compute joint position
-                joint_positions[i] = mid + norm_action_clipped * range_half
+                # Compute joint position - scale slightly to stay within limits
+                # This multiplication creates a slight inward scaling that avoids extreme limits
+                scale_factor = 1.0 - (safety_margin / range_half)
+                joint_positions[i] = mid + norm_action_clipped * range_half * scale_factor
             else:
                 # Default for joints without limits (should not happen)
                 joint_positions[i] = 0.0

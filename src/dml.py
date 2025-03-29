@@ -96,6 +96,15 @@ def setup_directml():
     # Set environment variables for better DirectML performance
     os.environ["DIRECTML_ENABLE_TENSOR_CORES"] = "1"
     os.environ["DIRECTML_GPU_TRANSFER_OPTIMIZATION"] = "1"
+    os.environ["DIRECTML_ENABLE_OPTIMIZATION"] = "1"
+    
+    # Advanced training performance optimizations
+    os.environ["DIRECTML_DISABLE_TRACING"] = "0"  # Enable tracing for optimization
+    os.environ["DIRECTML_DISABLE_PARALLELIZATION"] = "0"  # Enable parallelization
+    os.environ["TORCH_COMPILE_MODE"] = "max-autotune"  # Enable auto-tuning
+    
+    # PyBullet performance optimization
+    os.environ["PYBULLET_FORCE_NOGL"] = "1"  # Disable OpenGL bindings for headless mode
     
     # Return cached device if available
     if _DEVICE_CHECKED and _DIRECTML_DEVICE is not None:
@@ -123,8 +132,15 @@ def setup_directml():
         except AttributeError:
             print("DirectML version information not available")
         
-        # Create a demo tensor to verify the device works
+        # Create DirectML device with optimizations
         try:
+            if _DIRECTML_DEVICE is None:
+                _DIRECTML_DEVICE = torch_directml.device(device_id=0)
+                
+            # Optimize DirectML parameters
+            _enable_directml_optimizations()
+            
+            # Create a demo tensor to verify the device works
             test_tensor = torch.ones((2, 3), device=_DIRECTML_DEVICE)
             print(f"Test tensor created on DirectML device: {test_tensor.device}")
             print("DirectML setup successful!")
@@ -147,6 +163,31 @@ def setup_directml():
         print(f"ERROR setting up DirectML: {e}")
         print("This implementation requires an AMD GPU with DirectML support.")
         raise RuntimeError(f"DirectML setup failed: {e}")
+
+def _enable_directml_optimizations():
+    """Enable additional optimizations for DirectML performance"""
+    # Some of these are experimental optimizations
+    try:
+        import torch
+        
+        # JIT optimizations
+        torch._C._jit_set_profiling_executor(True)
+        torch._C._jit_set_profiling_mode(True)
+        
+        # Enable tensor cores if available
+        if hasattr(torch, 'backends') and hasattr(torch.backends, 'cuda'):
+            # These settings help with some DirectML implementations
+            torch.backends.cuda.matmul.allow_tf32 = True
+            
+        # Configure memory management
+        if hasattr(torch, 'cuda') and hasattr(torch.cuda, 'set_per_process_memory_fraction'):
+            # Reserve 80% of GPU memory for training
+            torch.cuda.set_per_process_memory_fraction(0.8)
+            
+        print("DirectML optimizations enabled")
+    except Exception as e:
+        print(f"Warning: Failed to apply some DirectML optimizations: {e}")
+        # Continue even if optimizations fail
 
 # Simplified DirectML PPO implementation
 class DirectMLPPO:
@@ -425,9 +466,9 @@ def evaluate_model_directml(model_path, num_episodes=10, visualize=True, verbose
             print("Creating evaluation environment...")
             env = RobotPositioningRevampedEnv(
                 gui=visualize,
-                gui_delay=viz_speed if visualize else 0.0,
-                clean_viz=True,
-                verbose=verbose
+                viz_speed=viz_speed if visualize else 0.0,
+                verbose=verbose,
+                training_mode=False
             )
             
             # Create and load model
@@ -618,9 +659,9 @@ def test_model_directml(model_path, num_episodes=1, visualize=True, verbose=Fals
             print("Creating test environment...")
             env = RobotPositioningRevampedEnv(
                 gui=visualize,
-                gui_delay=viz_speed if visualize else 0.0,
-                clean_viz=True,
-                verbose=verbose
+                viz_speed=viz_speed if visualize else 0.0,
+                verbose=verbose,
+                training_mode=False
             )
             
             # Create and load model

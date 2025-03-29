@@ -5,10 +5,12 @@ Training functionality for FANUC Robot ML Platform.
 import os
 import time
 import torch
+import torch.nn as nn  # Import nn module
 import numpy as np
 from datetime import datetime
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.utils import set_random_seed
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
 
 from src.core.models import CustomFeatureExtractor, CustomPPO
 from src.core.training.callbacks import (
@@ -16,7 +18,7 @@ from src.core.training.callbacks import (
     TrainingMonitorCallback,
     JointLimitMonitorCallback
 )
-from src.utils.pybullet_utils import get_visualization_settings_from_env
+from src.utils.pybullet_utils import get_visualization_settings_from_env, get_directml_settings_from_env
 
 def print_train_usage():
     """Print usage instructions for the train command."""
@@ -33,19 +35,20 @@ def print_train_usage():
     print("  --verbose      - Show detailed output")
     print("")
 
-def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, training_mode=True, use_env_vars=True):
+def create_revamped_envs(n_envs=1, viz_speed=0.0, parallel_viz=False, training_mode=True, use_env_vars=True, **kwargs):
     """
     Create environment(s) for training or evaluation.
     
     Args:
-        num_envs: Number of parallel environments to create
+        n_envs: Number of parallel environments to create
         viz_speed: Visualization speed (seconds per step)
         parallel_viz: Whether to use parallel visualization
         training_mode: Whether this is used for training (affects exploration)
         use_env_vars: Whether to use environment variables for settings
+        **kwargs: Additional arguments to pass to the environment
         
     Returns:
-        List of environment instances
+        Vector environment with multiple environments
     """
     # Dynamic import to avoid circular imports
     try:
@@ -77,9 +80,17 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, training
         except ImportError as e2:
             raise ImportError(f"Could not import robot environment classes from src.envs.robot_sim: {e2}")
     
-    envs = []
+    env_list = []
     
-    for i in range(num_envs):
+    # Calculate grid dimensions for robot placement
+    # Determine the grid size based on the number of environments
+    import math
+    grid_size = math.ceil(math.sqrt(n_envs))  # Create a square grid
+    
+    # Define offset distance between robots (increased for more spacing)
+    offset_distance = 2.5  # 2.5 meters between robots
+    
+    for i in range(n_envs):
         # Determine if visualization should be used
         use_gui = (viz_speed > 0) and (i == 0 or parallel_viz)
         # Override with environment variable if available
@@ -92,296 +103,355 @@ def create_revamped_envs(num_envs=1, viz_speed=0.0, parallel_viz=False, training
         if use_env_vars and env_verbose is not None and i == 0:
             use_verbose = env_verbose
             
+        # Calculate grid position (row, column) from index
+        if parallel_viz:
+            row = i // grid_size
+            col = i % grid_size
+            offset_x = col * offset_distance
+            offset_y = row * offset_distance
+        else:
+            offset_x = 0.0
+            offset_y = 0.0
+            
         # Create the environment with error handling
         try:
-            env = RobotPositioningRevampedEnv(
-                gui=use_gui,
-                viz_speed=viz_speed,
-                verbose=use_verbose,
-                parallel_viz=parallel_viz,
-                rank=i,
-                offset_x=0.5 * i if parallel_viz else 0.0,
-                training_mode=training_mode
-            )
+            # Check the accepted parameters for RobotPositioningRevampedEnv
+            # and only pass those that are actually accepted
+            env_params = {
+                'gui': use_gui,
+                'viz_speed': viz_speed,
+                'verbose': use_verbose,
+                'training_mode': training_mode
+            }
+            
+            # Add any additional arguments passed to this function
+            env_params.update(kwargs)
+            
+            # Create the environment with appropriate parameters
+            env = RobotPositioningRevampedEnv(**env_params)
             
             # Apply joint limit enforcement wrapper
             env = JointLimitEnforcingEnv(env)
             
             # Add to list
-            envs.append(env)
+            env_list.append(env)
         except Exception as e:
             raise RuntimeError(f"Failed to create environment {i}: {e}")
         
-    if not envs:
+    if not env_list:
         raise RuntimeError("No environments were created")
-        
-    return envs
+    
+    # Adjust camera view to accommodate all robots if parallel visualization is enabled
+    if parallel_viz and viz_speed > 0:
+        from src.utils.pybullet_utils import adjust_camera_for_robots
+        try:
+            # Get the client from the first environment
+            client_id = env_list[0].client_id
+            # Adjust camera based on number of environments and grid layout
+            adjust_camera_for_robots(client_id, num_robots=n_envs, workspace_size=0.8, grid_layout=True, grid_size=grid_size)
+        except Exception as e:
+            print(f"Warning: Could not adjust camera for multiple robots: {e}")
+    
+    # Create a vector environment
+    vec_env = DummyVecEnv([lambda env=env: env for env in env_list])
+    
+    return vec_env
 
-def train_model(model_path=None, steps=500000, visualize=True, eval_after=False, verbose=False):
+def train_model(
+    model_dir, 
+    num_timesteps, 
+    seed=42,
+    use_directml=None,
+    learning_rate=0.0003,
+    n_steps=2048,
+    batch_size=64,
+    n_epochs=10,
+    n_envs=8,
+    env_kwargs=None,
+    policy_kwargs=None,
+    save_freq=1000,
+    eval_freq=0,
+    eval_episodes=10,
+    model_class="PPO",
+    verbose=False,
+    viz_speed=0.0,
+    use_curriculum=False,
+    log_tensorboard=True,
+):
     """
-    Train a new FANUC robot model with DirectML acceleration.
+    Train a reinforcement learning model.
     
     Args:
-        model_path: Path to save the model (default: auto-generated)
-        steps: Number of training steps
-        visualize: Whether to use visualization
-        eval_after: Whether to run evaluation after training
-        verbose: Whether to show detailed progress
+        model_dir: Directory to save the model
+        num_timesteps: Number of timesteps to train for
+        seed: Random seed
+        use_directml: Whether to use DirectML (AMD GPU acceleration)
+        learning_rate: Learning rate
+        n_steps: Number of steps per rollout
+        batch_size: Batch size
+        n_epochs: Number of epochs
+        n_envs: Number of parallel environments
+        env_kwargs: Keyword arguments for environment creation
+        policy_kwargs: Keyword arguments for policy creation
+        save_freq: Frequency of saving model checkpoints
+        eval_freq: Frequency of evaluating the model
+        eval_episodes: Number of episodes to evaluate the model
+        model_class: Name of the model class to use
+        verbose: Whether to print verbose output
+        viz_speed: Visualization speed (0.0 for no visualization)
+        use_curriculum: Whether to use curriculum learning
+        log_tensorboard: Whether to log metrics to TensorBoard
         
     Returns:
-        0 if successful, 1 otherwise
+        Trained model
     """
-    # Generate a default model path if not provided
-    if not model_path:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        model_path = f"models/fanuc-{timestamp}-directml"
+    # Set up environment variables
+    os.environ['TRAIN_VERBOSE'] = '1' if verbose else '0'
+    os.environ['TRAINING_MODE'] = '1'  # Always set training mode to true during training
     
-    # Create models directory if it doesn't exist
-    if "/" in model_path or "\\" in model_path:
-        directory = os.path.dirname(model_path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-    else:
-        # If there's no directory in the path, ensure the models directory exists
-        os.makedirs("models", exist_ok=True)
+    # Configure DirectML if requested
+    device = None
+    if use_directml is None:
+        # Check if DirectML is requested via environment variables
+        use_directml, dml_settings = get_directml_settings_from_env()
     
-    # Set environment variables for child processes and components that read them
-    # These are used by functions like get_visualization_settings_from_env
-    os.environ['FANUC_VISUALIZE'] = '1' if visualize else '0'
-    os.environ['FANUC_VERBOSE'] = '1' if verbose else '0'
-    
-    # Create a variable for the model
-    model = None
-    
-    try:
-        # Ensure DirectML is available if specified
-        if 'directml' in model_path.lower() or os.environ.get('FANUC_DIRECTML') == '1' or os.environ.get('USE_DIRECTML') == '1':
-            from src.dml import is_available, setup_directml
-            if not is_available():
-                print("\nERROR: DirectML is not available in this environment.")
-                print("This implementation requires an AMD GPU with DirectML support.")
-                print("Please install DirectML with: pip install torch-directml")
-                print("Then verify your installation with: python fanuc_platform.py install")
-                return 1
-                
+    # Override from function parameter if explicitly set
+    if use_directml:
+        if verbose:
+            print("Setting up DirectML for GPU acceleration...")
+        
+        try:
+            # Import DirectML setup function
+            from src.dml import setup_directml
+            
             # Initialize DirectML
-            try:
-                dml_device = setup_directml()
-                if verbose:
-                    print(f"DirectML initialized successfully on device: {dml_device}")
-            except Exception as e:
-                print(f"\nERROR: DirectML initialization failed: {e}")
-                print("This implementation requires DirectML to be properly initialized.")
-                print("Please verify your installation with: python fanuc_platform.py install")
-                if verbose:
-                    import traceback
-                    print(traceback.format_exc())
-                return 1
+            device = setup_directml()
             
-        # Set random seed for reproducibility
-        set_random_seed(42)
-        
-        # Create environments
-        num_envs = 4  # Number of parallel environments
-        viz_speed = 0.02 if visualize else 0.0
-        envs = create_revamped_envs(
-            num_envs=num_envs,
-            viz_speed=viz_speed,
-            parallel_viz=visualize,
-            training_mode=True
-        )
-        
-        # Create vectorized environment
-        vec_env = DummyVecEnv([lambda env=env: env for env in envs])
-        
-        # Normalize observations and rewards
-        vec_env = VecNormalize(
-            vec_env,
-            norm_obs=True,
-            norm_reward=True,
-            clip_obs=10.0,
-            clip_reward=10.0,
-            gamma=0.99,
-            epsilon=1e-8,
-        )
-        
-        # Set up policy kwargs
-        policy_kwargs = {
-            "features_extractor_class": CustomFeatureExtractor,
-            "activation_fn": torch.nn.ReLU,
-            "net_arch": [dict(pi=[256, 128, 64], vf=[256, 128, 64])],
-        }
-        
-        # Compute appropriate batch size based on n_steps and parallel environments
-        # This ensures we use full trajectories
-        n_steps = 2048
-        n_steps_per_env = n_steps // num_envs
-        batch_size = min(64, n_steps_per_env * num_envs)
-        
-        # Ensure batch size is compatible with n_steps
-        if n_steps_per_env * num_envs % batch_size != 0:
-            # Adjust to nearest compatible batch size
-            old_batch_size = batch_size
-            batch_size = n_steps_per_env * num_envs // (n_steps_per_env * num_envs // batch_size)
-            if verbose:
-                print(f"Adjusted batch size from {old_batch_size} to {batch_size} for compatibility")
-        
-        # Print training parameters
-        if verbose:
-            print("\nTraining Parameters:")
-            # Check for DirectML first, then CUDA, then fall back to CPU
-            device_type = "cpu"
-            if os.environ.get('USE_DIRECTML') == '1':
-                try:
-                    import torch_directml  # type: ignore
-                    device_type = "directml"
-                except ImportError:
-                    print("Warning: USE_DIRECTML is set but torch_directml is not available")
-                    if torch.cuda.is_available():
-                        device_type = "cuda"
-            elif torch.cuda.is_available():
-                device_type = "cuda"
-            
-            print(f"Device: {device_type}")
-            print(f"Learning Rate: {3e-4}")
-            print(f"Timesteps: {steps}")
-            print(f"n_steps: {n_steps}")
-            print(f"Batch Size: {batch_size}")
-            print(f"n_epochs: {10}")
-            print(f"Parallel Environments: {num_envs}")
-            print(f"Gamma: {0.99}")
-            print(f"GAE Lambda: {0.95}")
-            print(f"Clip Range: {0.2}")
-            print(f"VF Coefficient: {0.5}")
-            print("Architecture:", policy_kwargs["net_arch"])
-            print()
-        
-        # Create the model timestamp for saving
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Use original model path if provided
-        if model_path:
-            model_dir = model_path
-        else:
-            # Otherwise create a timestamped directory
-            model_dir = f"./models/ppo_{timestamp}"
-        
-        os.makedirs(model_dir, exist_ok=True)
-        
-        # Create directories for plots
-        plot_dir = f"./plots/{os.path.basename(model_dir)}"
-        os.makedirs(plot_dir, exist_ok=True)
-        
-        # Try to load existing model if requested
-        loaded_model = False
-        if os.path.exists(model_path):
-            try:
-                print(f"Loading existing model from {model_path}")
-                model = CustomPPO.load(model_path, env=vec_env)
-                loaded_model = True
+            if device is not None:
+                print("DirectML setup complete, using device:", device)
                 
-                # Try to load normalization stats if available
-                norm_path = os.path.join(os.path.dirname(model_path), "vec_normalize_stats")
-                if os.path.exists(norm_path):
-                    print(f"Loading normalization stats from {norm_path}")
-                    vec_env = VecNormalize.load(norm_path, vec_env)
-                    # Don't update stats during training, we want to preserve the loaded stats
-                    vec_env.training = True  # Set to true as we are continuing training
-                    print("Normalization stats loaded successfully!")
-            except Exception as e:
-                print(f"Error loading model: {e}")
-                loaded_model = False
-                print("Starting with a fresh model...")
-        
-        # Create fresh model if not loaded
-        if not loaded_model:
-            print("Creating new PPO model")
-            model = CustomPPO(
-                "MlpPolicy",
-                vec_env,
-                learning_rate=3e-4,
-                n_steps=n_steps,
-                batch_size=batch_size,
-                n_epochs=10,
-                gamma=0.99,
-                gae_lambda=0.95,
-                clip_range=0.2,
-                normalize_advantage=True,
-                ent_coef=0.01,
-                vf_coef=0.5,
-                max_grad_norm=0.5,
-                verbose=verbose,
-                policy_kwargs=policy_kwargs,
-                device='auto',
-                tensorboard_log=f"{model_dir}/tensorboard"
-            )
-        
-        # Set up callbacks
-        save_callback = SaveModelCallback(
-            save_freq=steps // 10,  # Save 10 checkpoints during training
-            save_path=model_dir,
-            verbose=verbose
-        )
-        
-        monitor_callback = TrainingMonitorCallback(
-            log_interval=1000 if verbose else 10000,
-            plot_interval=steps // 5,  # Create 5 plots during training
-            plot_dir=plot_dir,
-            model_dir=model_dir,
-            verbose=verbose
-        )
-        
-        joint_limit_monitor = JointLimitMonitorCallback(
-            log_interval=5000,
-            verbose=verbose
-        )
-        
-        # Combine callbacks
-        callbacks = [save_callback, monitor_callback, joint_limit_monitor]
-        
-        # Enable deterministic garbage collection
-        import gc
-        gc.enable()
-        
-        # Train the model
-        print("\nStarting training...\n")
-        model.learn(
-            total_timesteps=steps,
-            callback=callbacks,
-            log_interval=1 if verbose else 10,
-        )
-        
-        # Save the final model
-        final_model_path = os.path.join(model_dir, "final_model")
-        model.save(final_model_path)
-        
-        # Save normalization statistics
-        norm_path = os.path.join(model_dir, "vec_normalize_stats")
-        vec_env.save(norm_path)
-        
-        print(f"\nTraining completed. Final model saved to {final_model_path}")
-        
-        # Run a final evaluation if requested
-        if eval_after:
-            print("\nRunning final evaluation...")
-            from src.core.evaluation.evaluate import evaluate_model_wrapper
-            evaluate_model_wrapper(
-                model_path=final_model_path,
-                num_episodes=5,
-                visualize=visualize,
-                verbose=verbose,
-                max_steps=1000,
-                viz_speed=viz_speed if visualize else 0.0
-            )
-        
-        return 0
+                # Set number of threads for PyTorch with DirectML
+                import torch
+                torch.set_num_threads(4)  # Limit CPU threads during GPU training
+            else:
+                print("DirectML device creation failed, falling back to CPU")
+                use_directml = False
+        except ImportError as e:
+            print(f"Failed to import DirectML module: {e}")
+            print("Falling back to CPU training")
+            use_directml = False
+        except Exception as e:
+            print(f"DirectML setup failed: {e}")
+            print("Falling back to CPU training")
+            use_directml = False
+            
+    # Create environment vector
+    if verbose:
+        print(f"Creating {n_envs} parallel training environments...")
     
-    except Exception as e:
-        import traceback
-        print(f"\nERROR: Training failed: {e}")
+    # Set default environment kwargs if not provided
+    if env_kwargs is None:
+        env_kwargs = {}
+    
+    # Add training_mode flag to env_kwargs if not present
+    if 'training_mode' not in env_kwargs:
+        env_kwargs['training_mode'] = True
+        
+    # Check if curriculum learning is requested
+    if use_curriculum:
         if verbose:
-            print(traceback.format_exc())
-        return 1
+            print("Using curriculum learning.")
+        env_kwargs['use_curriculum'] = True
+    
+    # Create the training environments
+    envs = create_revamped_envs(n_envs=n_envs, viz_speed=viz_speed, **env_kwargs)
+    print(f"Created vector environment with {n_envs} parallel environments")
+    
+    # Set up directories
+    os.makedirs(model_dir, exist_ok=True)
+    if verbose:
+        print(f"Model will be saved to: {model_dir}")
+    
+    # Set policy kwargs if not provided
+    if policy_kwargs is None:
+        if use_directml:
+            # Optimized architecture for DirectML
+            policy_kwargs = {
+                "net_arch": {
+                    "pi": [128, 128],  # Smaller for faster compute
+                    "vf": [128, 128]
+                },
+                "activation_fn": nn.ReLU,
+                "optimizer_class": torch.optim.Adam,
+                "device": device
+            }
+        else:
+            # Standard architecture for CPU
+            policy_kwargs = {
+                "net_arch": {
+                    "pi": [256, 256],
+                    "vf": [256, 256]
+                },
+                "activation_fn": nn.ReLU
+            }
+    elif use_directml and device is not None and "device" not in policy_kwargs:
+        # Ensure device is set in policy_kwargs if using DirectML
+        policy_kwargs["device"] = device
+    
+    # Configure TensorBoard logging
+    if log_tensorboard:
+        if verbose:
+            print("Enabling TensorBoard logging")
+        tensorboard_log = os.path.join(model_dir, "tb_logs")
+    else:
+        tensorboard_log = None
+    
+    # Set up model class
+    if model_class.upper() == "PPO":
+        if use_directml and device is not None:
+            # Import custom PPO with DirectML support
+            if verbose:
+                print("Using DirectML-optimized PPO")
+            from src.core.models.ppo import CustomPPO as ModelClass
+        else:
+            # Use regular PPO
+            if verbose:
+                print("Using standard PPO")
+            from stable_baselines3 import PPO as ModelClass
+    else:
+        raise ValueError(f"Unsupported model class: {model_class}")
+    
+    # Create the model
+    if verbose:
+        print("Creating model...")
+    
+    # Calculate optimal batch size to be divisible by number of environments
+    # This ensures efficient batching across environments
+    if n_envs > 1:
+        # Ensure batch_size is divisible by n_envs for efficient parallel processing
+        batch_size = (batch_size // n_envs) * n_envs
+        if batch_size < n_envs:
+            batch_size = n_envs
+    
+    # Set up additional optimizations for DirectML
+    if use_directml:
+        # Additional DirectML-specific optimizations
+        # These settings help with memory usage and performance
+        os.environ["DIRECTML_SET_TORCH_JIT"] = "1"  # Enable JIT compilation
+        
+        # Better batch processing
+        if n_steps % batch_size != 0:
+            # Adjust n_steps to be divisible by batch_size for better batching
+            old_n_steps = n_steps
+            n_steps = (n_steps // batch_size) * batch_size
+            if verbose:
+                print(f"Adjusted n_steps from {old_n_steps} to {n_steps} for better batching")
+    
+    model = ModelClass(
+        "MlpPolicy",
+        envs,
+        policy_kwargs=policy_kwargs,
+        learning_rate=learning_rate,
+        n_steps=n_steps,
+        batch_size=batch_size,
+        n_epochs=n_epochs,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        clip_range_vf=0.2,
+        normalize_advantage=True,
+        ent_coef=0.01,
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        use_sde=False,
+        sde_sample_freq=-1,
+        target_kl=None,
+        tensorboard_log=tensorboard_log,
+        verbose=1 if verbose else 0,
+        seed=seed,
+    )
+    
+    if verbose:
+        print("Model created. Starting training...")
+    
+    # Set up the callback for saving checkpoints
+    callbacks = []
+    if save_freq > 0:
+        checkpoint_callback = CheckpointCallback(
+            save_freq=save_freq // n_envs,  # Convert to per-environment steps
+            save_path=model_dir,
+            name_prefix="checkpoint",
+            save_replay_buffer=False,
+            save_vecnormalize=False,
+            verbose=1 if verbose else 0,
+        )
+        callbacks.append(checkpoint_callback)
+    
+    # Set up callback for evaluation
+    if eval_freq > 0 and eval_episodes > 0:
+        # Create evaluation environment
+        eval_env = create_revamped_envs(n_envs=1, viz_speed=viz_speed, training_mode=False)
+        
+        eval_callback = EvalCallback(
+            eval_env,
+            best_model_save_path=os.path.join(model_dir, "best_model"),
+            log_path=os.path.join(model_dir, "eval_logs"),
+            eval_freq=eval_freq // n_envs,
+            deterministic=True,
+            render=False,
+            n_eval_episodes=eval_episodes,
+            verbose=1 if verbose else 0,
+        )
+        callbacks.append(eval_callback)
+    
+    # Combine callbacks
+    if callbacks:
+        callback = CallbackList(callbacks)
+    else:
+        callback = None
+    
+    # Train the model
+    if verbose:
+        print(f"Starting training for {num_timesteps} timesteps...")
+        print(f"Learning rate: {learning_rate}, Batch size: {batch_size}, Steps: {n_steps}")
+        if use_directml:
+            print("Training with DirectML GPU acceleration")
+        else:
+            print("Training on CPU")
+    
+    start_time = time.time()
+    try:
+        model.learn(
+            total_timesteps=num_timesteps,
+            callback=callback,
+            tb_log_name="training",
+            progress_bar=verbose,
+        )
+        if verbose:
+            elapsed_time = time.time() - start_time
+            print(f"Training completed in {elapsed_time:.2f} seconds")
+            print(f"Average FPS: {num_timesteps / elapsed_time:.1f}")
+    except KeyboardInterrupt:
+        print("Training interrupted by user")
+    except Exception as e:
+        print(f"Training failed with error: {e}")
+        raise
+    
+    # Save the final model
+    final_model_path = os.path.join(model_dir, "final_model")
+    model.save(final_model_path)
+    
+    if verbose:
+        print(f"Final model saved to {final_model_path}")
+    
+    # Clean up
+    if hasattr(envs, 'close'):
+        envs.close()
+    
+    if 'eval_env' in locals() and hasattr(eval_env, 'close'):
+        eval_env.close()
+    
+    return model
 
 def train_revamped_robot(args):
     """
@@ -399,9 +469,23 @@ def train_revamped_robot(args):
             torch.cuda.manual_seed(args.seed)
     
     return train_model(
-        model_path=args.model_path,
-        steps=args.steps,
-        visualize=not args.no_gui,
-        eval_after=args.eval_after,
-        verbose=args.verbose
+        model_dir=args.model_path,
+        num_timesteps=args.steps,
+        seed=args.seed,
+        use_directml=args.use_directml,
+        learning_rate=args.learning_rate,
+        n_steps=args.n_steps,
+        batch_size=args.batch_size,
+        n_epochs=args.n_epochs,
+        n_envs=args.n_envs,
+        env_kwargs=args.env_kwargs,
+        policy_kwargs=args.policy_kwargs,
+        save_freq=args.save_freq,
+        eval_freq=args.eval_freq,
+        eval_episodes=args.eval_episodes,
+        model_class=args.model_class,
+        verbose=args.verbose,
+        viz_speed=args.viz_speed,
+        use_curriculum=args.use_curriculum,
+        log_tensorboard=args.log_tensorboard
     ) 

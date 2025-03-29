@@ -7,7 +7,15 @@ import numpy as np
 import time
 import os
 import threading
-from typing import List, Tuple, Dict, Optional, Union
+import random
+import logging
+from typing import List, Tuple, Dict, Optional, Union, Any, Callable, TypeVar
+
+import pybullet_data  # type: ignore
+from pybullet_utils import bullet_client  # type: ignore
+
+# Define type for PyBullet client
+BulletClient = TypeVar('BulletClient', bound=p.BulletClient)
 
 # Global variables to track PyBullet connections
 _GUI_CONNECTION_ESTABLISHED: bool = False
@@ -16,6 +24,10 @@ _GUI_CLIENT_ID: Optional[int] = None
 # Global variable to track client ID for shared client and lock for thread safety
 _SHARED_CLIENT_ID: Optional[int] = None
 _SHARED_CLIENT_LOCK = threading.Lock()
+
+# Global variables for shared PyBullet client
+_SHARED_PYBULLET_CLIENT: Optional[Any] = None
+_SHARED_PYBULLET_CLIENT_GUI_STATE: bool = False
 
 def get_visualization_settings_from_env():
     """
@@ -53,73 +65,118 @@ def get_visualization_settings_from_env():
         print("Using default values: visualization=True, verbose=False")
         return True, False
 
-def get_pybullet_client(render=False):
+def get_pybullet_client(
+    gui: bool = False, 
+    realtime: bool = False, 
+    fps: int = 240, 
+    options: str = "", 
+    training_mode: bool = False
+) -> p.BulletClient:
     """
-    Get a new PyBullet client instance.
+    Create a PyBullet client, either GUI or Direct (headless).
+    Automatically creates a new client or returns a cached one if one is available.
     
     Args:
-        render (bool): Whether to use GUI mode for visualization
+        gui: Whether to use GUI (True) or Direct (False, headless)
+        realtime: Whether to use realtime simulation
+        fps: Frames per second to use for stepping
+        options: Options to pass to PyBullet
+        training_mode: Whether client is for training (optimized for speed)
         
     Returns:
-        int: Client ID
+        PyBullet client
     """
-    if render:
-        client_id = p.connect(p.GUI)
+    # Optimize for training mode
+    if training_mode:
+        gui = False  # Force headless in training for max performance
+        options += ",allowFastDeserialization=1"
+        
+    # Create p as a singleton client
+    if gui:
+        # Use options string for GUI configuration
+        connect_options = options
+        if realtime:
+            connect_options += ",realtime=1"
+        else:
+            connect_options += ",realtime=0"
+        
+        # Create a specific GUI instance
+        p = p.connect(p.GUI, options=connect_options)
+        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+        p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
+        
+        # Configure timestep
+        p.setTimeStep(1.0 / fps)
+        p.setRealTimeSimulation(realtime)
+        p.setPhysicsEngineParameter(enableFileCaching=1)
+        
+        if not realtime:
+            # Configure non-blocking visuals
+            p.configureDebugVisualizer(p.COV_ENABLE_SINGLE_STEP_RENDERING, 1)
     else:
-        client_id = p.connect(p.DIRECT)
+        # Performance optimizations for training
+        if training_mode:
+            # Maximum performance optimizations for training
+            p = p.connect(p.DIRECT)
+            p.setPhysicsEngineParameter(enableFileCaching=1)
+            p.setPhysicsEngineParameter(numSolverIterations=4)  # Reduce solver iterations
+            p.setTimeStep(1.0 / fps)
+            # Disable expensive computations during training
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)
+            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+            p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 0)
+            p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
+            p.setAdditionalSearchPath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        else:
+            # Standard headless mode
+            p = p.connect(p.DIRECT)
+            p.setTimeStep(1.0 / fps)
+            p.setPhysicsEngineParameter(enableFileCaching=1)
     
-    # Configure basic simulation properties
-    p.setGravity(0, 0, -9.81, physicsClientId=client_id)
-    p.setRealTimeSimulation(0, physicsClientId=client_id)
-    
-    return client_id
+    return p
 
-def get_shared_pybullet_client(render=False):
+def get_shared_pybullet_client(
+    gui: bool = False, 
+    realtime: bool = False, 
+    fps: int = 240, 
+    options: str = "",
+    training_mode: bool = False
+) -> p.BulletClient:
     """
-    Get or create a shared PyBullet client.
-    This ensures we have a single PyBullet instance across the entire application.
+    Get a shared pybullet client instance or create a new one if none exists.
+    This is useful for sharing a pybullet client between multiple environments.
     
     Args:
-        render (bool): Whether to use GUI mode for visualization
+        gui: Whether to use GUI (True) or Direct (False, headless)
+        realtime: Whether to use realtime simulation
+        fps: Frames per second to use for stepping
+        options: Options to pass to PyBullet
+        training_mode: Whether client is for training (optimized for speed)
         
     Returns:
-        int: Shared client ID
+        PyBullet client
     """
-    global _SHARED_CLIENT_ID
+    global _SHARED_PYBULLET_CLIENT, _SHARED_PYBULLET_CLIENT_GUI_STATE
     
-    # Use lock to ensure thread safety when accessing shared client
-    with _SHARED_CLIENT_LOCK:
-        # Check if we already have a shared client
-        if _SHARED_CLIENT_ID is not None:
-            # Check if it's still connected
-            try:
-                p.getConnectionInfo(_SHARED_CLIENT_ID)
-                return _SHARED_CLIENT_ID
-            except Exception as e:
-                # Connection was lost, reset the client ID
-                print(f"Connection to shared client lost: {e}")
-                _SHARED_CLIENT_ID = None
+    # If there's no client yet, or gui state has changed, create a new one
+    if (_SHARED_PYBULLET_CLIENT is None or 
+        _SHARED_PYBULLET_CLIENT_GUI_STATE != gui):
         
-        # Create a new client
-        try:
-            if render:
-                _SHARED_CLIENT_ID = p.connect(p.GUI)
-            else:
-                _SHARED_CLIENT_ID = p.connect(p.DIRECT)
+        # Disconnect any existing connection to avoid leaking resources
+        if _SHARED_PYBULLET_CLIENT is not None:
+            _SHARED_PYBULLET_CLIENT.disconnect()
             
-            # Configure basic simulation properties
-            p.setGravity(0, 0, -9.81, physicsClientId=_SHARED_CLIENT_ID)
-            p.setRealTimeSimulation(0, physicsClientId=_SHARED_CLIENT_ID)
-            
-            return _SHARED_CLIENT_ID
-        except Exception as e:
-            print(f"Error creating shared PyBullet client: {e}")
-            # In case of failure, return a new non-shared client as fallback
-            try:
-                return get_pybullet_client(render)
-            except:
-                # Last resort - if everything fails
-                raise RuntimeError(f"Failed to create any PyBullet client: {e}")
+        # Create a new client with the requested parameters
+        _SHARED_PYBULLET_CLIENT = get_pybullet_client(
+            gui=gui, 
+            realtime=realtime, 
+            fps=fps, 
+            options=options, 
+            training_mode=training_mode
+        )
+        _SHARED_PYBULLET_CLIENT_GUI_STATE = gui
+    
+    return _SHARED_PYBULLET_CLIENT
 
 def configure_visualization(client_id, clean_viz=True):
     """
@@ -297,98 +354,108 @@ def load_workspace_data(filepath=None):
     
     return None
 
-def determine_reachable_workspace(robot, n_samples=1000, visualize=False):
+def determine_reachable_workspace(robot, n_samples=1000, visualize=False, client_id=None):
     """
-    Determine the reachable workspace of the robot by sampling random joint configurations
-    and recording the resulting end-effector positions.
+    Sample random joint configurations to determine the robot's reachable workspace.
     
     Args:
-        robot: The robot environment instance
-        n_samples: Number of samples to generate
-        visualize: Whether to visualize the workspace during sampling
+        robot: PyBullet robot object with joint limits defined
+        n_samples (int): Number of samples to generate
+        visualize (bool): Whether to visualize the workspace
+        client_id: PyBullet client ID
         
     Returns:
-        Tuple of (max_reach, workspace_bounds) where:
-        - max_reach is the maximum distance the robot can reach
-        - workspace_bounds is a dictionary with 'x', 'y', 'z' keys containing [min, max] bounds
+        Tuple[float, Dict]: Maximum reach (float) and workspace bounds (dict)
     """
-    import numpy as np
-    import time
+    # Extract joint information from the robot
+    joint_info = []
+    for joint_idx in range(p.getNumJoints(robot, physicsClientId=client_id)):
+        info = p.getJointInfo(robot, joint_idx, physicsClientId=client_id)
+        joint_info.append(info)
     
-    print(f"Determining reachable workspace with {n_samples} samples...")
-    start_time = time.time()
+    # Identify joints with limits
+    actuated_joints = []
+    joint_limits = []
     
-    positions = []
-    joint_configs = []
-    markers = []
-    
-    # Create visualization markers if requested
-    if visualize and robot.render_mode:
-        # Set up visualization
-        configure_visualization(robot.client, clean_viz=True)
-    
-    # Sample random joint configurations
-    for i in range(n_samples):
-        # Generate random joint configuration within limits
-        config = []
-        for j in range(robot.dof):
-            if j in robot.joint_limits:
-                limit_low, limit_high = robot.joint_limits[j]
-                config.append(np.random.uniform(limit_low, limit_high))
-            else:
-                config.append(0.0)
-        
-        # Apply configuration
-        robot.step(config)
-        
-        # Get end-effector position
-        state = robot._get_state()
-        ee_position = state[-7:-4]  # Last 7 elements are position and orientation
-        
-        # Store result
-        positions.append(ee_position)
-        joint_configs.append(config)
-        
-        # Visualize if requested
-        if visualize and robot.render_mode and i % 10 == 0:
-            # Add marker for this position
-            marker_id = visualize_ee_position(ee_position, robot.client, color=[0, 0.3, 1, 0.4], radius=0.005)
-            markers.append(marker_id)
+    for i, info in enumerate(joint_info):
+        joint_type = info[2]  # Get joint type
+        if joint_type == p.JOINT_REVOLUTE:
+            lower_limit = info[8]  # Lower joint limit
+            upper_limit = info[9]  # Upper joint limit
             
-            # Update progress
-            if i % 100 == 0:
-                print(f"  Sampled {i}/{n_samples} configurations...")
-                time.sleep(0.01)  # Small delay for visualization
+            # Valid limits should be finite
+            if np.isfinite(lower_limit) and np.isfinite(upper_limit):
+                actuated_joints.append(i)
+                joint_limits.append((lower_limit, upper_limit))
     
-    # Convert to numpy arrays
-    positions = np.array(positions)
-    joint_configs = np.array(joint_configs)
+    # Sample random joint configurations to determine reach
+    end_effector_positions = []
+    max_reach = 0
     
-    # Reset robot
-    robot.reset()
+    for _ in range(n_samples):
+        # Generate random joint configuration within limits
+        random_joint_positions = []
+        for lower, upper in joint_limits:
+            random_pos = lower + random.random() * (upper - lower)
+            random_joint_positions.append(random_pos)
+        
+        # Set the robot to this configuration
+        for i, joint_idx in enumerate(actuated_joints):
+            p.resetJointState(
+                robot, 
+                joint_idx, 
+                random_joint_positions[i],
+                physicsClientId=client_id
+            )
+        
+        # Get the end effector position - assuming last link is end effector
+        if actuated_joints:
+            link_state = p.getLinkState(
+                robot, 
+                actuated_joints[-1],
+                physicsClientId=client_id
+            )
+            pos = link_state[0]  # Position of the link
+            end_effector_positions.append(pos)
+            
+            # Calculate distance from origin to determine reach
+            reach = np.linalg.norm(pos)
+            max_reach = max(max_reach, reach)
     
-    # Calculate workspace bounds
-    x_min, y_min, z_min = np.min(positions, axis=0)
-    x_max, y_max, z_max = np.max(positions, axis=0)
+    # Calculate workspace bounds from sampled positions
+    if end_effector_positions:
+        positions = np.array(end_effector_positions)
+        x_min, y_min, z_min = np.min(positions, axis=0)
+        x_max, y_max, z_max = np.max(positions, axis=0)
+        
+        workspace_bounds = {
+            'x_min': float(x_min),
+            'x_max': float(x_max),
+            'y_min': float(y_min),
+            'y_max': float(y_max),
+            'z_min': float(z_min),
+            'z_max': float(z_max)
+        }
+    else:
+        workspace_bounds = {
+            'x_min': 0.0, 'x_max': 0.0,
+            'y_min': 0.0, 'y_max': 0.0,
+            'z_min': 0.0, 'z_max': 0.0
+        }
     
-    # Create bounds dictionary
-    workspace_bounds = {
-        'x': [x_min, x_max],
-        'y': [y_min, y_max],
-        'z': [z_min, z_max]
-    }
-    
-    # Calculate max reach (distance from origin to furthest point)
-    max_distances = np.linalg.norm(positions, axis=1)
-    max_reach = np.max(max_distances)
-    
-    # Print results
-    elapsed_time = time.time() - start_time
-    print(f"Workspace determination complete: {len(positions)} positions in {elapsed_time:.2f} seconds")
+    # Visualize the workspace if requested
+    if visualize and client_id is not None:
+        for pos in end_effector_positions:
+            p.addUserDebugPoints(
+                [pos], 
+                [[1, 0, 0]], 
+                pointSize=2,
+                physicsClientId=client_id
+            )
     
     return max_reach, workspace_bounds
 
-def adjust_camera_for_robots(client_id, num_robots=1, workspace_size=0.8):
+def adjust_camera_for_robots(client_id, num_robots=1, workspace_size=0.8, grid_layout=False, grid_size=None):
     """
     Adjust the camera view for multi-robot setups
     
@@ -396,31 +463,57 @@ def adjust_camera_for_robots(client_id, num_robots=1, workspace_size=0.8):
         client_id: PyBullet physics client ID
         num_robots: Number of robots in the scene
         workspace_size: Size of the workspace to show
+        grid_layout: Whether robots are arranged in a grid (True) or line (False)
+        grid_size: Number of robots per row in the grid layout
     """
     try:
         # Check if we're in GUI mode
         if p.getConnectionInfo(client_id)['connectionMethod'] != p.GUI:
             return
             
-        # Adjust based on number of robots
-        if num_robots <= 1:
-            # Single robot - close-up view
-            camera_distance = 1.2
-            camera_yaw = 45
-            camera_pitch = -30
-            target_pos = [0.0, 0.0, 0.3]
-        elif num_robots <= 4:
-            # 2-4 robots - medium distance view
-            camera_distance = 1.6
-            camera_yaw = 40
-            camera_pitch = -35
-            target_pos = [0.0, 0.0, 0.3]
+        if grid_layout and grid_size is not None:
+            # Grid layout - position camera to see the entire grid
+            # The grid is (grid_size x grid_size) with 2.5m spacing
+            offset_distance = 2.5  # Should match the value in create_revamped_envs
+            
+            # Calculate the center of the grid
+            center_x = (grid_size - 1) * offset_distance / 2.0
+            center_y = (grid_size - 1) * offset_distance / 2.0
+            
+            # Calculate appropriate camera distance based on grid size
+            # We need to see a square with side length = (grid_size-1) * offset_distance
+            grid_extent = (grid_size - 1) * offset_distance
+            camera_distance = max(3.0, 1.5 * grid_extent)
+            
+            camera_yaw = 45  # View from an angle
+            camera_pitch = -35  # Look down at the grid
+            target_pos = [center_x, center_y, 0.3]
         else:
-            # Many robots - overview
-            camera_distance = 2.0 + (num_robots * 0.1)
-            camera_yaw = 30
-            camera_pitch = -40
-            target_pos = [0.0, 0.0, 0.2]
+            # Original line layout
+            # Adjust based on number of robots
+            if num_robots <= 1:
+                # Single robot - close-up view
+                camera_distance = 1.2
+                camera_yaw = 45
+                camera_pitch = -30
+                target_pos = [0.0, 0.0, 0.3]
+            elif num_robots <= 4:
+                # 2-4 robots - medium distance view
+                # Calculate the center point between robots
+                # With 1.5m spacing, robots are at positions 0, 1.5, 3.0, 4.5
+                # So for 4 robots, center is at (0 + 4.5) / 2 = 2.25
+                center_x = (num_robots - 1) * 1.5 / 2.0
+                camera_distance = 1.6 + (num_robots * 0.4)  # Increased distance to see all robots
+                camera_yaw = 40
+                camera_pitch = -35
+                target_pos = [center_x, 0.0, 0.3]
+            else:
+                # Many robots - overview
+                center_x = (num_robots - 1) * 1.5 / 2.0
+                camera_distance = 2.0 + (num_robots * 0.5)  # Further increased for many robots
+                camera_yaw = 30
+                camera_pitch = -40
+                target_pos = [center_x, 0.0, 0.2]
         
         # Scale by workspace size
         camera_distance *= (workspace_size / 0.8)
@@ -442,41 +535,118 @@ def adjust_camera_for_robots(client_id, num_robots=1, workspace_size=0.8):
     except Exception as e:
         print(f"Warning: Could not adjust camera: {e}")
 
+def load_urdf(urdf_path, client_id=None, fixed_base=False, use_fixed_base=None):
+    """
+    Load a URDF file into the PyBullet simulation.
+    
+    Args:
+        urdf_path (str): Path to the URDF file
+        client_id: PyBullet client ID (optional)
+        fixed_base (bool): Whether the base of the robot should be fixed
+        use_fixed_base (bool): Alternative parameter name for fixed_base
+        
+    Returns:
+        int: Body ID of the loaded URDF
+    """
+    # Handle legacy parameter name
+    if use_fixed_base is not None:
+        fixed_base = use_fixed_base
+    
+    if client_id is None:
+        body_id = p.loadURDF(
+            urdf_path,
+            useFixedBase=fixed_base
+        )
+    else:
+        body_id = p.loadURDF(
+            urdf_path,
+            useFixedBase=fixed_base,
+            physicsClientId=client_id
+        )
+    return body_id
+
+def load_robot(urdf_path, client_id=None, gui=False):
+    """
+    Load a robot from a URDF file and set initial configuration.
+    
+    Args:
+        urdf_path (str): Path to the URDF file
+        client_id: PyBullet client ID (None will use current active client)
+        gui (bool): Whether visualization is enabled (previously 'render')
+        
+    Returns:
+        int: Body ID of the loaded robot
+    """
+    # Load URDF file with fixed base
+    robot_id = load_urdf(urdf_path, client_id=client_id, fixed_base=True)
+    
+    # Configure visualization if GUI is enabled
+    if gui and client_id is not None:
+        configure_visualization(client_id)
+    
+    return robot_id
+
+def get_directml_settings_from_env():
+    """
+    Get DirectML settings from environment variables.
+    
+    Returns:
+        Tuple[bool, Dict]: Whether to use DirectML and settings dict
+    """
+    use_directml = os.environ.get('FANUC_DIRECTML', '0').lower() in ('1', 'true', 'yes')
+    use_directml = use_directml or os.environ.get('USE_DIRECTML', '0').lower() in ('1', 'true', 'yes')
+    
+    # Get additional settings from environment
+    settings = {}
+    
+    return use_directml, settings
+
 # Test the utilities if this file is run directly
 if __name__ == "__main__":
-    # Create a client
-    client_id = get_pybullet_client(render=True)
+    print("Testing PyBullet utilities...")
     
-    # Configure visualization
-    configure_visualization(client_id, clean_viz=True)
-    
-    # Add a target marker
-    target_id = visualize_target([0.3, 0.2, 0.4], client_id)
-    
-    # Add end-effector markers
-    markers = []
-    for i in range(10):
-        pos = [
-            0.2 + (i * 0.02),
-            0.1 + (i * 0.02),
-            0.3 + (i * 0.01)
-        ]
-        marker_id = visualize_ee_position(pos, client_id)
-        markers.append(marker_id)
+    # Test client creation
+    try:
+        client_id = get_pybullet_client(gui=True)
+        print(f"Created PyBullet client: {client_id}")
         
-        # Draw line to target
-        line_id = visualize_target_line(pos, [0.3, 0.2, 0.4], client_id)
+        # Test basic functionality
+        p.setGravity(0, 0, -9.81, physicsClientId=client_id)
+        print("Set gravity successfully")
         
-        time.sleep(0.1)
+        # Add ground plane
+        plane_id = p.loadURDF(
+            os.path.join(pybullet_data.getDataPath(), "plane.urdf"),
+            physicsClientId=client_id
+        )
+        print(f"Added ground plane: {plane_id}")
+        
+        # Test visualization
+        configure_visualization(client_id)
+        print("Configured visualization")
+        
+        # Test sphere creation
+        sphere_id = p.createVisualShape(
+            p.GEOM_SPHERE, 
+            radius=0.1,
+            rgbaColor=[1, 0, 0, 0.7],
+            physicsClientId=client_id
+        )
+        print(f"Created sphere: {sphere_id}")
+        
+        # Let user see the results briefly
+        print("Tests completed successfully. Close the window to exit.")
+        
+        # Keep the window open
+        while p.isConnected(client_id):
+            p.stepSimulation(physicsClientId=client_id)
+            time.sleep(0.01)
     
-    # Wait for a bit
-    time.sleep(3)
+    except Exception as e:
+        print(f"Error during tests: {e}")
     
-    # Test camera adjustment for multiple robots
-    adjust_camera_for_robots(client_id, num_robots=4)
-    
-    # Wait a bit longer
-    time.sleep(2)
-    
-    # Disconnect
-    p.disconnect(client_id) 
+    finally:
+        # Clean up
+        if 'client_id' in locals():
+            p.disconnect(physicsClientId=client_id)
+            print("Disconnected from PyBullet") 

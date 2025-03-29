@@ -10,7 +10,7 @@ import gymnasium as gym  # type: ignore
 from gymnasium import spaces  # type: ignore
 
 # Import from the utils module
-from src.utils.pybullet_utils import get_pybullet_client, configure_visualization, determine_reachable_workspace
+from src.utils.pybullet_utils import get_pybullet_client, configure_visualization, determine_reachable_workspace, get_shared_pybullet_client
 
 # Import necessary components for environment
 from src.core.env.action_spaces import JointLimitedBox
@@ -153,6 +153,9 @@ class FANUCRobotEnv:
         # 1. A list/array of 5 target joint positions
         # 2. A tuple of (positions, velocities) where each is a list of 5 values
         
+        # Add a small safety margin for joint limits
+        safety_margin = 0.002  # 0.002 radians (about 0.1 degrees)
+        
         # Check if action is in tuple format (positions, velocities)
         if isinstance(action, tuple) and len(action) == 2:
             positions, velocities = action
@@ -171,18 +174,23 @@ class FANUCRobotEnv:
                 )
             else:
                 # Apply both position and velocity control
-                # Apply strict joint limits from the URDF
+                # Apply strict joint limits from the URDF with additional safety margin
+                positions = list(positions)  # Make a copy to avoid modifying input
                 for i, pos in enumerate(positions):
                     if i in self.joint_limits:
                         limit_low, limit_high = self.joint_limits[i]
-                        if pos < limit_low:
-                            positions[i] = limit_low
+                        # Apply safety margin to limits
+                        safe_low = limit_low + safety_margin
+                        safe_high = limit_high - safety_margin
+                        
+                        if pos < safe_low:
+                            positions[i] = safe_low
                             if self.verbose:
-                                print(f"WARNING: Joint {i} position {pos:.4f} below limit {limit_low:.4f}, clamping to limit")
-                        elif pos > limit_high:
-                            positions[i] = limit_high
+                                print(f"WARNING: Joint {i} position {pos:.6f} below safe limit {safe_low:.6f}, clamping to safe limit")
+                        elif pos > safe_high:
+                            positions[i] = safe_high
                             if self.verbose:
-                                print(f"WARNING: Joint {i} position {pos:.4f} above limit {limit_high:.4f}, clamping to limit")
+                                print(f"WARNING: Joint {i} position {pos:.6f} above safe limit {safe_high:.6f}, clamping to safe limit")
                 
                 p.setJointMotorControlArray(
                     bodyUniqueId=self.robot_id,
@@ -197,20 +205,24 @@ class FANUCRobotEnv:
                 )
         else:
             # Original format - just positions
-            # Enforce joint limits strictly from the URDF
+            # Enforce joint limits strictly from the URDF with additional safety margin
             limited_action = list(action)  # Create a copy to modify
             
             for i, pos in enumerate(limited_action):
                 if i in self.joint_limits:
                     limit_low, limit_high = self.joint_limits[i]
-                    if pos < limit_low:
-                        limited_action[i] = limit_low
+                    # Apply safety margin to limits
+                    safe_low = limit_low + safety_margin
+                    safe_high = limit_high - safety_margin
+                    
+                    if pos < safe_low:
+                        limited_action[i] = safe_low
                         if self.verbose:
-                            print(f"WARNING: Joint {i} position {pos:.4f} below limit {limit_low:.4f}, clamping to limit")
-                    elif pos > limit_high:
-                        limited_action[i] = limit_high
+                            print(f"WARNING: Joint {i} position {pos:.6f} below safe limit {safe_low:.6f}, clamping to safe limit")
+                    elif pos > safe_high:
+                        limited_action[i] = safe_high
                         if self.verbose:
-                            print(f"WARNING: Joint {i} position {pos:.4f} above limit {limit_high:.4f}, clamping to limit")
+                            print(f"WARNING: Joint {i} position {pos:.6f} above safe limit {safe_high:.6f}, clamping to safe limit")
             
             # Set joint positions with enforced limits
             p.setJointMotorControlArray(
@@ -295,23 +307,6 @@ class FANUCRobotEnv:
         if self.client is not None:
             p.disconnect(self.client)
 
-# DEPRECATED: Use the function from src.utils.pybullet_utils instead
-# This function is kept here only for backward compatibility
-def get_shared_pybullet_client(render=True):
-    """
-    Get or create a shared PyBullet client.
-    This is a deprecated function. Use src.utils.pybullet_utils.get_shared_pybullet_client instead.
-    """
-    from src.utils.pybullet_utils import get_shared_pybullet_client as utils_get_shared_client
-    import warnings
-    warnings.warn(
-        "This get_shared_pybullet_client function in robot_sim.py is deprecated. "
-        "Please use src.utils.pybullet_utils.get_shared_pybullet_client instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    return utils_get_shared_client(render=render)
-
 # Test the environment
 if __name__ == "__main__":
     env = FANUCRobotEnv(render=True)
@@ -335,64 +330,43 @@ if __name__ == "__main__":
 
 class RobotPositioningRevampedEnv(gym.Env):
     """
-    Revamped environment for robot end-effector positioning task with sophisticated
-    reward engineering, alternative action representation, and better state encoding.
+    Environment for robot positioning tasks with improved reachability.
     """
     metadata = {'render.modes': ['human']}
     
-    def __init__(self, 
-                 gui=True, 
-                 gui_delay=0.0, 
-                 workspace_size=0.7, 
-                 clean_viz=False, 
-                 viz_speed=0.0, 
-                 verbose=False, 
-                 parallel_viz=False, 
-                 rank=0, 
-                 offset_x=0.0,
-                 training_mode=True):
-        """
-        Initialize the robot positioning environment with improvements.
-        """
+    def __init__(self, gui=False, max_episode_steps=150, verbose=False, viz_speed=0.0, training_mode=True):
         super().__init__()
         
         # Store parameters
         self.gui = gui
-        self.gui_delay = gui_delay
-        self.workspace_size = workspace_size
-        self.clean_viz = clean_viz
-        self.viz_speed = viz_speed
+        self.max_episode_steps = max_episode_steps
         self.verbose = verbose
-        self.parallel_viz = parallel_viz
-        self.rank = rank
-        self.offset_x = offset_x
-        self.training_mode = training_mode
+        self.viz_speed = viz_speed
+        self.training_mode = training_mode  # Track if in training or evaluation mode
+        self.is_evaluating = not training_mode  # For compatibility with older code
         
         # Import function here to avoid circular imports
         from src.utils.pybullet_utils import get_shared_pybullet_client
         
         # Initialize PyBullet client
-        self.client_id = get_shared_pybullet_client(render=gui)
+        self.client_id = get_shared_pybullet_client(gui=gui)
         
         # Create the robot environment
         self.robot = FANUCRobotEnv(render=gui, verbose=verbose, client=self.client_id)
-        
-        # Apply offset if needed (for parallel robots)
-        self.robot_offset = np.array([offset_x, 0.0, 0.0])
-        self._apply_robot_offset()
         
         # Get robot's degrees of freedom
         self.dof = self.robot.dof
         
         # Initialize home position (robot's shoulder/base)
-        self.home_position = np.array([0.0, 0.0, 0.0]) + self.robot_offset
+        self.home_position = np.array([0.0, 0.0, 0.0])
         
         # Setup successful target parameters
         self.accuracy_threshold = 0.015  # 15mm accuracy
-        self.timeout_steps = 150  # Episode length
+        self.timeout_steps = max_episode_steps
         
         # Curriculum learning parameters
         self.curriculum_level = 0
+        self.curriculum_max_levels = 5
         self.max_target_distance = 0.3  # Start with easier targets
         self.target_expansion_increment = 0.05  # Increment target distance by 5cm at a time
         self.consecutive_successful_episodes = 0
@@ -418,6 +392,20 @@ class RobotPositioningRevampedEnv(gym.Env):
         self.workspace_bounds = workspace_bounds
         self.workspace_center = workspace_center
         self.robot_id = self.robot.robot_id
+        self.max_reach = max_reach
+        
+        # Storage for reachable positions and corresponding joint configurations
+        self.reachable_positions = []
+        self.reachable_joint_configs = []
+        
+        # Distance-categorized positions for curriculum learning
+        # We'll divide the workspace into difficulty zones based on distance from home
+        self.easy_positions = []      # Positions close to home
+        self.medium_positions = []    # Positions at medium distance
+        self.hard_positions = []      # Positions near the edge of workspace
+        
+        # Collect reachable positions and categorize them
+        self._collect_reachable_positions()
         
         # Initialize target properties
         self.target_position = None
@@ -450,9 +438,9 @@ class RobotPositioningRevampedEnv(gym.Env):
         
         # Maximum values for each component
         max_joints = np.ones(self.dof)  # Normalized joint angles (0-1)
-        max_position = np.ones(3) * (workspace_size * 2.0)  # Position (meters)
-        max_target = np.ones(3) * (workspace_size * 2.0)  # Target position (meters)
-        max_distance = np.array([workspace_size * 2.0])  # Distance (meters)
+        max_position = np.ones(3) * (max_reach * 2.0)  # Position (meters)
+        max_target = np.ones(3) * (max_reach * 2.0)  # Target position (meters)
+        max_distance = np.array([max_reach * 2.0])  # Distance (meters)
         max_direction = np.ones(3)  # Normalized direction (-1 to 1)
         max_action = np.ones(self.dof) * 1.0  # Assuming max action range is [-1, 1]
         
@@ -477,55 +465,297 @@ class RobotPositioningRevampedEnv(gym.Env):
         # Reset the environment to initialize everything
         self.reset()
     
-    def _apply_robot_offset(self):
-        """Apply offset to the robot for parallel training"""
-        if np.linalg.norm(self.robot_offset) > 0.0:
-            # Get the base position
-            base_pos, base_orn = p.getBasePositionAndOrientation(
+    def _collect_reachable_positions(self, num_positions=300):
+        """
+        Collect reachable positions by sampling random joint configurations.
+        Categorize positions into easy, medium, and hard based on distance from home.
+        """
+        if self.verbose:
+            print(f"Collecting {num_positions} reachable positions for improved target sampling...")
+        
+        # Make sure we have determined the workspace
+        if not hasattr(self, 'workspace_bounds'):
+            self.determine_reachable_workspace()
+        
+        # Collect positions if not already collected
+        if not self.reachable_positions:
+            home_pos = self.home_position
+            collected_positions = []
+            
+            # Sample a large number of random joint configurations
+            for _ in range(num_positions * 2):  # Sample more than needed to ensure we have enough
+                if len(collected_positions) >= num_positions:
+                    break
+                    
+                # Sample random joint positions within limits
+                joint_positions = []
+                for i in range(self.dof):
+                    lower, upper = self.robot.joint_limits[i]
+                    # Add a small safety margin to avoid joint limits
+                    margin = 0.01  # Larger margin for exploration
+                    safe_lower = lower + margin
+                    safe_upper = upper - margin
+                    joint_positions.append(np.random.uniform(safe_lower, safe_upper))
+                
+                # Set the joints and get end effector position
+                self.robot.step((joint_positions, None))
+                end_effector_pos = self.robot._get_state()[12:15]
+                
+                # Check if the position is valid (not in collision and inside workspace bounds)
+                if self._is_position_reachable(end_effector_pos):
+                    collected_positions.append((end_effector_pos, np.linalg.norm(end_effector_pos - home_pos)))
+            
+            # Sort positions by distance from home
+            collected_positions.sort(key=lambda x: x[1])
+            
+            # Take only the requested number of positions
+            collected_positions = collected_positions[:num_positions]
+            
+            # Store all reachable positions
+            self.reachable_positions = [pos for pos, _ in collected_positions]
+            
+            # Categorize positions into easy, medium, and hard based on distance
+            n_positions = len(collected_positions)
+            easy_end = n_positions // 3
+            medium_end = 2 * n_positions // 3
+            
+            self.easy_positions = [pos for pos, _ in collected_positions[:easy_end]]
+            self.medium_positions = [pos for pos, _ in collected_positions[easy_end:medium_end]]
+            self.hard_positions = [pos for pos, _ in collected_positions[medium_end:]]
+            
+            if self.verbose:
+                print(f"Collected {len(self.reachable_positions)} reachable positions")
+                print(f"- Easy positions: {len(self.easy_positions)}")
+                print(f"- Medium positions: {len(self.medium_positions)}")
+                print(f"- Hard positions: {len(self.hard_positions)}")
+        
+        # Reset the robot to home position
+        self.robot.reset()
+    
+    def _is_position_reachable(self, position):
+        """Check if a position is reachable by the robot."""
+        # Check if position is within workspace bounds
+        for i in range(3):
+            if position[i] < self.workspace_bounds[i][0] or position[i] > self.workspace_bounds[i][1]:
+                return False
+        
+        # If we have IK enabled, we can also verify using IK
+        if hasattr(self, 'robot'):
+            # Save current state
+            current_joints = [self.robot._get_state()[i*2] for i in range(self.dof)]
+            
+            # Try to compute IK
+            ik_solution = p.calculateInverseKinematics(
                 self.robot.robot_id, 
-                physicsClientId=self.client_id
+                self.robot.dof-1, 
+                position
             )
             
-            # Apply offset
-            new_base_pos = np.array(base_pos) + self.robot_offset
+            # Reset to original state
+            for i in range(self.dof):
+                p.resetJointState(self.robot.robot_id, i, current_joints[i])
             
-            # Set the new base position
-            p.resetBasePositionAndOrientation(
-                self.robot.robot_id,
-                new_base_pos,
-                base_orn,
-                physicsClientId=self.client_id
-            )
+            # Check if IK solution is valid (all values are finite)
+            if all(np.isfinite(ik_solution)):
+                # Check if solution respects joint limits
+                for i, angle in enumerate(ik_solution[:self.dof]):
+                    lower, upper = self.robot.joint_limits[i]
+                    if angle < lower or angle > upper:
+                        return False
+                return True
+            return False
+        
+        # Default to True if we can't verify with IK
+        return True
     
     def _sample_target(self):
-        """Sample a target position within the reachable workspace"""
-        # Define sampling strategy to use
-        sampling_strategy = "uniform"
+        """
+        Sample a target position from the collected reachable positions based on curriculum level.
+        Add small random noise to avoid memorization.
+        """
+        if not self.reachable_positions:
+            # Fallback to uniform sampling if no reachable positions collected
+            x = np.random.uniform(self.workspace_bounds[0][0], self.workspace_bounds[0][1])
+            y = np.random.uniform(self.workspace_bounds[1][0], self.workspace_bounds[1][1])
+            z = np.random.uniform(self.workspace_bounds[2][0], self.workspace_bounds[2][1])
+            return np.array([x, y, z])
         
-        # Get workspace bounds for sampling
-        ws_bounds = self.workspace_bounds
+        # Select pool of positions based on curriculum level
+        position_pools = []
         
-        # Sample target position based on strategy
-        if sampling_strategy == "uniform":
-            # Sample uniformly within workspace bounds
-            x = np.random.uniform(ws_bounds['x'][0], ws_bounds['x'][1])
-            y = np.random.uniform(ws_bounds['y'][0], ws_bounds['y'][1])
-            z = np.random.uniform(ws_bounds['z'][0], ws_bounds['z'][1])
-            target_position = np.array([x, y, z])
+        # Level 0: Only easy positions
+        if self.curriculum_level == 0:
+            position_pools = [self.easy_positions]
+        # Level 1: Mix of easy and medium positions
+        elif self.curriculum_level == 1:
+            position_pools = [self.easy_positions, self.medium_positions]
+        # Level 2: Mostly medium positions
+        elif self.curriculum_level == 2:
+            position_pools = [self.medium_positions]
+        # Level 3: Mix of medium and hard positions
+        elif self.curriculum_level == 3:
+            position_pools = [self.medium_positions, self.hard_positions]
+        # Level 4: Only hard positions
         else:
-            # Default to uniform sampling
-            x = np.random.uniform(ws_bounds['x'][0], ws_bounds['x'][1])
-            y = np.random.uniform(ws_bounds['y'][0], ws_bounds['y'][1])
-            z = np.random.uniform(ws_bounds['z'][0], ws_bounds['z'][1])
-            target_position = np.array([x, y, z])
+            position_pools = [self.hard_positions]
         
-        # Apply offset if needed
-        if np.linalg.norm(self.robot_offset) > 0.0:
-            target_position += self.robot_offset
+        # Flatten the pools and sample a random position
+        all_positions = []
+        for pool in position_pools:
+            all_positions.extend(pool)
         
-        return target_position
+        if not all_positions:
+            # Fallback to all positions if the selected pools are empty
+            all_positions = self.reachable_positions
+        
+        position = all_positions[np.random.randint(0, len(all_positions))]
+        
+        # Add small random noise (but ensure it stays within workspace bounds)
+        noise_scale = 0.03  # 3cm noise
+        for _ in range(10):  # Try up to 10 times to find a valid position
+            noise = np.random.uniform(-noise_scale, noise_scale, size=3)
+            noisy_position = position + noise
+            
+            # Verify the position is still reachable
+            if self._is_position_reachable(noisy_position):
+                return noisy_position
+        
+        # If all noise attempts failed, return the original position
+        return position
     
-    def _get_observation(self):
+    def reset(self, seed=None, options=None):
+        """
+        Reset the environment and sample a new target based on the current curriculum level.
+        """
+        # First reset using parent method (resets robot to home position)
+        super().reset(seed=seed, options=options)
+        
+        # Sample a new target position that respects the current curriculum level
+        max_attempts = 10
+        for _ in range(max_attempts):
+            self.target_position = self._sample_target()
+            if self._is_position_reachable(self.target_position):
+                break
+        
+        # Update visualization if enabled
+        if self.gui:
+            self.update_target_visualization()
+        
+        # Print status
+        if self.verbose:
+            print(f"Robot {self.robot_id} received a new target at {self.target_position}")
+            print(f"Robot {self.robot_id}: Initial distance to target: {self.get_distance_to_target()*100:.2f}cm")
+            print(f"Current curriculum level: {self.curriculum_level}/{self.curriculum_max_levels-1}")
+        
+        # Return the observation
+        obs = self._get_obs()
+        info = self._get_info()
+        return obs, info
+    
+    def step(self, action):
+        """
+        Execute one time step within the environment.
+        Enhanced with safety checks and reward shaping.
+        """
+        # Add exploration noise during training (not during evaluation)
+        if not self.is_evaluating:
+            noise_scale = 0.0005  # Reduced from 0.001 to be more conservative
+            action_with_noise = action + np.random.normal(0, noise_scale, size=action.shape)
+        else:
+            action_with_noise = action
+        
+        # Apply action with joint limits enforced by the action space
+        super().step(action_with_noise)
+        
+        # Add safety margin to make sure we're not too close to the limits
+        safety_margin = 0.001  # in radians (about 0.06 degrees)
+        current_joint_positions = self.robot._get_state()[:self.dof*2:2]
+        
+        # Ensure positions are within safety limits
+        for i in range(self.dof):
+            lower, upper = self.robot.joint_limits[i]
+            safe_lower = lower + safety_margin
+            safe_upper = upper - safety_margin
+            
+            if current_joint_positions[i] < safe_lower:
+                current_joint_positions[i] = safe_lower
+                if self.verbose:
+                    print(f"WARNING: Joint {i} position {current_joint_positions[i]} below safe limit {safe_lower}, clamping to safe limit")
+            elif current_joint_positions[i] > safe_upper:
+                current_joint_positions[i] = safe_upper
+                if self.verbose:
+                    print(f"WARNING: Joint {i} position {current_joint_positions[i]} above safe limit {safe_upper}, clamping to safe limit")
+        
+        # Set the joints to the safe positions
+        self.robot.step((current_joint_positions, None))
+        
+        # Get observation, reward, and done flag
+        terminated = False
+        distance = self.get_distance_to_target()
+        
+        # Check if we reached the target (success)
+        success = distance < self.accuracy_threshold
+        
+        # Calculate the reward (enhanced for better learning)
+        reward = self._calculate_reward(distance, action, success)
+        
+        # Check if episode is done
+        if success:
+            terminated = True
+            self.consecutive_successful_episodes += 1
+            
+            # Check if we should advance the curriculum
+            if self.consecutive_successful_episodes >= 5 and self.curriculum_level < self.curriculum_max_levels - 1:
+                self.curriculum_level += 1
+                if self.verbose:
+                    print(f"Advancing to curriculum level {self.curriculum_level}/{self.curriculum_max_levels-1}")
+            
+            # Reset consecutive successes if failure
+            self.consecutive_successful_episodes = 0
+        
+        # Increment step counter
+        self.steps += 1
+        
+        # Get observation and info
+        obs = self._get_obs()
+        info = self._get_info()
+        info["success"] = success
+        info["distance"] = distance
+        
+        return obs, reward, terminated, False, info
+    
+    def _calculate_reward(self, distance, action, success):
+        """
+        Calculate the reward based on distance to target, action magnitude, and success.
+        Uses reward shaping to guide the learning process.
+        """
+        # Distance component: negative distance scaled
+        distance_reward = -10.0 * distance
+        
+        # Action magnitude penalty to encourage smooth movements
+        action_penalty = -0.01 * np.sum(np.square(action))
+        
+        # Success bonus if we reached the target
+        success_reward = 100.0 if success else 0.0
+        
+        # Progressive reward: give more reward as we get closer to the target
+        progress_reward = 0.0
+        previous_distance = self.previous_distance if hasattr(self, 'previous_distance') else distance
+        distance_improvement = previous_distance - distance
+        
+        # Store current distance for next step
+        self.previous_distance = distance
+        
+        # Give reward for getting closer to the target, penalize for moving away
+        progress_scale = 5.0
+        progress_reward = progress_scale * distance_improvement
+        
+        # Combine all reward components
+        reward = distance_reward + action_penalty + success_reward + progress_reward
+        
+        return reward
+    
+    def _get_obs(self):
         """
         Get the current observation state.
         """
@@ -533,7 +763,7 @@ class RobotPositioningRevampedEnv(gym.Env):
         state = self.robot._get_state()
         
         # Extract joint positions
-        joint_positions = state[:self.robot.dof*2:2]  # Extract joint positions
+        joint_positions = state[:self.dof*2:2]  # Extract joint positions
         
         # Normalize joint positions to 0-1 range
         normalized_joint_positions = []
@@ -591,206 +821,52 @@ class RobotPositioningRevampedEnv(gym.Env):
         
         return observation
     
-    def reset(self, seed=None, options=None):
-        """Reset the environment to start a new episode"""
-        # Set random seed if provided
-        if seed is not None:
-            np.random.seed(seed)
-        
-        # Reset the robot
-        self.robot.reset()
-        
-        # Always sample a new target position on reset
-        self.target_position = self._sample_target()
-        
-        if self.verbose:
-            print(f"Robot {self.rank} received a new target at {self.target_position}")
-        
-        # Visualize the target if rendering is enabled
-        if self.gui:
-            try:
-                # Remove previous target visualization if it exists
-                if hasattr(self, 'target_visual_id') and self.target_visual_id is not None:
-                    try:
-                        p.removeBody(self.target_visual_id, physicsClientId=self.client_id)
-                    except Exception as e:
-                        if self.verbose:
-                            print(f"Warning: Could not remove previous target visual: {e}")
-                        pass
-                
-                # Create new target visualization
-                self.target_visual_id = visualize_target(self.target_position, self.client_id)
-                
-            except Exception as e:
-                print(f"Warning: Could not visualize target: {e}")
-        
-        # Reset step counter
-        self.steps = 0
-        
-        # Reset total reward for this episode
-        self.total_reward_in_episode = 0.0
-        
-        # Get current state
-        state = self.robot._get_state()
-        ee_position = state[12:15]
-        
-        # Calculate and store initial distance to target
-        self.initial_distance_to_target = np.linalg.norm(ee_position - self.target_position)
-        
-        # Reset best position tracking
-        self.best_distance_in_episode = self.initial_distance_to_target
-        self.best_position_in_episode = ee_position.copy()
-        
-        # Set previous distance to current distance for first reward calculation
-        self.previous_distance = self.initial_distance_to_target
-        
-        # Reset previous action
-        self.previous_action = np.zeros(self.dof)
-        
-        # Reset observation history
-        empty_observation = np.zeros(self.dof + 3)  # joint positions + ee position
-        self.observation_history = [empty_observation.copy() for _ in range(self.observation_history_length)]
-        
-        # Initialize observation history with current state
-        current_basic_observation = np.concatenate([
-            np.zeros(self.dof),  # Placeholder normalized joint positions
-            ee_position,         # Current end effector position
-        ])
-        
-        # Fill observation history with current state
-        for i in range(self.observation_history_length):
-            self.observation_history[i] = current_basic_observation.copy()
-        
-        # Get observation
-        observation = self._get_observation()
-        
-        if self.verbose:
-            print(f"Robot {self.rank}: Initial distance to target: {self.initial_distance_to_target*100:.2f}cm")
-        
-        # Return observation and info dict (Gymnasium API)
-        return observation, {'initial_distance': self.initial_distance_to_target}
-    
-    def step(self, action):
+    def _get_info(self):
         """
-        Apply action to the robot using direct joint position control with built-in joint limit enforcement.
-        
-        Args:
-            action: Normalized actions in [-1, 1] for each joint
+        Get the current info state.
         """
-        # The action is now in the range [-1, 1] for each joint
-        # Convert to actual joint positions within the joint limits
-        joint_positions = self.action_space.unnormalize_action(action)
-        
-        # Add small random noise to joint positions (exploration during training)
-        if self.training_mode:
-            # Add tiny noise to help explore the space more thoroughly
-            noise_scale = 0.001  # Very small noise
-            joint_positions += np.random.normal(0, noise_scale, size=len(joint_positions))
-        
-        # Check if positions would exceed limits (should never happen with JointLimitedBox)
-        # This is purely for monitoring and diagnostics
-        positions_within_limits = True
-        for i, pos in enumerate(joint_positions):
-            if i in self.robot.joint_limits:
-                limit_low, limit_high = self.robot.joint_limits[i]
-                if pos < limit_low or pos > limit_high:
-                    positions_within_limits = False
-                    if self.verbose:
-                        print(f"Warning: Action would exceed joint {i} limits: {pos:.4f} not in [{limit_low:.4f}, {limit_high:.4f}]")
-                    # Force within limits (should be unnecessary with JointLimitedBox)
-                    joint_positions[i] = np.clip(pos, limit_low, limit_high)
-        
-        # Apply the joint positions with zero velocities
-        zero_velocities = [0.0] * len(joint_positions)
-        next_state = self.robot.step((joint_positions, zero_velocities))
-        
-        # Store the current action for next observation
-        self.previous_action = np.array(action)
-        
-        # Increment step counter
-        self.steps += 1
-        
-        # Get current end effector position
-        state = self.robot._get_state()
-        ee_position = state[12:15]
-        
-        # Check if visualization should be slowed down
-        if self.viz_speed > 0.0:
-            time.sleep(self.viz_speed)
-        
-        # Calculate distance to target
-        distance_to_target = np.linalg.norm(ee_position - self.target_position)
-        
-        # Check for success condition
-        success = distance_to_target <= self.accuracy_threshold
-        
-        # Track best distance achieved in this episode
-        if distance_to_target < self.best_distance_in_episode:
-            self.best_distance_in_episode = distance_to_target
-            self.best_position_in_episode = ee_position.copy()
-        
-        # Calculate reward based on distance, action, and other factors
-        reward, reward_info = calculate_combined_reward(
-            distance=distance_to_target,
-            previous_distance=self.previous_distance,
-            initial_distance=self.initial_distance_to_target,
-            action=action,
-            previous_action=self.previous_action,
-            joint_positions=joint_positions,
-            joint_limits=self.robot.joint_limits,
-            steps=self.steps,
-            timeout_steps=self.timeout_steps,
-            best_distance=self.best_distance_in_episode,
-            accuracy_threshold=self.accuracy_threshold,
-            positions_within_limits=positions_within_limits
-        )
-        
-        # Store current distance for next reward calculation
-        self.previous_distance = distance_to_target
-        
-        # Add to total reward
-        self.total_reward_in_episode += reward
-        
-        # Check for done condition (success or timeout)
-        done = success or self.steps >= self.timeout_steps
-        
-        # Record whether this episode was successful
-        self.last_episode_successful = success
-        
-        # Update curriculum if needed
-        if done:
-            if success:
-                self.consecutive_successful_episodes += 1
-                # Increase curriculum level after consistent success
-                if self.consecutive_successful_episodes >= 5:
-                    self.curriculum_level += 1
-                    self.consecutive_successful_episodes = 0
-            else:
-                self.consecutive_successful_episodes = 0
-        
-        # Get observation
-        observation = self._get_observation()
-        
-        # Create info dict with useful data for logging
         info = {
-            'distance': distance_to_target,
-            'success': success,
-            'best_distance': self.best_distance_in_episode,
-            'reward_info': reward_info,
-            'episode_length': self.steps,
-            'joint_positions': joint_positions,
-            'positions_within_limits': positions_within_limits,
             'curriculum_level': self.curriculum_level
         }
-        
-        return observation, reward, done, info
+        return info
     
-    def close(self):
-        """Close the environment and clean up resources."""
-        # Disconnect from PyBullet if we created our own client
-        if hasattr(self, 'client_id') and self.client_id is not None:
-            # Don't disconnect for shared clients
-            pass
+    def get_distance_to_target(self):
+        """
+        Calculate the current distance from the end effector to the target.
+        
+        Returns:
+            float: Distance in meters
+        """
+        if self.target_position is None:
+            return float('inf')
+            
+        # Get end effector position
+        state = self.robot._get_state()
+        ee_position = state[-7:-4]  # Position is in the last 7 elements (position + orientation)
+        
+        # Calculate Euclidean distance
+        distance = np.linalg.norm(ee_position - self.target_position)
+        
+        return distance
+    
+    def update_target_visualization(self):
+        """
+        Update the target visualization in the environment.
+        """
+        if self.target_visual_id:
+            try:
+                p.removeBody(self.target_visual_id, physicsClientId=self.client_id)
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: Could not remove previous target visual: {e}")
+            self.target_visual_id = None
+        
+        if self.target_position is not None:
+            try:
+                self.target_visual_id = visualize_target(self.target_position, self.client_id)
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: Could not visualize target: {e}")
 
 # For backward compatibility
 RobotPositioningEnv = RobotPositioningRevampedEnv
