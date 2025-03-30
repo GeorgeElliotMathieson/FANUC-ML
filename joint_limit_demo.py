@@ -1,8 +1,9 @@
-import pybullet as p
-import pybullet_data
+import pybullet as p # type: ignore
+import pybullet_data # type: ignore
 import time
 import os
 import numpy as np
+import logging # <-- Add logging import
 
 # --- Constants (adapted from fanuc_env.py) ---
 # Using the limits defined in fanuc_env.py as the URDF uses 'continuous'
@@ -12,6 +13,14 @@ NUM_CONTROLLABLE_JOINTS = 5
 SIMULATION_TIME_STEP = 1.0/240.0
 MOVEMENT_DURATION_STEPS = 240 # Number of sim steps to move (e.g., 1 second at 240Hz)
 PAUSE_DURATION = 0.5 # Seconds to pause at limits/home
+
+# --- Configure Logging --- 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__) # Get logger for this module
 
 def main():
     """Runs the joint limit demonstration."""
@@ -37,21 +46,24 @@ def main():
         mesh_path = os.path.join(script_dir, "Fanuc")
 
         if not os.path.exists(urdf_file_path):
-             print(f"Error: Cannot find URDF file at {urdf_file_path}")
-             print("Ensure the 'Fanuc' directory with the URDF is present.")
+             # Use logger.error
+             logger.error(f"Error: Cannot find URDF file at {urdf_file_path}")
+             logger.error("Ensure the 'Fanuc' directory with the URDF is present.")
              return
 
         # Add Fanuc directory to search path *before* loading URDF
         p.setAdditionalSearchPath(mesh_path)
 
-        print(f"Loading robot from: {urdf_file_path}")
+        # Use logger.info
+        logger.info(f"Loading robot from: {urdf_file_path}")
         robot_id = p.loadURDF(
             urdf_file_path,
             basePosition=[0, 0, 0],
             useFixedBase=True,
-            flags=p.URDF_USE_SELF_COLLISION, # Use defined collision meshes + self-collision
+            # No flags needed like self-collision for FK check
         )
-        print(f"Robot loaded with ID: {robot_id}")
+        # Use logger.info
+        logger.info(f"Robot loaded with ID: {robot_id}")
 
         # --- Get Robot Info ---
         num_joints = p.getNumJoints(robot_id)
@@ -68,15 +80,19 @@ def main():
                     joint_names.append(joint_name)
 
         if len(joint_indices) != NUM_CONTROLLABLE_JOINTS:
-            print(f"Error: Found {len(joint_indices)} controllable revolute joints, expected {NUM_CONTROLLABLE_JOINTS}.")
-            print(f"Found joints: {joint_names}")
+            # Use logger.error
+            logger.error(f"Error: Found {len(joint_indices)} controllable revolute joints, expected {NUM_CONTROLLABLE_JOINTS}.")
+            logger.error(f"Found joints: {joint_names}")
             return
 
-        print(f"Found {NUM_CONTROLLABLE_JOINTS} controllable joints:")
+        # Use logger.info
+        logger.info(f"Found {NUM_CONTROLLABLE_JOINTS} controllable joints:")
         for i in range(NUM_CONTROLLABLE_JOINTS):
-             print(f"  - {joint_names[i]} (Index: {joint_indices[i]}) - Limits: [{JOINT_LIMITS_LOWER[i]:.2f}, {JOINT_LIMITS_UPPER[i]:.2f}] rad")
+             # Use logger.info
+             logger.info(f"  - {joint_names[i]} (Index: {joint_indices[i]}) - Limits: [{JOINT_LIMITS_LOWER[i]:.2f}, {JOINT_LIMITS_UPPER[i]:.2f}] rad")
 
-        print("\nResetting robot to home position...")
+        # Use logger.info
+        logger.info("\nResetting robot to home position...")
         home_position = [0.0] * NUM_CONTROLLABLE_JOINTS
         for i, joint_index in enumerate(joint_indices):
              p.resetJointState(robot_id, joint_index, targetValue=home_position[i], targetVelocity=0)
@@ -85,16 +101,19 @@ def main():
              p.stepSimulation()
              time.sleep(SIMULATION_TIME_STEP)
 
-        print("Starting joint limit demonstration...")
+        # Use logger.info
+        logger.info("Starting joint limit demonstration...")
 
         # --- Animation Loop ---
         for i in range(NUM_CONTROLLABLE_JOINTS):
             current_joint_pybullet_index = joint_indices[i]
             current_joint_name = joint_names[i]
-            print(f"\n--- Testing Joint {i+1}: {current_joint_name} (Index: {current_joint_pybullet_index}) ---")
+            # Use logger.info
+            logger.info(f"\n--- Testing Joint {i+1}: {current_joint_name} (Index: {current_joint_pybullet_index}) ---")
 
             # --- Move to Lower Limit ---
-            print(f"  -> Moving to Lower Limit ({JOINT_LIMITS_LOWER[i]:.2f} rad)")
+            # Use logger.info
+            logger.info(f"  -> Moving to Lower Limit ({JOINT_LIMITS_LOWER[i]:.2f} rad)")
             target_pos = list(home_position) # Start from home for other joints
             target_pos[i] = JOINT_LIMITS_LOWER[i]
             # Use setJointMotorControlArray for controlling multiple joints simultaneously
@@ -113,7 +132,8 @@ def main():
             time.sleep(PAUSE_DURATION) # Pause at the limit
 
             # --- Move to Upper Limit ---
-            print(f"  -> Moving to Upper Limit ({JOINT_LIMITS_UPPER[i]:.2f} rad)")
+            # Use logger.info
+            logger.info(f"  -> Moving to Upper Limit ({JOINT_LIMITS_UPPER[i]:.2f} rad)")
             target_pos = list(home_position) # Start from home for other joints
             target_pos[i] = JOINT_LIMITS_UPPER[i]
             p.setJointMotorControlArray(
@@ -129,7 +149,8 @@ def main():
             time.sleep(PAUSE_DURATION) # Pause at the limit
 
             # --- Return to Home Position ---
-            print("  -> Returning to Home Position")
+            # Use logger.info
+            logger.info("  -> Returning to Home Position")
             target_pos = list(home_position)
             p.setJointMotorControlArray(
                 bodyUniqueId=robot_id,
@@ -144,15 +165,18 @@ def main():
             time.sleep(PAUSE_DURATION) # Pause at home
 
 
-        print("\nDemonstration finished.")
+        # Use logger.info
+        logger.info("\nDemonstration finished.")
         time.sleep(3) # Keep window open briefly
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        # Use logger.error
+        logger.error(f"An error occurred: {e}")
     finally:
         # --- Cleanup ---
         if physics_client >= 0 and p.isConnected(physics_client):
-             print("Disconnecting PyBullet.")
+             # Use logger.info
+             logger.info("Disconnecting PyBullet.")
              p.disconnect(physics_client)
 
 if __name__ == "__main__":

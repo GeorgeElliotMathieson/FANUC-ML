@@ -5,8 +5,15 @@ import torch
 import numpy as np
 import json
 import argparse
-import math # Import math for ceiling function
-from typing import Tuple, List, Dict, Any # Add typing imports
+import math # Keep for potential calculations
+import logging # Import logging
+import traceback # Import traceback for logging errors
+from typing import Dict, Any # Updated typing imports
+
+# Import optuna
+import optuna # type: ignore
+# Import TrialPruned for handling trial errors
+from optuna.exceptions import TrialPruned # type: ignore
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
@@ -16,177 +23,74 @@ from stable_baselines3.common.evaluation import evaluate_policy
 # Import the custom environment
 from fanuc_env import FanucEnv
 
-# --- Tuning Configuration ---
-TUNE_TIMESTEPS = 250_000
-NUM_EVAL_EPISODES = 20 # Number of episodes for evaluation after each run
-RESULTS_FILE = "ppo_tuning_results.json"
-TUNING_LOG_DIR = "./ppo_tuning_logs/"
-BEST_PARAMS_FILE = "best_params.json" # Central file for best parameters
-# --- Iterative Tuning Config ---
-MAX_ITERATIONS = 5
-CONVERGENCE_THRESHOLD = 500.0 # Increased from 100.0
+# --- Optuna Tuning Configuration ---
+# Keep timestep/eval config, remove iteration/convergence config
+TUNE_TIMESTEPS = 100_000  # Timesteps per Optuna trial (Reduced from 250_000)
+NUM_EVAL_EPISODES = 20  # Number of episodes for evaluation after each trial
+# N_OPTUNA_TRIALS = 50 # Defined via command-line argument now
+OPTUNA_LOG_DIR = "./optuna_logs/" # Directory for Optuna study logs/artefacts
+BEST_PARAMS_FILE = "best_params.json" # Central file for best parameters found
 
-# --- Baseline Hyperparameters ---
-# Resetting based on educated guess for new env (squared reward, curriculum)
-BASELINE_PARAMS = {
-    "learning_rate": 3e-4,      # Kept default
-    "n_steps": 1024,            # Reduced from 2048 (more frequent updates)
-    "batch_size": 64,           # Kept default
-    "n_epochs": 5,              # Reduced from 10 (less overfitting per update)
-    "gamma": 0.99,            # Kept default
-    "gae_lambda": 0.95,         # Kept default
-    "clip_range": 0.2,          # Kept default
-    "ent_coef": 0.005,          # Increased from 0.001 (more exploration)
-    "vf_coef": 0.5,             # Kept default
-    "max_grad_norm": 0.5,       # Kept default
-    "policy": "MlpPolicy",    # Kept default
-    # Add policy_kwargs here if you want to tune network architecture, e.g.:
-    # "policy_kwargs": dict(net_arch=dict(pi=[64, 64], vf=[64, 64]))
-}
+# Default policy if not specified in Optuna trial
+DEFAULT_POLICY = "MlpPolicy"
 
-# --- Parameters to Tune (Relative Method) ---
-# Format: {param_name: (type, [factors_or_offsets])}
-# Types: 'mult' (multiplicative float), 'int_mult' (multiplicative integer),
-#        'add' (additive float), 'int_add' (additive integer)
-# Use type hints for clarity
-PARAMS_TO_TUNE: Dict[str, Tuple[str, List[float]]] = {
-    # param_name: (type, [factors_or_offsets])
-    "learning_rate": ("mult", [0.5, 1.5]),  # Multiply baseline
-    "n_steps": ("int_mult", [0.5, 2.0]), # Multiply baseline, ensure integer >= min_val
-    "batch_size": ("int_mult", [0.5, 2.0]), # Multiply baseline, ensure integer >= min_val
-    "n_epochs": ("int_add", [-2, 2]),  # Add to baseline (min 1)
-    "gamma": ("add", [-0.005, 0.005]), # Add to baseline (clip 0-1)
-    "gae_lambda": ("add", [-0.02, 0.02]),# Add to baseline (clip 0-1)
-    "clip_range": ("mult", [0.8, 1.2]), # Multiply baseline
-    # For ent_coef, multiplicative might be tricky if baseline is 0. Consider additive or small absolute values?
-    # Let's try additive for ent_coef for now.
-    "ent_coef": ("add", [0.001, 0.01]), # Add to baseline (min 0)
-    "vf_coef": ("mult", [0.8, 1.2]),  # Multiply baseline
-    "max_grad_norm": ("mult", [0.8, 1.2]),# Multiply baseline
-}
-# Minimum values for certain integer parameters
-PARAM_MIN_VALUES = {
-    "n_steps": 64,
-    "batch_size": 8,
-    "n_epochs": 1,
-}
+# --- Function to Run a Single Experiment (modified for Optuna) ---
+def run_experiment(params: Dict[str, Any], trial_number: int) -> float:
+    """Runs a single training and evaluation experiment for an Optuna trial.
 
-# --- Helper function to calculate test value ---
-def calculate_test_value(baseline_value, param_type, modifier):
-    if param_type == "mult":
-        return baseline_value * modifier
-    elif param_type == "int_mult":
-        min_val = PARAM_MIN_VALUES.get(param_name, 1) # Use specific min or default to 1
-        # Use math.ceil to ensure we don't round down to 0 for small baseline * factor
-        return max(min_val, int(math.ceil(baseline_value * modifier)))
-    elif param_type == "add":
-        new_val = baseline_value + modifier
-        # Apply specific bounds if needed (e.g., gamma, gae_lambda)
-        if param_name == "gamma" or param_name == "gae_lambda":
-            new_val = np.clip(new_val, 0.0, 1.0)
-        if param_name == "ent_coef":
-            new_val = max(0.0, new_val) # Ensure non-negative
-        return new_val
-    elif param_type == "int_add":
-        min_val = PARAM_MIN_VALUES.get(param_name, 1)
-        return max(min_val, baseline_value + modifier)
-    else:
-        raise ValueError(f"Unknown parameter tuning type: {param_type}")
+    Args:
+        params: Dictionary of hyperparameters suggested by Optuna.
+        trial_number: The Optuna trial number for logging.
 
-# --- Helper function to create run name ---
-def create_run_name(param_name, param_type, modifier):
-    mod_str = ""
-    if param_type == "mult" or param_type == "int_mult":
-        mod_str = f"x{modifier}"
-    elif param_type == "add" or param_type == "int_add":
-        mod_str = f"add{modifier:+}" # Include sign for additive
-    # Format modifier for filename (replace . with p, handle +/-)
-    mod_str_clean = mod_str.replace('.', 'p').replace('+', 'plus').replace('-', 'minus')
-    return f"{param_name}_{mod_str_clean}"
-
-# --- Function to determine best parameters based on relative results ---
-def determine_best_params(results, current_baseline):
-    print("\n--- Determining Best Parameters from Iteration Results ---")
-    if not results:
-        print("No results found for this iteration. Using current baseline.")
-        return current_baseline.copy()
-
-    best_params = current_baseline.copy()
-    results_dict = {res.get("run_name"): res for res in results if "error" not in res and "mean_reward" in res}
-
-    # Get baseline performance for this iteration
-    baseline_reward = results_dict.get("baseline", {}).get("mean_reward", -np.inf)
-    print(f"Baseline reward for this iteration: {baseline_reward if baseline_reward > -np.inf else 'N/A'}")
-
-    # Iterate through tunable parameters
-    for param_name, (param_type, modifiers) in PARAMS_TO_TUNE.items():
-        print(f"Checking param: {param_name}")
-        best_value = current_baseline[param_name] # Start with the baseline value for this iter
-        best_reward_for_param = baseline_reward
-        found_better = False
-
-        # Check each tested modifier for this parameter
-        for modifier in modifiers:
-            run_name = create_run_name(param_name, param_type, modifier)
-            run_result = results_dict.get(run_name)
-            calculated_value = calculate_test_value(current_baseline[param_name], param_type, modifier) # Value tested
-
-            if run_result:
-                reward = run_result.get("mean_reward", -np.inf)
-                print(f"  - Modifier: {modifier} ({param_type}), Tested Value: {calculated_value}, Run: {run_name}, Reward: {reward:.2f}")
-                # Use >= to prefer modifications slightly if reward is identical to baseline
-                if reward >= best_reward_for_param:
-                    # Special case: if reward is same as baseline, only update if value is different
-                    if reward == baseline_reward and calculated_value == current_baseline[param_name]:
-                        continue
-                    best_reward_for_param = reward
-                    best_value = calculated_value # Store the actual value, not the modifier
-                    found_better = True
-            else:
-                print(f"  - Modifier: {modifier} ({param_type}), Tested Value: {calculated_value}, Run: {run_name} - No results found or run failed.")
-
-        if found_better and best_value != current_baseline[param_name]:
-             print(f"  => New best for {param_name}: {best_value} (Reward: {best_reward_for_param:.2f})")
-             best_params[param_name] = best_value
-        else:
-             # Keep the value from the start of the iteration (which was best from *previous* iter)
-             print(f"  => Keeping current baseline value for {param_name}: {current_baseline[param_name]}")
-             best_params[param_name] = current_baseline[param_name]
-
-
-    print("--- Finished Determining Best Parameters for this Iteration ---")
-    return best_params
-
-def run_tuning_experiment(params, run_name, num_cpu, iteration, run_number_this_iter, total_runs_this_iter, overall_run_number):
-    """Runs a single training and evaluation experiment."""
-    print(f"\n--- Iteration {iteration} / Test {run_number_this_iter}/{total_runs_this_iter} (Overall Run {overall_run_number}) ---")
-    print(f"--- Starting Run: {run_name} ---")
-    print(f"Parameters: {params}")
+    Returns:
+        The mean reward achieved during evaluation.
+        Raises TrialPruned if the trial fails or should be stopped early.
+    """
+    run_name = f"trial_{trial_number}"
+    # Use logger for trial info
+    logging.info(f"\n--- Starting Optuna {run_name} ---")
+    logging.info(f"Parameters: {params}")
 
     train_env = None
     eval_env = None
-    run_results = {"run_name": run_name, "params": params, "iteration": iteration}
+    mean_reward = -float('inf') # Default reward if run fails
+
+    # Determine number of CPUs (can be moved outside if constant)
+    cpu_count = multiprocessing.cpu_count()
+    num_cpu = cpu_count # Use all available cores
 
     try:
         # --- Environment Setup ---
-        print(f"Using {num_cpu} parallel environments for training.")
+        # Use logger for info
+        logging.info(f"Using {num_cpu} parallel environments for training.")
         vec_env_cls = SubprocVecEnv if num_cpu > 1 else DummyVecEnv
-        # Create train envs
-        train_env = make_vec_env(lambda: FanucEnv(render_mode=None), n_envs=num_cpu, vec_env_cls=vec_env_cls)
-
-        # Create a separate evaluation environment (single, non-rendered)
-        eval_env = FanucEnv(render_mode=None) # Use default settings from FanucEnv
+        # Extract angle_bonus_factor from params, default if not present (should be)
+        angle_bonus = params.get("angle_bonus_factor", 5.0)
+        # Pass angle_bonus_factor to FanucEnv constructor
+        train_env = make_vec_env(
+            lambda: FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus),
+            n_envs=num_cpu,
+            vec_env_cls=vec_env_cls # type: ignore
+        )
+        # Use the same factor for the eval_env for consistency
+        eval_env = FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus)
 
         # --- Agent and Training ---
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {device}")
-        # Include iteration in log dir path
-        run_log_dir = os.path.join(TUNING_LOG_DIR, f"iter_{iteration}", run_name)
-        os.makedirs(run_log_dir, exist_ok=True)
+        # print(f"Using device: {device}") # Less verbose during Optuna runs
 
+        # Create log directory for this specific trial
+        trial_log_dir = os.path.join(OPTUNA_LOG_DIR, run_name)
+        os.makedirs(trial_log_dir, exist_ok=True)
+
+        # Ensure policy is correctly passed
+        policy = params.get("policy", DEFAULT_POLICY)
+        policy_kwargs = params.get("policy_kwargs", None) # Extract policy_kwargs if suggested
+
+        # Create PPO model with suggested parameters
         model = PPO(
-            params.get("policy", BASELINE_PARAMS["policy"]),
-            train_env,
+            policy=policy,
+            env=train_env,
             learning_rate=params["learning_rate"],
             n_steps=params["n_steps"],
             batch_size=params["batch_size"],
@@ -197,348 +101,230 @@ def run_tuning_experiment(params, run_name, num_cpu, iteration, run_number_this_
             ent_coef=params["ent_coef"],
             vf_coef=params["vf_coef"],
             max_grad_norm=params["max_grad_norm"],
-            verbose=0, # Reduce verbosity
-            tensorboard_log=run_log_dir,
+            verbose=0, # Keep verbosity low for Optuna runs
+            tensorboard_log=trial_log_dir,
             device=device,
-            policy_kwargs=params.get("policy_kwargs", None) # Use policy_kwargs if defined
+            policy_kwargs=policy_kwargs # Pass policy_kwargs
         )
 
-        print(f"Training for {TUNE_TIMESTEPS} timesteps...")
+        # Use logger for info
+        logging.info(f"Training for {TUNE_TIMESTEPS} timesteps...")
         start_time = time.time()
         model.learn(
             total_timesteps=TUNE_TIMESTEPS,
-            log_interval=100 # Log less frequently
+            log_interval=1000 # Log even less frequently
         )
         training_time = time.time() - start_time
-        print(f"Training completed in {training_time:.2f} seconds.")
-        run_results["training_time_s"] = training_time
+        # Use logger for info
+        logging.info(f"Training completed in {training_time:.2f} seconds.")
 
         # --- Evaluation ---
-        print(f"Evaluating model over {NUM_EVAL_EPISODES} episodes...")
-        # Use wrapper env for evaluation if needed, otherwise direct env
-        mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=NUM_EVAL_EPISODES, deterministic=True)
-        print(f"Evaluation results: Mean Reward = {mean_reward:.2f} +/- {std_reward:.2f}")
-        run_results["mean_reward"] = mean_reward
-        run_results["std_reward"] = std_reward
+        # Use logger for info
+        logging.info(f"Evaluating model over {NUM_EVAL_EPISODES} episodes...")
+        mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=NUM_EVAL_EPISODES, deterministic=True) # type: ignore
+        # Use logger for info
+        logging.info(f"Evaluation results: Mean Reward = {mean_reward:.2f} +/- {std_reward:.2f}")
 
-        # Optionally save the model from this run (can take lots of space)
-        # model_save_path = os.path.join(run_log_dir, "tuned_model.zip")
+        # Optional: Save the model from this run
+        # model_save_path = os.path.join(trial_log_dir, "tuned_model.zip")
         # model.save(model_save_path)
-        # print(f"Model for this run saved to {model_save_path}")
 
     except Exception as e:
-        print(f"Error during run {run_name}: {e}")
-        import traceback
-        traceback.print_exc()
-        run_results["error"] = str(e)
+        # Use logger for error and traceback
+        logging.error(f"Error during Optuna trial {trial_number} ({run_name}): {e}")
+        # Log the full traceback for debugging
+        logging.error(traceback.format_exc())
+        # Prune the trial if it fails catastrophically
+        raise TrialPruned(f"Trial failed due to error: {e}")
     finally:
         # --- Cleanup ---
-        print(f"Cleaning up environments for run {run_name}...")
+        # print(f"Cleaning up environments for run {run_name}...") # Less verbose
         if train_env is not None:
-            train_env.close()
+            try:
+                train_env.close()
+            except Exception as e:
+                # Use logger for warning
+                logging.warning(f"Error closing train_env: {e}")
         if eval_env is not None:
-            # Since eval_env is not VecEnv, it might not have close(), but FanucEnv does
             try:
                 eval_env.close()
-            except AttributeError:
-                pass # FanucEnv might handle closing pybullet internally if needed
-        print(f"--- Finished Run: {run_name} ---")
+            except Exception as e:
+                # Use logger for warning
+                 logging.warning(f"Error closing eval_env: {e}")
+        # Use logger for info
+        logging.info(f"--- Finished Optuna {run_name} ---")
 
-    return run_results
+    # Return the metric Optuna should optimize (higher is better)
+    return mean_reward
+
+# --- Optuna Objective Function ---
+def objective(trial: optuna.Trial) -> float:
+    """Defines the objective function for Optuna optimisation."""
+
+    # Define hyperparameters to search using trial.suggest_*
+    params = {
+        "policy": trial.suggest_categorical("policy", ["MlpPolicy"]), # Keep policy fixed for now
+        "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True),
+        # Suggest n_steps as power of 2 for efficiency? Let's try categorical for powers of 2
+        "n_steps": trial.suggest_categorical("n_steps", [64, 128, 256, 512, 1024, 2048]),
+        # Batch size often related to n_steps, also suggest powers of 2
+        "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256]),
+        "n_epochs": trial.suggest_int("n_epochs", 1, 20),
+        "gamma": trial.suggest_float("gamma", 0.9, 0.999, log=False), # Linear scale might be ok here
+        "gae_lambda": trial.suggest_float("gae_lambda", 0.9, 0.99),
+        "clip_range": trial.suggest_float("clip_range", 0.1, 0.4),
+        "ent_coef": trial.suggest_float("ent_coef", 1e-6, 1e-2, log=True),
+        "vf_coef": trial.suggest_float("vf_coef", 0.3, 0.7),
+        "max_grad_norm": trial.suggest_float("max_grad_norm", 0.3, 1.0),
+        # Add angle_bonus_factor to tuning parameters
+        "angle_bonus_factor": trial.suggest_float("angle_bonus_factor", 1.0, 15.0, log=False), # Linear scale
+        # "policy_kwargs": None # Placeholder - will be set below
+    }
+
+    # --- Constraint: batch_size <= n_steps ---
+    # Ensure batch_size is not larger than n_steps, which is invalid for PPO.
+    # If it is, we can prune the trial early or simply adjust batch_size.
+    # Pruning is cleaner as it avoids running an invalid configuration.
+    if params["batch_size"] > params["n_steps"]: # type: ignore
+         # Use logger for info
+         logging.info(f"Pruning trial {trial.number}: batch_size ({params['batch_size']}) > n_steps ({params['n_steps']})")
+         raise TrialPruned("batch_size > n_steps")
+
+    # --- Add Policy Kwargs suggestion (Network size) ---
+    net_arch_size = trial.suggest_categorical("net_arch_size", ["small", "medium", "large"])
+    if net_arch_size == "small":
+        params["policy_kwargs"] = dict(net_arch=dict(pi=[64, 64], vf=[64, 64]))
+    elif net_arch_size == "medium":
+        params["policy_kwargs"] = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
+    else: # "large"
+        params["policy_kwargs"] = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+
+    # Run the experiment with the suggested parameters
+    mean_reward = run_experiment(params, trial.number)
+
+    # Optional: Report intermediate results for pruning (if using a pruner)
+    # trial.report(mean_reward, step=TUNE_TIMESTEPS)
+    # if trial.should_prune():
+    #     raise optuna.exceptions.TrialPruned()
+
+    return mean_reward
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run PPO hyperparameter tuning for Fanuc Env.")
-    parser.add_argument("--skip_baseline", action="store_true", help="Skip running the baseline configuration in the first iteration.")
-    # Argument to disable baseline update is less relevant now, removing.
-    # parser.add_argument("--no_update_baseline", action="store_true", help="Do not update baseline parameters from previous results.")
-    parser.add_argument("--start_iteration", type=int, default=0, help="Iteration number to start from (loads previous results).")
+    # --- Configure Logging --- 
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger(__name__) # Get logger for this module
+
+    parser = argparse.ArgumentParser(description="Run PPO hyperparameter tuning using Optuna for Fanuc Env.")
+    parser.add_argument("-d", "--duration", type=int, default=720, # Changed default to 12 minutes
+                        help="Maximum tuning duration in seconds (default: 720 = 12 minutes).")
+    parser.add_argument("--study_name", type=str, default="ppo_fanuc_tuning", help="Name for the Optuna study.")
+    # Add argument for storage URL (e.g., SQLite database)
+    parser.add_argument("--storage", type=str, default=None, help="Optuna storage URL (e.g., 'sqlite:///optuna_study.db'). If None, uses in-memory storage.")
     args = parser.parse_args()
 
-    # Determine number of CPUs for parallel training runs
-    cpu_count = multiprocessing.cpu_count()
-    num_cpu = cpu_count # Use all available cores
-    print(f"Using {num_cpu} CPUs for parallel environments during tuning.") # Add print statement
+    # Create Optuna log directory if it doesn't exist
+    os.makedirs(OPTUNA_LOG_DIR, exist_ok=True)
 
-    # Define the initial baseline (hardcoded)
-    initial_baseline_params = BASELINE_PARAMS.copy()
-    current_baseline_params = initial_baseline_params
-    best_params_overall = initial_baseline_params # Track the best params found across iterations
-    previous_baseline_reward = -np.inf
+    # Use logger for info
+    logger.info(f"Starting Optuna study '{args.study_name}' for a maximum duration of {args.duration} seconds.")
+    logger.info(f"Using storage: {'In-memory' if args.storage is None else args.storage}")
+    logger.info(f"Each trial trains for {TUNE_TIMESTEPS} timesteps and evaluates over {NUM_EVAL_EPISODES} episodes.")
 
-    # --- Load Best Params Found So Far (if starting fresh or resuming) ---
-    if args.start_iteration == 0:
-        if os.path.exists(BEST_PARAMS_FILE):
-            try:
-                with open(BEST_PARAMS_FILE, 'r') as f:
-                    current_baseline_params = json.load(f)
-                    best_params_overall = current_baseline_params.copy()
-                    print(f"Loaded existing best parameters from {BEST_PARAMS_FILE} as starting baseline.")
-            except Exception as e:
-                print(f"Warning: Failed to load {BEST_PARAMS_FILE}. Using initial defaults. Error: {e}")
-                current_baseline_params = initial_baseline_params
-                best_params_overall = initial_baseline_params
-        else:
-            print(f"No {BEST_PARAMS_FILE} found. Using initial defaults as starting baseline.")
-            current_baseline_params = initial_baseline_params
-            best_params_overall = initial_baseline_params
-    # If resuming (--start_iteration > 0), the baseline will be determined later from the previous iteration's results file
+    # --- Create or Load Optuna Study ---
+    # Using storage allows resuming studies
+    study = optuna.create_study(
+        study_name=args.study_name,
+        storage=args.storage,
+        direction="maximize", # We want to maximize the mean reward
+        load_if_exists=True, # Load study if it already exists in the storage
+        # Optional: Add a pruner for early stopping of unpromising trials
+        pruner=optuna.pruners.MedianPruner(
+            n_startup_trials=5, n_warmup_steps=0, interval_steps=1
+        )
+    )
 
-    total_runs_executed_this_session = 0 # Initialize overall counter HERE
+    # --- Run Optuna Optimisation ---
+    try:
+        study.optimize(
+            objective,
+            n_trials=None, # Run indefinitely until timeout
+            timeout=args.duration # Set the timeout in seconds
+            # n_jobs=1 # Parallel trials can be tricky with PyBullet/multiprocessing envs
+        )
+    except KeyboardInterrupt:
+        # Use logger for warning
+        logger.warning("Optuna study interrupted by user.")
+    except Exception as e:
+        # Use logger for error and traceback
+        logger.error(f"An error occurred during the Optuna study: {e}")
+        logger.error(traceback.format_exc())
 
-    # --- Calculate Total Tests Per Iteration ---
-    total_tests_per_iteration = 1 # For baseline
-    for _, (_, modifiers) in PARAMS_TO_TUNE.items():
-        total_tests_per_iteration += len(modifiers)
-    print(f"Calculated {total_tests_per_iteration} tests per iteration (1 baseline + variations).")
+    # --- Post-Study Summary ---
+    # Use logger for info
+    logger.info("=============== Optuna Study Summary ===============")
+    logger.info(f"Study Name: {study.study_name}")
+    # Number of trials can be different if study was loaded/resumed
+    logger.info(f"Number of finished trials: {len(study.trials)}")
 
-    # --- Iteration Loop ---
-    for iteration_count in range(args.start_iteration, MAX_ITERATIONS):
-        print(f"\n=============== Starting Iteration {iteration_count} ===============")
-        experiment_counter_this_iteration = 0 # Reset counter for this iteration
+    # Find the best trial
+    try:
+        best_trial = study.best_trial
+        # Use logger for info
+        logger.info(f"Best trial finished with value (mean reward): {best_trial.value:.4f}")
+        logger.info("Best hyperparameters found:")
+        # Format best parameters nicely
+        best_params_dict = {}
+        for key, value in best_trial.params.items():
+            # Use logger for info
+            logger.info(f"  {key}: {value}")
+            best_params_dict[key] = value
 
-        iteration_results_file = f"ppo_tuning_results_iter_{iteration_count}.json"
-        previous_iteration_results_file = f"ppo_tuning_results_iter_{iteration_count - 1}.json"
+        # --- Save Best Parameters to Central File ---
+        # Use logger for info
+        logger.info(f"Saving best parameters found to {BEST_PARAMS_FILE}...")
+        try:
+            # Ensure policy is included if it was tuned (add it if fixed)
+            if "policy" not in best_params_dict:
+                 best_params_dict["policy"] = DEFAULT_POLICY # Add default if not explicitly tuned
+            # Similarly add policy_kwargs if tuned
+            # Add net_arch_size to saved params for info
+            if "policy_kwargs" in best_params_dict and "net_arch_size" not in best_params_dict:
+                 # Infer net_arch_size based on policy_kwargs for saving
+                 arch_pi = best_params_dict["policy_kwargs"].get("net_arch", {}).get("pi", [])
+                 if arch_pi == [64, 64]:
+                     best_params_dict["net_arch_size"] = "small"
+                 elif arch_pi == [128, 128]:
+                     best_params_dict["net_arch_size"] = "medium"
+                 elif arch_pi == [256, 256]:
+                     best_params_dict["net_arch_size"] = "large"
+                 # else: leave it out if not matching known patterns
 
-        all_prev_results = []
-        previous_baseline_reward = -np.inf # Reset for safety
-        # Load previous iteration's results if not the first iteration
-        if iteration_count > 0:
-            if os.path.exists(previous_iteration_results_file):
-                try:
-                    with open(previous_iteration_results_file, 'r') as f:
-                        all_prev_results = json.load(f)
-                        print(f"Loaded {len(all_prev_results)} results from previous iteration: {previous_iteration_results_file}")
+            with open(BEST_PARAMS_FILE, 'w') as f:
+                json.dump(best_params_dict, f, indent=4)
+            # Use logger for info
+            logger.info(f"Successfully saved best parameters to {BEST_PARAMS_FILE}")
+        except IOError as e:
+            # Use logger for error
+            logger.error(f"Error saving best parameters to {BEST_PARAMS_FILE}: {e}")
 
-                        # Store the baseline reward from the previous iteration for convergence check
-                        prev_baseline_run = next((res for res in all_prev_results if res.get("run_name") == "baseline" and "error" not in res), None)
-                        if prev_baseline_run:
-                            previous_baseline_reward = prev_baseline_run.get("mean_reward", -np.inf)
-                            print(f"Previous iteration baseline reward: {previous_baseline_reward:.2f}")
-                        else:
-                            print("Could not find baseline reward from previous iteration.")
-                            # previous_baseline_reward remains -np.inf
+        # --- Optional: Display Trials DataFrame ---
+        # try:
+        #     df = study.trials_dataframe()
+        #     print("--- Trials DataFrame ---")
+        #     print(df.sort_values(by="value", ascending=False))
+        #     # Save DataFrame to CSV
+        #     # df.to_csv(os.path.join(OPTUNA_LOG_DIR, f"{args.study_name}_trials.csv"), index=False)
+        # except Exception as e:
+        #     print(f"Could not display or save trials dataframe: {e}")
 
-                except Exception as e:
-                    print(f"Warning: Could not load previous results from {previous_iteration_results_file}. Error: {e}")
-                    print("Stopping due to error loading previous results.")
-                    break
-            else: # Iteration > 0 but previous file missing
-                print(f"Warning: Previous results file not found ({previous_iteration_results_file}). Cannot perform convergence check for this iteration.")
-                # baseline determination will use previous iteration's best or initial
-        else: # iteration_count == 0
-             print("First iteration. Using initial baseline parameters.")
+    except ValueError:
+        # Use logger for warning
+        logger.warning("No trials completed successfully in the study. Cannot determine best parameters.")
 
-        # Determine the baseline parameters for THIS iteration based on PREVIOUS results
-        if iteration_count > 0 and all_prev_results:
-            current_baseline_params = determine_best_params(all_prev_results, current_baseline_params) # Use previous best as fallback
-        elif iteration_count == 0:
-            # Ensure first run uses initial, potentially loaded from BEST_PARAMS_FILE earlier
-            pass # current_baseline_params is already set correctly
-        # If iteration > 0 and no prev results, current_baseline_params retains its value
-
-        print(f"\nCurrent Baseline Parameters for Iteration {iteration_count}:")
-        for key, val in current_baseline_params.items():
-            print(f"  {key}: {val}")
-
-        # --- Run Experiments for Current Iteration --- 
-        current_iteration_results = []
-        # If results file for *this* iteration already exists, load it to potentially skip runs
-        if os.path.exists(iteration_results_file):
-            try:
-                with open(iteration_results_file, 'r') as f:
-                    current_iteration_results = json.load(f)
-                print(f"Loaded {len(current_iteration_results)} existing results for Iteration {iteration_count} from {iteration_results_file}")
-            except Exception as e:
-                 print(f"Warning: Could not load existing results from {iteration_results_file}. Overwriting. Error: {e}")
-                 current_iteration_results = []
-
-        existing_run_names_this_iter = {res.get("run_name") for res in current_iteration_results}
-
-        # --- Run Baseline for *this* iteration FIRST --- 
-        baseline_run_name = "baseline"
-        current_baseline_reward = -np.inf # Initialize reward for this iteration's baseline
-        baseline_run_completed_this_session = False
-
-        # Check if baseline already exists in loaded results for this iteration
-        baseline_existing_result = next((res for res in current_iteration_results if res.get("run_name") == baseline_run_name and "error" not in res), None)
-
-        if baseline_existing_result:
-            print(f"--- Found Existing Baseline Result for Iteration {iteration_count} --- ")
-            current_baseline_reward = baseline_existing_result.get("mean_reward", -np.inf)
-            # skip_current_baseline_run = True # Don't need to run it
-        else:
-            # Only run baseline if not skipped by args AND not found in existing results
-            skip_baseline_arg = args.skip_baseline and iteration_count == 0
-            if not skip_baseline_arg:
-                experiment_counter_this_iteration += 1
-                total_runs_executed_this_session += 1 # Increment the overall counter
-                print(f"--- Preparing Baseline for Iteration {iteration_count} --- ") # Clarify stage
-                baseline_results = run_tuning_experiment(
-                    current_baseline_params,
-                    baseline_run_name,
-                    num_cpu,
-                    iteration_count,
-                    experiment_counter_this_iteration, # Pass counters
-                    total_tests_per_iteration,       # Pass counters
-                    total_runs_executed_this_session # Pass counters
-                )
-                if baseline_results:
-                    current_iteration_results.append(baseline_results)
-                    existing_run_names_this_iter.add(baseline_run_name)
-                    baseline_run_completed_this_session = True
-                    if "error" not in baseline_results:
-                         current_baseline_reward = baseline_results.get("mean_reward", -np.inf)
-                    # Save incrementally
-                    try:
-                        with open(iteration_results_file, 'w') as f:
-                            json.dump(current_iteration_results, f, indent=4)
-                    except Exception as e:
-                        print(f"Warning: Could not save baseline results to {iteration_results_file}. Error: {e}")
-            else:
-                 print(f"--- Skipping Baseline run for Iteration {iteration_count} (--skip_baseline or already exists) --- ")
-
-        # --- Convergence Check (Moved After Baseline Run) --- 
-        if iteration_count > 0:
-            print(f"\nConvergence Check: Current Baseline Reward = {current_baseline_reward:.2f}, Previous Baseline Reward = {previous_baseline_reward:.2f}")
-            improvement = -np.inf
-            if current_baseline_reward > -np.inf and previous_baseline_reward > -np.inf:
-                 improvement = current_baseline_reward - previous_baseline_reward
-            elif current_baseline_reward > -np.inf: # Current succeeded, previous failed
-                 improvement = np.inf # Consider any success an infinite improvement over failure
-            else: # No improvement or both failed
-                 improvement = 0.0 # Or handle case where current failed but prev succeeded? Treat as negative infinity?
-                 # Let's stick to 0.0, assuming we only care about positive improvement.
-
-            # --- Revised Convergence Check --- 
-            # Stop only if improvement is small but non-negative (plateau)
-            # Continue if improvement is large OR if performance decreased (improvement < 0)
-            if 0 <= improvement < CONVERGENCE_THRESHOLD:
-                print(f"\nConvergence likely reached! Improvement ({improvement:.2f}) is non-negative and less than threshold ({CONVERGENCE_THRESHOLD}).")
-                # Prevent stopping if baseline check was based on old results or skipped baseline run
-                if not baseline_run_completed_this_session and not baseline_existing_result:
-                     print("However, the baseline for the current iteration was skipped or failed this session. Running variations anyway.")
-                elif previous_baseline_reward == -np.inf:
-                     print("However, the previous baseline failed or was not found. Running variations anyway.")
-                else:
-                     print(f"Stopping after Iteration {iteration_count - 1}.")
-                     break # Exit the iteration loop
-            else:
-                print(f"Improvement ({improvement:.2f}) meets threshold. Continuing tuning.")
-
-        # --- Run Parameter Variations (Rest of the loop) --- 
-        for param_name, param_config in PARAMS_TO_TUNE.items():
-            param_type, modifiers = param_config # Unpack here
-            print(f"\n--- Iteration {iteration_count} / Preparing variations for Parameter: {param_name} ---")
-            baseline_value_for_param = current_baseline_params[param_name]
-
-            for modifier in modifiers:
-                # Calculate the actual value to be tested
-                test_value = calculate_test_value(baseline_value_for_param, param_type, modifier)
-
-                # Skip if calculated value is essentially the same as baseline
-                # Use tolerance for floats
-                is_same_as_baseline = False
-                # Check if both are numeric before using isclose
-                if isinstance(test_value, (int, float)) and isinstance(baseline_value_for_param, (int, float)):
-                    # Use np.isclose for float comparison
-                    if np.isclose(float(test_value), float(baseline_value_for_param)): # Cast to float for safety
-                        is_same_as_baseline = True
-                elif test_value == baseline_value_for_param: # Fallback for non-numeric or exact integer match
-                    is_same_as_baseline = True
-
-                if is_same_as_baseline:
-                    print(f"Skipping {param_name} modifier {modifier} -> {test_value} (same as current baseline: {baseline_value_for_param})")
-                    continue
-
-                # Create run name based on modifier
-                run_name = create_run_name(param_name, param_type, modifier)
-
-                # Check if already run *within this iteration*
-                if run_name in existing_run_names_this_iter:
-                    print(f"Skipping run {run_name} (already run in this iteration)")
-                    continue
-
-                experiment_counter_this_iteration += 1
-                total_runs_executed_this_session += 1
-                run_params = current_baseline_params.copy() # Start from baseline
-                run_params[param_name] = test_value # Set the calculated value
-
-                experiment_results = run_tuning_experiment(
-                    run_params,
-                    run_name,
-                    num_cpu,
-                    iteration_count,
-                    experiment_counter_this_iteration, # Pass counters
-                    total_tests_per_iteration,       # Pass counters
-                    total_runs_executed_this_session # Pass counters
-                )
-                if experiment_results:
-                    current_iteration_results.append(experiment_results)
-                    existing_run_names_this_iter.add(run_name)
-                    # Save results incrementally within the iteration
-                    try:
-                        with open(iteration_results_file, 'w') as f:
-                            json.dump(current_iteration_results, f, indent=4)
-                    except Exception as e:
-                        print(f"Warning: Could not save intermediate results to {iteration_results_file}. Error: {e}")
-
-        # --- Post-Iteration Analysis and Update ---
-        print(f"\n--- Analysing Results for Iteration {iteration_count} --- ")
-        print(f"Results for this iteration saved to {iteration_results_file}")
-
-        # Determine the best params found *within this iteration* using the updated function
-        if current_iteration_results:
-             iteration_best_params = determine_best_params(current_iteration_results, current_baseline_params) # Pass the baseline used FOR THIS iteration
-
-             # Update the overall best parameters and save to the central file
-             print(f"Updating {BEST_PARAMS_FILE} with best parameters from Iteration {iteration_count}.")
-             best_params_overall = iteration_best_params # Keep track for next iteration's baseline
-             try:
-                 with open(BEST_PARAMS_FILE, 'w') as f:
-                     json.dump(best_params_overall, f, indent=4)
-             except Exception as e:
-                 print(f"Warning: Could not save best parameters to {BEST_PARAMS_FILE}. Error: {e}")
-
-             # Set baseline for the *next* iteration
-             current_baseline_params = best_params_overall.copy()
-        else:
-            print("No successful runs in this iteration to determine best parameters.")
-            # Keep current_baseline_params as is for the next iteration
-
-    # --- Post-Loop Summary ---
-    final_iteration = iteration_count if iteration_count == MAX_ITERATIONS else iteration_count -1
-    if final_iteration < args.start_iteration:
-         print("\nNo iterations were run or completed successfully.")
-    else:
-        print(f"\n--- Final Tuning Summary (Based on Iteration {final_iteration}) ---")
-        final_results_file = f"ppo_tuning_results_iter_{final_iteration}.json"
-        if os.path.exists(final_results_file):
-            try:
-                with open(final_results_file, 'r') as f:
-                    final_results = json.load(f)
-
-                # Determine final best params from the last completed iteration
-                # Load the final overall best parameters directly
-                final_best_params = best_params_overall
-                print("\nFinal Recommended Baseline Parameters (from latest iteration results):")
-                for key, val in final_best_params.items():
-                    print(f"  {key}: {val}")
-
-                # Print summary sorted by mean reward from the final iteration
-                print("\nSummary (Sorted by Mean Reward - Last Iteration):")
-                successful_runs = [res for res in final_results if 'error' not in res and 'mean_reward' in res]
-                failed_runs = [res for res in final_results if 'error' in res]
-
-                for result in sorted(successful_runs, key=lambda x: x.get('mean_reward', -np.inf), reverse=True):
-                     print(f"  Run: {result['run_name']:<25} - Mean Reward: {result.get('mean_reward', 'N/A'):>8.2f} +/- {result.get('std_reward', 'N/A'):.2f}")
-
-                if failed_runs:
-                    print("\nFailed Runs (Last Iteration):")
-                    for result in failed_runs:
-                         print(f"  Run: {result['run_name']} - ERROR: {result['error']}")
-
-            except Exception as e:
-                print(f"Error reading or processing final results file {final_results_file}: {e}")
-        else:
-            print(f"Final results file not found: {final_results_file}") 
+    # Use logger for info
+    logger.info("Optuna tuning script finished.") 

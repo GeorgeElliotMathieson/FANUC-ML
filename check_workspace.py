@@ -1,9 +1,11 @@
-import pybullet as p
-import pybullet_data
+import pybullet as p # type: ignore
+import pybullet_data # type: ignore
 import numpy as np
 import os
 import time
 import json # Import json
+import logging # Import logging
+import traceback # Import traceback
 
 # --- Constants (Adapted from fanuc_env.py) ---
 # Ensure these match your fanuc_env.py
@@ -14,6 +16,14 @@ NUM_SAMPLES = 100000 # Increased from 20000
 END_EFFECTOR_LINK_NAME = 'Part6' # Ensure this matches the link name in your URDF/env
 
 CONFIG_FILENAME = "workspace_config.json" # Define config filename
+
+# --- Configure Logging --- 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 def main():
     """Samples joint configurations to estimate workspace reach."""
@@ -29,7 +39,7 @@ def main():
 
     try:
         # --- PyBullet Setup (Direct Mode) ---
-        print("Connecting to PyBullet in DIRECT mode...")
+        logger.info("Connecting to PyBullet in DIRECT mode...")
         physics_client = p.connect(p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         # No gravity needed for pure FK check
@@ -41,18 +51,18 @@ def main():
         mesh_path = os.path.join(script_dir, "Fanuc")
 
         if not os.path.exists(urdf_file_path):
-            print(f"Error: Cannot find URDF file at {urdf_file_path}")
+            logger.error(f"Cannot find URDF file at {urdf_file_path}")
             return
 
         p.setAdditionalSearchPath(mesh_path)
-        print(f"Loading robot from: {urdf_file_path}")
+        logger.info(f"Loading robot from: {urdf_file_path}")
         robot_id = p.loadURDF(
             urdf_file_path,
             basePosition=[0, 0, 0],
             useFixedBase=True
             # No flags needed like self-collision for FK check
         )
-        print(f"Robot loaded with ID: {robot_id}")
+        logger.info(f"Robot loaded with ID: {robot_id}")
 
         # --- Get Robot Info ---
         num_joints_total = p.getNumJoints(robot_id)
@@ -71,20 +81,20 @@ def main():
                 end_effector_link_index = i
 
         if len(joint_indices) != NUM_CONTROLLABLE_JOINTS:
-            print(f"Error: Found {len(joint_indices)} controllable revolute joints, expected {NUM_CONTROLLABLE_JOINTS}.")
+            logger.error(f"Found {len(joint_indices)} controllable revolute joints, expected {NUM_CONTROLLABLE_JOINTS}.")
             return
         if end_effector_link_index == -1:
-            print(f"Error: Could not find end effector link named '{END_EFFECTOR_LINK_NAME}'. Using last joint index as fallback.")
+            logger.error(f"Could not find end effector link named '{END_EFFECTOR_LINK_NAME}'. Using last joint index as fallback.")
             # Fallback: Use the link associated with the last *controllable* joint index found
             if joint_indices:
                  end_effector_link_index = joint_indices[-1]
             else: # Or ultimately the last joint if no revolute found (unlikely)
                  end_effector_link_index = num_joints_total - 1
-            print(f"Using end effector link index: {end_effector_link_index}")
+            logger.info(f"Using end effector link index: {end_effector_link_index}")
 
 
-        print(f"Using End Effector Link Index: {end_effector_link_index}")
-        print(f"Sampling {NUM_SAMPLES} random joint configurations...")
+        logger.info(f"Using End Effector Link Index: {end_effector_link_index}")
+        logger.info(f"Sampling {NUM_SAMPLES} random joint configurations...")
 
         start_time = time.time()
         # --- Sampling Loop ---
@@ -131,46 +141,45 @@ def main():
 
             # Progress indicator
             if (i + 1) % (NUM_SAMPLES // 10) == 0:
-                print(f"  Processed {i+1}/{NUM_SAMPLES} samples...")
+                logger.info(f"  Processed {i+1}/{NUM_SAMPLES} samples...")
 
         end_time = time.time()
-        print(f"Sampling finished in {end_time - start_time:.2f} seconds.")
+        logger.info(f"Sampling finished in {end_time - start_time:.2f} seconds.")
 
         # --- Output and Save Results ---
         workspace_data = {}
         # Max Reach
         if max_reach_pos is not None:
-            print(f"\nEstimated Maximum Reach: {max_reach:.4f} meters")
-            print(f"  Found at position: [{max_reach_pos[0]:.4f}, {max_reach_pos[1]:.4f}, {max_reach_pos[2]:.4f}]")
+            logger.info(f"\nEstimated Maximum Reach: {max_reach:.4f} meters")
+            logger.info(f"  Found at position: [{max_reach_pos[0]:.4f}, {max_reach_pos[1]:.4f}, {max_reach_pos[2]:.4f}]")
             workspace_data['max_reach'] = max_reach
         else:
-            print("\nCould not estimate maximum reach (no samples processed?).")
+            logger.warning("\nCould not estimate maximum reach (no samples processed?).")
         
         # Min Reach
         if min_reach_pos is not None:
-            print(f"\nEstimated Minimum Reach: {min_reach:.4f} meters")
-            print(f"  Found at position: [{min_reach_pos[0]:.4f}, {min_reach_pos[1]:.4f}, {min_reach_pos[2]:.4f}]")
+            logger.info(f"\nEstimated Minimum Reach: {min_reach:.4f} meters")
+            logger.info(f"  Found at position: [{min_reach_pos[0]:.4f}, {min_reach_pos[1]:.4f}, {min_reach_pos[2]:.4f}]")
             workspace_data['min_reach'] = min_reach
         else:
-            print("\nCould not estimate minimum reach (no samples processed?).")
+            logger.warning("\nCould not estimate minimum reach (no samples processed?).")
 
         # Save to JSON file if data exists
         if workspace_data:
             try:
                 with open(CONFIG_FILENAME, 'w') as f:
                     json.dump(workspace_data, f, indent=4)
-                print(f"\nWorkspace dimensions saved to {CONFIG_FILENAME}")
+                logger.info(f"\nWorkspace dimensions saved to {CONFIG_FILENAME}")
             except IOError as e:
-                print(f"\nError saving workspace config to {CONFIG_FILENAME}: {e}")
+                logger.error(f"\nError saving workspace config to {CONFIG_FILENAME}: {e}")
 
     except Exception as e:
-        print(f"An error occurred: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"An error occurred: {e}")
+        logger.error(traceback.format_exc())
     finally:
         # --- Cleanup ---
         if physics_client >= 0 and p.isConnected(physics_client):
-            print("Disconnecting PyBullet.")
+            logger.info("Disconnecting PyBullet.")
             p.disconnect(physics_client)
 
 if __name__ == "__main__":

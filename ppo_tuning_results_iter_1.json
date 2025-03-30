@@ -98,5 +98,105 @@
         "training_time_s": 81.10050988197327,
         "mean_reward": -1098.2067848838865,
         "std_reward": 442.22195114998897
+    },
+    {
+        "run_name": "batch_size_x0p5",
+        "params": {
+            "learning_rate": 0.0003,
+            "n_steps": 1024,
+            "batch_size": 32,
+            "n_epochs": 5,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 160.8655650615692,
+        "mean_reward": -697.8356763095595,
+        "std_reward": 423.94637604346025
+    },
+    {
+        "run_name": "batch_size_x2p0",
+        "params": {
+            "learning_rate": 0.0003,
+            "n_steps": 1024,
+            "batch_size": 128,
+            "n_epochs": 5,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 74.29614663124084,
+        "mean_reward": -1335.416952239722,
+        "std_reward": 573.943148838702
+    },
+    {
+        "run_name": "n_epochs_addminus2",
+        "params": {
+            "learning_rate": 0.0003,
+            "n_steps": 1024,
+            "batch_size": 64,
+            "n_epochs": 3,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 74.12458610534668,
+        "mean_reward": -876.0916097848443,
+        "std_reward": 472.52182134212234
+    },
+    {
+        "run_name": "n_epochs_addplus2",
+        "params": {
+            "learning_rate": 0.0003,
+            "n_steps": 1024,
+            "batch_size": 64,
+            "n_epochs": 7,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 103.21057200431824,
+        "mean_reward": -631.0313455468975,
+        "std_reward": 500.8018322348965
+    },
+    {
+        "run_name": "gamma_addminus0p005",
+        "params": {
+            "learning_rate": 0.0003,
+            "n_steps": 1024,
+            "batch_size": 64,
+            "n_epochs": 5,
+            "gamma": 0.985,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 87.2309718132019,
+        "mean_reward": -789.0003279487603,
+        "std_reward": 464.45708937062614
     }
 ]
