@@ -1,130 +1,241 @@
-# FANUC Robot Arm PPO Training with Obstacles and Tuning
+# FANUC Robot Arm RL Training with PPO, Obstacles, and Tuning
 
-This project trains a FANUC LRMate 200iC robot arm to reach random target positions within its workspace using Proximal Policy Optimisation (PPO). The training incorporates several advanced features:
+This project trains a FANUC LRMate 200iC robot arm simulation to reach random target positions within its workspace using Proximal Policy Optimisation (PPO). The training incorporates several advanced features, focusing on learning forward kinematics without relying on pre-calculated inverse kinematics solutions.
 
-*   **Obstacle Avoidance:** The environment can dynamically place obstacles, requiring the agent to learn collision-free paths.
-*   **Continuous Curriculum Learning:** The difficulty (target reach distance) gradually increases as the agent's success rate improves.
-*   **Hyperparameter Tuning (Optuna):** Uses the Optuna library for efficient Bayesian optimisation of PPO hyperparameters.
-*   **Time-Based Training:** Training duration is controlled by a time limit rather than a fixed number of steps.
-*   **Parallel Environments:** Leverages multiple CPU cores for faster training.
-*   **PyBullet Simulation:** Uses the PyBullet physics engine for simulation.
+**Key Features:**
 
-The core logic focuses on learning forward kinematics without relying on pre-calculated inverse kinematics solutions.
+*   **PyBullet Simulation:** Uses the PyBullet physics engine for efficient and flexible robot simulation.
+*   **Obstacle Avoidance:** The environment dynamically places obstacles, requiring the agent to learn collision-free paths.
+*   **Continuous Curriculum Learning:** Gradually increases the difficulty (target reach distance) based on the agent's recent success rate, facilitating learning.
+*   **Hyperparameter Tuning (Optuna):** Employs the Optuna library for efficient Bayesian optimisation of PPO hyperparameters.
+*   **Stable Baselines3:** Leverages the robust SB3 library for the PPO implementation and training utilities.
+*   **Time-Based Training:** Training duration is controlled by a specified time limit rather than a fixed number of steps.
+*   **Parallel Environments:** Utilises multiple CPU cores for accelerated training sample collection.
+*   **Modular Structure:** Codebase is organized into `src`, `scripts`, and `output` directories for better maintainability.
+*   **Analysis Tools:** Includes a script to parse training logs and generate performance plots.
 
 ## Prerequisites
 
 *   Python 3.8+
 *   PyBullet physics simulator
-*   PyTorch
-*   Stable Baselines3 reinforcement learning library
-*   NumPy
-*   Gymnasium (formerly OpenAI Gym)
-*   Optuna
+*   PyTorch >= 2.0.0
+*   Stable Baselines3[extra] >= 2.0.0
+*   NumPy >= 1.22.0
+*   Gymnasium >= 0.28.0 (replacement for OpenAI Gym)
+*   Optuna >= 3.0.0
+*   Pandas (for analysis script)
+*   Matplotlib (for analysis script)
+*   TensorBoard (for viewing logs and running analysis script)
 
 ## Installation
 
-1.  **Clone the repository (if you haven't already):**
+1.  **Clone the Project Repository (if necessary):**
     ```bash
-    # This step might have been done already.
-    # git clone <your-repo-url> # Or wherever this code resides
-    # cd <your-repo-directory>
+    # git clone <your-repo-url>
+    cd <your-repo-directory>
     ```
 
-2.  **Clone the FANUC robot model repository (Required):**
-    *(This assumes the 'Fanuc' directory containing the robot model will be placed in the same root directory as this project's files)*
+2.  **Clone the FANUC Robot Model Repository:**
+    The project requires the URDF and mesh files for the FANUC LRMate 200iC. Place the cloned `Fanuc` directory in the project root.
     ```bash
-    # If you don't have the Fanuc model yet:
+    # Run in the project root directory
     git clone https://github.com/sezan92/Fanuc.git
     ```
-    *Note: The original environment from the Fanuc repository seems ROS-based. This implementation uses PyBullet with the provided URDF for simplicity. ROS integration is not included here.*
+    *(Note: This project uses the URDF/meshes with PyBullet, not the ROS components from the original repository.)*
 
-3.  **Create a virtual environment (recommended):**
+3.  **Create and Activate a Virtual Environment (Recommended):**
     ```bash
     python -m venv venv
     # On Linux/macOS:
     source venv/bin/activate
-    # On Windows:
+    # On Windows (Command Prompt/PowerShell):
     # venv\Scripts\activate
     ```
 
-4.  **Install Python dependencies:**
+4.  **Install Python Dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
-
-## Workflow
-
-The typical workflow involves three main steps: Tuning, Training, and Testing.
-
-1.  **Step 1: Hyperparameter Tuning (Optuna)**
-    *   Run the tuning script to find optimal hyperparameters using Optuna.
-    *   Specify the duration for the tuning process.
-    *   The best parameters found will be saved to `best_params.json`.
-    ```bash
-    # Example: Tune for 10 minutes (600 seconds)
-    python ppo_tune.py --duration 600 --study_name "ppo_fanuc_study_1"
-    ```
-    *   `--duration`: Tuning time in seconds.
-    *   `--study_name`: A unique name for the Optuna study (allows resuming).
-    *   `--storage`: Optional database URL (e.g., `sqlite:///optuna_study.db`) to store and resume studies across runs. Defaults to in-memory.
-
-2.  **Step 2: Training the Agent**
-    *   Run the training script using the best parameters found during tuning (loaded automatically from `best_params.json`).
-    *   Specify the desired training duration.
-    *   The final trained model will be saved to `./ppo_fanuc_logs/ppo_fanuc_model.zip`.
-    ```bash
-    # Example: Train for 30 minutes (1800 seconds)
-    python ppo_train.py --duration 1800
-    ```
-    *   `--duration`: Training time in seconds.
-
-3.  **Step 3: Visual Testing**
-    *   Run the visual test script to observe the trained agent's performance in the rendered environment.
-    *   Loads the latest saved model automatically.
-    ```bash
-    # Example: Run 10 test episodes
-    python ppo_visual_test.py --episodes 10
-    ```
-    *   `--episodes`: Number of visual test episodes.
-    *   `--model_path`: Optionally specify a path to a specific model `.zip` file.
-
-## Additional Scripts
-
-*   **`check_workspace.py`:** Estimates the robot's minimum and maximum reach by sampling random joint configurations. Saves results to `workspace_config.json`, which is used by the environment. Run this if you modify the robot model or suspect reach issues.
-    ```bash
-    python check_workspace.py
-    ```
-*   **`joint_limit_demo.py`:** Visually demonstrates the movement range of each controllable joint based on the limits defined in the environment. Useful for verifying joint limits.
-    ```bash
-    python joint_limit_demo.py
-    ```
+    *(Note: The analysis script requires `pandas`, `matplotlib`, and `tensorboard`, which should be installed via `requirements.txt` or `stable-baselines3[extra]`)*
 
 ## Project Structure
 
-*   `ppo_tune.py`: Script for hyperparameter tuning using Optuna.
-*   `ppo_train.py`: Main script for training the PPO agent using tuned parameters.
-*   `ppo_visual_test.py`: Script for visually testing the trained agent.
-*   `fanuc_env.py`: Custom Gymnasium environment (simulation, rewards, curriculum, obstacles).
-*   `check_workspace.py`: Utility script to estimate robot workspace limits.
-*   `joint_limit_demo.py`: Utility script to visualise joint limits.
-*   `requirements.txt`: Python package dependencies.
-*   `README.md`: This file.
-*   `best_params.json`: Stores the best hyperparameters found by Optuna (created after tuning).
-*   `workspace_config.json`: Stores estimated workspace limits (created by `check_workspace.py`).
-*   `ppo_fanuc_logs/`: Directory for saving trained models and TensorBoard logs.
-*   `optuna_logs/`: Directory for saving detailed Optuna trial logs (optional).
-*   `Fanuc/`: Directory containing the robot model (URDF, meshes, etc.) - cloned from [https://github.com/sezan92/Fanuc.git](https://github.com/sezan92/Fanuc.git).
+```
+.
+├── Fanuc/                     # Robot model data (URDF, meshes) - External Git Repo
+├── output/                    # ALL generated outputs grouped here
+│   ├── ppo_logs/              # Training logs (TensorBoard) & saved models (.zip)
+│   ├── optuna_study/          # Optuna study database/logs
+│   └── analysis/              # Analysis plots/reports generated by analyse_results.py
+├── scripts/                   # Runnable utility, analysis & pipeline scripts
+│   ├── run_pipeline.py        # Main pipeline execution script (Recommended Usage)
+│   ├── analyse_results.py     # Script to analyse logs and generate plots
+│   ├── check_workspace.py     # Utility script to estimate robot workspace limits
+│   └── joint_limit_demo.py    # Utility script to visualise joint limits
+├── src/                       # Core source code library
+│   ├── __init__.py            # Makes 'src' a Python package
+│   ├── fanuc_env.py           # Custom Gymnasium environment definition
+│   ├── tune.py                # Hyperparameter tuning logic (via Optuna)
+│   ├── train.py               # Agent training logic
+│   └── test.py                # Visual testing logic
+├── .gitignore                 # Standard git ignore file
+├── best_params.json           # Configuration: Best hyperparameters found by tuning
+├── requirements.txt           # Project Python dependencies
+├── README.md                  # This documentation file
+└── workspace_config.json      # Configuration: Estimated workspace limits
+```
 
-## Customisation
+## Usage
 
-*   **Environment Parameters:** Modify `fanuc_env.py` to change:
-    *   Reward shaping (e.g., `angle_bonus_factor`).
-    *   Curriculum settings (`initial_max_target_radius`, `success_rate_threshold`, etc.).
-    *   Obstacle properties (`num_obstacles`, `obstacle_radius`, placement logic).
-    *   Simulation settings (max steps, accuracy).
-*   **Tuning Parameters:** Adjust `ppo_tune.py`:
-    *   `TUNE_TIMESTEPS`: Timesteps per Optuna trial.
-    *   Hyperparameter search spaces within the `objective` function.
-*   **Training:** Modify `ppo_train.py`:
-    *   Checkpoint save frequency (`save_freq`).
-*   **URDF/Robot Model:** Changes to the `Fanuc/urdf/Fanuc.urdf` may require re-running `check_workspace.py` and potentially adjusting joint indices/limits in `fanuc_env.py`. 
+### Recommended Workflow: The Pipeline Script
+
+The easiest way to run the full workflow (tune -> train -> test) is using the main pipeline script.
+
+```bash
+python scripts/run_pipeline.py [OPTIONS]
+```
+
+**Key Pipeline Options:**
+
+*   `--tune_duration MINUTES`: Duration for hyperparameter tuning (default: 16 minutes). Set to 0 to rely solely on `--skip_tuning`.
+*   `--train_duration MINUTES`: Duration for agent training (default: 29 minutes).
+*   `--test_episodes N`: Number of episodes for visual testing (default: 5).
+*   `--study_name NAME`: Unique name for the Optuna study (allows resuming).
+*   `--storage URL`: Optuna storage URL (e.g., `sqlite:///my_study.db`). If a *relative* path (like `my_study.db`) is given, it will be saved inside `output/optuna_study/`. Defaults to in-memory.
+*   `--seed SEED`: Random seed for reproducible tuning trials (default: 42).
+*   `--skip_tuning`: Skip the tuning step. Requires `best_params.json` to exist for training, otherwise uses defaults.
+*   `--skip_training`: Skip the training step. Requires a trained model in `output/ppo_logs/` for testing.
+*   `--skip_testing`: Skip the final visual testing step.
+*   `--delete_old_params`: Delete `best_params.json` before starting the tuning step.
+
+**Example Pipeline Run:**
+
+```bash
+# Run tuning for 60 mins, training for 120 mins, 10 test eps, save Optuna study
+python scripts/run_pipeline.py --tune_duration 60 --train_duration 120 --test_episodes 10 --storage "sqlite:///main_study.db"
+```
+
+### Running Individual Steps
+
+You can also run each step independently. This is useful for debugging or focusing on a specific phase. Note that these are run as modules from the project root directory.
+
+1.  **Hyperparameter Tuning (`src.tune`):**
+    ```bash
+    python -m src.tune --duration MINUTES [OPTIONS]
+    ```
+    *   `--duration MINUTES`: Tuning duration (default: 12 minutes).
+    *   `--study_name NAME`: Optuna study name (default: `ppo_fanuc_default_study`).
+    *   `--storage URL`: Optuna storage URL. **Defaults to a persistent SQLite database (`sqlite:///output/optuna_study/default_fanuc_study.db`)**, so this argument is optional for standard use. Provide it only to use a different file or database type.
+    *   `--seed SEED`: Random seed.
+    *   *Output:* Saves best parameters to `best_params.json` and logs/database to `output/optuna_study/`.
+
+2.  **Training (`src.train`):**
+    ```bash
+    python -m src.train --duration MINUTES
+    ```
+    *   `--duration MINUTES`: Training duration (default: 3 minutes).
+    *   *Input:* Automatically loads hyperparameters from `best_params.json` if it exists, otherwise uses defaults defined in the script.
+    *   *Output:* Saves the trained model (`ppo_fanuc_model.zip`) and TensorBoard logs to `output/ppo_logs/`.
+
+3.  **Visual Testing (`src.test`):**
+    ```bash
+    python -m src.test --episodes N [OPTIONS]
+    ```
+    *   `--episodes N`: Number of test episodes (default: 5).
+    *   `--model_path PATH`: Optionally specify the path to a model `.zip` file. If omitted, it searches for the latest model in `output/ppo_logs/`.
+    *   *Input:* Loads the specified or latest model. Loads `best_params.json` to configure the test environment (e.g., `angle_bonus_factor`).
+
+### Analysis Script
+
+After training, analyse the results and generate plots using:
+
+```bash
+python scripts/analyse_results.py [OPTIONS]
+```
+
+**Key Analysis Options:**
+
+*   `--log_dir PATH`: Path to the training log directory (default: `output/ppo_logs/`).
+*   `--params_file PATH`: Path to the best parameters file (default: `best_params.json`).
+*   `--output_dir PATH`: Directory to save generated plots (default: `output/analysis/`).
+*   `--event_file PATH`: Specify a specific TensorBoard event file instead of searching the log directory.
+
+This script will:
+1.  Print the best hyperparameters loaded from the parameters file.
+2.  Load data from the latest TensorBoard event file found in the log directory.
+3.  Generate plots for key metrics (reward, episode length, success rate, collision rates, curriculum radius, losses, etc.) and save them as PNG files in the output directory.
+
+### Utility Scripts
+
+*   **Workspace Check (`scripts/check_workspace.py`):**
+    Estimates the robot's minimum and maximum reachable distances by sampling random configurations. Crucial for setting environment boundaries.
+    ```bash
+    python scripts/check_workspace.py
+    ```
+    *   *Output:* Saves estimated limits to `workspace_config.json`. Run this if you modify the URDF.
+
+*   **Joint Limit Demo (`scripts/joint_limit_demo.py`):**
+    Visually demonstrates the movement range of each joint based on the limits defined in `src/fanuc_env.py`. Useful for verifying limits.
+    ```bash
+    python scripts/joint_limit_demo.py
+    ```
+
+## Configuration Files
+
+*   `best_params.json`: Automatically generated by `src/tune.py` (or the tuning step in the pipeline). Contains the best hyperparameters found by Optuna. Read by `src/train.py` and `src/test.py`.
+*   `workspace_config.json`: Automatically generated by `scripts/check_workspace.py`. Contains estimated `min_reach` and `max_reach`. Read by `src/fanuc_env.py` to set workspace boundaries.
+*   `requirements.txt`: Defines Python dependencies for `pip install -r requirements.txt`.
+
+## Environment Details (`src/fanuc_env.py`)
+
+*   **Action Space:** Continuous, 5 dimensions representing normalised target velocities for the 5 controllable joints (J1-J5). Values range from -1 to 1, scaled by velocity limits internally.
+*   **Observation Space:** 21 dimensions:
+    *   Joint positions (5)
+    *   Joint velocities (5)
+    *   Relative vector from end-effector (EE) to target (3)
+    *   Normalised joint positions relative to limits (-1 to 1) (5)
+    *   Relative vector from EE to nearest obstacle (3) (Zero vector if no obstacles)
+*   **Reward Function:**
+    *   Dense negative squared distance to target.
+    *   Potential-based shaping reward for reducing the base rotation angle error towards the target azimuth (scaled by `angle_bonus_factor`).
+    *   Large positive bonus (`+100`) for reaching the target within accuracy (`_target_accuracy`).
+    *   Large negative penalty (`-100`) for colliding with an obstacle (terminates episode).
+    *   *(Note: Self-collision penalty was present earlier but seems removed/inactive in the latest check; obstacle collision is the primary penalty)*
+*   **Curriculum Learning:**
+    *   Uses a **decreasing minimum radius** approach.
+    *   The **maximum target radius remains fixed** throughout training (`fixed_max_target_radius`).
+    *   Starts with the **minimum target radius equal to the maximum radius**, forcing initial targets to the outer edge of the workspace.
+    *   Calculates the success rate over the last `success_rate_window_size` (20) episodes.
+    *   If the success rate exceeds `success_rate_threshold` (0.75), the **`current_min_target_radius` is decreased** by `radius_decrease_step` (0.05m), down towards a final minimum value (`final_min_target_radius`, default: 10x base reach).
+    *   The target position is randomly sampled within the `current_min_target_radius` and the `fixed_max_target_radius`.
+*   **Obstacle Avoidance:**
+    *   Places `num_obstacles` (currently 1) static sphere obstacles.
+    *   Obstacles are randomly positioned within the workspace but outside safe zones near the robot base and the current target.
+    *   Collision with an obstacle results in termination and a penalty.
+
+## Hyperparameter Tuning (`src/tune.py`)
+
+*   Uses Optuna to find optimal hyperparameters for PPO.
+*   The `objective` function defines the search space for parameters like `learning_rate`, `n_steps`, `batch_size`, `n_epochs`, `gamma`, `gae_lambda`, `clip_range`, `ent_coef`, `vf_coef`, `max_grad_norm`, `angle_bonus_factor`, and network architecture size (`net_arch_size`).
+*   Optimises based on the mean reward achieved during evaluation (`NUM_EVAL_EPISODES=30`) after a trial trains for `TUNE_TIMESTEPS`.
+*   **Intermediate Evaluation & Pruning:** Implements an Optuna callback (`TrialCallback`) to perform evaluations every `EVAL_FREQ` (50k) steps *during* a trial. These intermediate results are reported to Optuna, allowing the configured pruner (`MedianPruner`) to stop unpromising trials early, saving significant tuning time.
+*   **Default Storage:** Automatically saves study results to a default SQLite database (`output/optuna_study/default_fanuc_study.db`) unless overridden by the `--storage` argument. This allows for easy resuming of studies and use with visualization tools.
+*   **Extended Logging:** Logs the standard deviation of the evaluation reward (`std_reward`) and the actual trial duration (`duration_seconds`) to the Optuna study's user attributes for more detailed analysis.
+*   **Dashboard Compatibility:** The default SQLite storage makes the study directly compatible with the `optuna-dashboard` tool or IDE extensions. Simply point the dashboard tool/extension to the `.db` file in `output/optuna_study/`.
+*   Prunes trials early if `batch_size > n_steps`.
+
+## Future Work / Improvements
+
+*   Implement more complex obstacle scenarios (multiple obstacles, moving obstacles).
+*   Experiment with different RL algorithms (e.g., SAC for continuous control).
+*   Refine reward shaping further.
+*   Improve curriculum learning (e.g., adaptive step sizes, different metrics, switching strategies).
+*   Add more sophisticated collision checking (e.g., checking all links, not just EE for self-collision penalty).
+*   Investigate sim-to-real transfer possibilities.
+*   Integrate inverse kinematics as an option or baseline.
+
+## Acknowledgements
+
+*   The FANUC LRMate 200iC URDF model is based on the work found at [https://github.com/sezan92/Fanuc.git](https://github.com/sezan92/Fanuc.git).
+*   This project heavily utilises the [Stable Baselines3](https://github.com/DLR-RM/stable-baselines3) and [Optuna](https://github.com/optuna/optuna) libraries.
+*   Built using the [PyBullet](https://pybullet.org/) physics engine. 

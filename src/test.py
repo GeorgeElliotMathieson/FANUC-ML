@@ -46,15 +46,6 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    # --- Adjust sys.path if run directly (less ideal now) ---
-    if '' not in sys.path:
-         sys.path.insert(0, os.path.dirname(__file__))
-    # Re-define paths needed for direct execution context
-    PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-    DEFAULT_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
-    BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json")
-    logger.info(f"Executing {__file__} directly. Paths adjusted.")
-
     # --- Argument Parser --- 
     parser = argparse.ArgumentParser(description="Run visual test for trained PPO FANUC model.")
     parser.add_argument("-m", "--model_path", type=str, default=None,

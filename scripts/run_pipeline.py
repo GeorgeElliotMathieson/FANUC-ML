@@ -14,11 +14,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-# Path relative to project root (where this script will be)
-PROJECT_ROOT = os.path.dirname(__file__) # Project root is the dir containing scripts/
+# Project root is one level up from the scripts directory
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json")
-# Define the path to the source directory
+# Define the path to the source directory relative to project root
 SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'output')
+OPTUNA_STUDY_DIR = os.path.join(OUTPUT_DIR, 'optuna_study')
 
 def run_command(command_list, step_name):
     """Runs a command as a subprocess and checks the return code."""
@@ -58,10 +60,9 @@ def run_command(command_list, step_name):
         return False
 
 if __name__ == "__main__":
-    # Add src directory to sys.path to allow finding modules if needed
-    # (though -m should handle it for subprocesses)
-    if SRC_DIR not in sys.path:
-        sys.path.insert(0, SRC_DIR)
+    # Remove sys.path manipulation - not needed when running scripts/run_pipeline.py
+    # if SRC_DIR not in sys.path:
+    #     sys.path.insert(0, SRC_DIR)
 
     parser = argparse.ArgumentParser(description="Run the full Fanuc RL pipeline (tune, train, test).")
     parser.add_argument("--tune_duration", type=int, default=16,
@@ -72,8 +73,6 @@ if __name__ == "__main__":
                         help="Number of episodes for visual testing (default: 5).")
     parser.add_argument("--study_name", type=str, default="ppo_fanuc_pipeline_study",
                         help="Name for the Optuna study (default: ppo_fanuc_pipeline_study).")
-    parser.add_argument("--storage", type=str, default=None,
-                        help="Optuna storage URL (e.g., 'sqlite:///optuna_study.db'). Defaults to in-memory.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducible tuning trials (default: 42).")
     parser.add_argument("--skip_tuning", action="store_true",
@@ -102,24 +101,13 @@ if __name__ == "__main__":
                 except OSError as e:
                     logger.warning(f"Could not delete {BEST_PARAMS_FILE}: {e}")
 
-        # Update command to use module path 'src.tune'
+        # Command no longer needs --storage argument
         tune_command = [
-            "src.tune", # Module path relative to project root
+            "src.tune",
             "--duration", str(args.tune_duration),
             "--study_name", args.study_name,
             "--seed", str(args.seed)
         ]
-        if args.storage:
-            # Adjust storage path if it's a relative file path
-            storage_path = args.storage
-            if storage_path and not storage_path.startswith('sqlite:///') and not os.path.isabs(storage_path):
-                # Assume relative path is relative to project root, adjust for DB file
-                # Optuna might handle this, but being explicit can help
-                # Example: make it relative to output/optuna_study if desired
-                # storage_path = os.path.join("output", "optuna_study", storage_path)
-                pass # For now, assume Optuna/user handles relative paths correctly
-
-            tune_command.extend(["--storage", storage_path])
 
         if not run_command(tune_command, "Hyperparameter Tuning"):
             logger.error("Tuning failed. Aborting pipeline.")

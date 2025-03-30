@@ -163,17 +163,7 @@ if __name__ == "__main__":
         format='%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    logger = logging.getLogger(__name__) # Get logger for this module
-
-    # --- Adjust sys.path if run directly (less ideal now) ---
-    if '' not in sys.path:
-         sys.path.insert(0, os.path.dirname(__file__))
-    # Re-define paths needed for direct execution context
-    PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-    BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json")
-    LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
-    SAVE_PATH = os.path.join(LOG_DIR, "ppo_fanuc_model")
-    logger.info(f"Executing {__file__} directly. Paths adjusted.") # Now logger is defined
+    logger = logging.getLogger(__name__)
 
     # --- Argument Parser --- 
     parser = argparse.ArgumentParser(description="Train PPO model for FANUC environment.")
@@ -182,13 +172,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # --- Define paths and device early --- 
-    # Paths are now defined globally and adjusted for direct execution if needed
-    # log_dir = LOG_DIR
-    # save_path = SAVE_PATH
+    # Paths are defined globally. Device setup needed here.
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
 
-    # --- Load Best or Default Params ---
+    # --- Load Best or Default Params --- 
+    # Uses global BEST_PARAMS_FILE path
     current_params = load_best_or_default_params()
 
     # Use logger to print parameters
@@ -198,54 +187,30 @@ if __name__ == "__main__":
         logger.info(f"  {line}")
     # logger.info("-" * 30) # Divider less necessary with logger timestamps
 
-    # --- Set Training Constants from loaded/default params ---
-    # Convert duration from minutes to seconds
+    # --- Set Training Constants --- 
     training_duration_seconds = args.duration * 60
     logger.info(f"Requested training duration: {args.duration} mins ({training_duration_seconds} s).")
-    # training_duration_seconds = 180 # e.g., 3 minutes. Adjust as needed. - Replaced by argparse
-
-    # log_dir = "./ppo_fanuc_logs/" # Defined earlier
-    # save_path = os.path.join(log_dir, "ppo_fanuc_model") # Defined earlier
     os.makedirs(LOG_DIR, exist_ok=True)
-    # Checkpoint saving frequency (can still be separate from tuning params)
     save_freq = 50_000
 
-    # --- Hyperparameters ---
-    # Determine the number of CPUs available
+    # --- Determine Number of CPUs --- 
+    # This needs to be inside __main__ to correctly use multiprocessing
     cpu_count = multiprocessing.cpu_count()
-    # Use all available CPUs instead of leaving one free
-    num_cpu = cpu_count # Number of parallel environments
-    # num_cpu = max(1, cpu_count - 1) # Previous setting: leave one free
-    # num_cpu = 4 # Or set manually
+    num_cpu = cpu_count # Use all available cores
+    logger.info(f"Using {num_cpu} parallel environments.")
 
-    # --- Environment Setup ---
-    logger.info(f"Using {num_cpu} parallel environments.") # Use logger
-
-    # Extract angle_bonus_factor from params, using a default if not found
-    # Default value should ideally match the FanucEnv default (5.0)
+    # --- Environment Setup --- 
     loaded_angle_bonus = current_params.get("angle_bonus_factor", 5.0)
     logger.info(f"Using angle_bonus_factor: {loaded_angle_bonus}")
-
-    # Create the vectorized environment using SubprocVecEnv for true parallelism
-    # If SubprocVecEnv causes issues (e.g., on Windows without proper freezing),
-    # fallback to DummyVecEnv (runs environments sequentially in one process).
     vec_env_cls: Union[Type[SubprocVecEnv], Type[DummyVecEnv]] = SubprocVecEnv if num_cpu > 1 else DummyVecEnv
-    # Use make_vec_env for simplicity when render_mode is the same for all
-    # Pass the loaded angle bonus factor to the environment constructor
     train_env = make_vec_env(
         lambda: FanucEnv(render_mode=None, angle_bonus_factor=loaded_angle_bonus),
         n_envs=num_cpu,
         vec_env_cls=vec_env_cls
     )
-    logger.info("Vectorized environment created.") # Use logger
+    logger.info("Vectorized environment created.")
 
-    # --- Agent and Training ---
-    # Check if CUDA is available, otherwise use CPU
-    # device = "cuda" if torch.cuda.is_available() else "cpu" # Defined earlier
-    # print(f"Using device: {device}") # Printed earlier
-
-    # Define the PPO model using current_params
-    # Handle potential policy_kwargs from loaded params
+    # --- Agent --- 
     policy_kwargs = current_params.get("policy_kwargs", None)
     model = PPO(
         current_params.get("policy", "MlpPolicy"),
@@ -266,21 +231,16 @@ if __name__ == "__main__":
         policy_kwargs=policy_kwargs # Pass loaded policy_kwargs
     )
 
-    # --- Callbacks ---
-    # Save a checkpoint periodically in the main log dir
+    # --- Callbacks --- 
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(save_freq // num_cpu, 1), # Adjust freq based on num envs
-        save_path=LOG_DIR, # Use updated LOG_DIR path
+        save_freq=max(save_freq // num_cpu, 1),
+        save_path=LOG_DIR,
         name_prefix="rl_model"
     )
-
-    # Add the time limit callback using duration in seconds
     time_limit_callback = TimeLimitCallback(max_duration_seconds=training_duration_seconds, verbose=1)
+    monitor_callback = TrainingMonitorCallback(check_freq=num_cpu * 100)
 
-    # Add the new monitoring callback
-    monitor_callback = TrainingMonitorCallback(check_freq=num_cpu * 100) # Check approx every 100 steps per env
-
-    # --- Train the agent ---
+    # --- Train the agent --- 
     # Update print statement to reflect duration
     logger.info(f"Starting PPO training for {args.duration} minutes ({training_duration_seconds} seconds)...")
     start_time = time.time() # Keep this for final duration calculation
@@ -303,4 +263,4 @@ if __name__ == "__main__":
         logger.info(f"Total training time: {(end_time - start_time)/60:.2f} minutes") # Use logger
     # --- End of Training Block ---
     
-    logger.info("Training script finished.") # Updated final message 
+    logger.info("Training script finished.") 

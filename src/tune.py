@@ -28,8 +28,10 @@ from optuna.exceptions import TrialPruned # type: ignore
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, sync_envs_normalization
 from stable_baselines3.common.evaluation import evaluate_policy
+# Import BaseCallback for the trial callback
+from stable_baselines3.common.callbacks import BaseCallback
 
 # Import the custom environment using relative import
 from .fanuc_env import FanucEnv
@@ -37,7 +39,10 @@ from .fanuc_env import FanucEnv
 # --- Optuna Tuning Configuration ---
 # Keep timestep/eval config, remove iteration/convergence config
 TUNE_TIMESTEPS = 2_000_000  # Timesteps per Optuna trial (Increased significantly)
-NUM_EVAL_EPISODES = 20  # Number of episodes for evaluation after each trial
+# Increase evaluation episodes for better stability
+NUM_EVAL_EPISODES = 30  # Number of episodes for evaluation after each trial
+# Define evaluation frequency for the callback
+EVAL_FREQ = 50_000 # Evaluate every 50k steps within a trial
 # N_OPTUNA_TRIALS = 50 # Defined via command-line argument now
 
 # Define paths relative to the project root (one level up from src/)
@@ -48,18 +53,30 @@ BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json") # Adjusted pat
 # Default policy if not specified in Optuna trial
 DEFAULT_POLICY = "MlpPolicy"
 
+# --- Default Storage Path ---
+# Define default DB name and ensure the directory exists
+DEFAULT_OPTUNA_DB_NAME = "default_fanuc_study.db"
+DEFAULT_STORAGE_URL = f"sqlite:///{os.path.join(OPTUNA_LOG_DIR, DEFAULT_OPTUNA_DB_NAME)}"
+# Ensure the directory for the default database exists early
+try:
+    os.makedirs(OPTUNA_LOG_DIR, exist_ok=True)
+except OSError as e:
+    logger.error(f"Could not create Optuna study directory {OPTUNA_LOG_DIR}: {e}")
+    # Depending on severity, could exit here
+
 # --- Function to Run a Single Experiment (modified for Optuna) ---
-def run_experiment(params: Dict[str, Any], trial_number: int, seed: int | None = None) -> float:
+def run_experiment(trial: optuna.Trial, params: Dict[str, Any], trial_number: int, seed: int | None = None) -> float:
     """Runs a single training and evaluation experiment for an Optuna trial.
 
     Args:
+        trial: The Optuna trial object for reporting intermediate results.
         params: Dictionary of hyperparameters suggested by Optuna.
         trial_number: The Optuna trial number for logging.
         seed: Optional random seed for reproducibility.
 
     Returns:
-        The mean reward achieved during evaluation.
-        Raises TrialPruned if the trial fails or should be stopped early.
+        The mean reward achieved during the *final* evaluation.
+        Raises TrialPruned if the trial fails or should be stopped early by Optuna.
     """
     run_name = f"trial_{trial_number}"
     # Use logger for trial info
@@ -68,7 +85,10 @@ def run_experiment(params: Dict[str, Any], trial_number: int, seed: int | None =
 
     train_env = None
     eval_env = None
-    mean_reward = -float('inf') # Default reward if run fails
+    # Default values in case of early failure before first evaluation
+    mean_reward = -float('inf')
+    std_reward = float('inf')
+    training_time = 0.0
 
     # Determine number of CPUs (can be moved outside if constant)
     cpu_count = multiprocessing.cpu_count()
@@ -122,28 +142,90 @@ def run_experiment(params: Dict[str, Any], trial_number: int, seed: int | None =
             seed=seed
         )
 
-        # Use logger for info
+        # --- Callback for Intermediate Evaluation and Pruning ---
+        class TrialCallback(BaseCallback):
+            def __init__(self, eval_env: FanucEnv, optuna_trial: optuna.Trial, eval_freq: int, n_eval_episodes: int, verbose: int = 0):
+                super().__init__(verbose)
+                self.eval_env = eval_env
+                self.trial = optuna_trial
+                self.eval_freq = eval_freq
+                self.n_eval_episodes = n_eval_episodes
+                self.eval_count = 0
+
+            def _on_step(self) -> bool:
+                if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+                    self.eval_count += 1
+                    step_num = self.num_timesteps # Current total steps
+                    try:
+                        # Check if envs need syncing (only if they are VecNormalize instances)
+                        # This requires checking the wrapped env, might be complex. Assuming VecNormalize is NOT used for now.
+                        # If VecNormalize is used, uncomment the line below and handle potential attribute errors.
+                        # sync_envs_normalization(self.training_env, self.eval_env)
+                        pass
+                    except AttributeError:
+                        logging.warning("Skipping sync_envs_normalization: Environments might not be VecNormalize wrappers.")
+
+                    # Use logger for info
+                    logging.info(f"  Trial {self.trial.number}, Step {step_num}: Running intermediate evaluation...")
+                    # Cast results explicitly to float to satisfy linter
+                    _mean_reward, _std_reward = evaluate_policy(self.model, self.eval_env,
+                                                              n_eval_episodes=self.n_eval_episodes,
+                                                              deterministic=True)
+                    mean_reward = float(_mean_reward)
+                    std_reward = float(_std_reward)
+
+                    # Use logger for info
+                    logging.info(f"  Intermediate Eval Results: Mean Reward = {mean_reward:.2f} +/- {std_reward:.2f}")
+
+                    # Report the intermediate result to Optuna
+                    self.trial.report(mean_reward, step=step_num) # Should now be float
+
+                    # Prune trial if needed
+                    if self.trial.should_prune():
+                        # Use logger for info
+                        logging.info(f"  Pruning trial {self.trial.number} at step {step_num} based on intermediate result.")
+                        raise TrialPruned(f"Pruned at step {step_num}")
+                return True
+
+        # --- Callback Instantiation ---
+        # Pass the trial object to the callback
+        trial_callback = TrialCallback(eval_env, trial, EVAL_FREQ, NUM_EVAL_EPISODES)
+
+        # --- Training --- 
         logging.info(f"Training for {TUNE_TIMESTEPS} timesteps...")
         start_time = time.time()
         model.learn(
             total_timesteps=TUNE_TIMESTEPS,
-            log_interval=1000 # Log even less frequently
+            log_interval=1000,
+            callback=trial_callback # Use the trial callback
         )
         training_time = time.time() - start_time
-        # Use logger for info
         logging.info(f"Training completed in {training_time:.2f} seconds.")
 
-        # --- Evaluation ---
-        # Use logger for info
-        logging.info(f"Evaluating model over {NUM_EVAL_EPISODES} episodes...")
-        mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=NUM_EVAL_EPISODES, deterministic=True) # type: ignore
-        # Use logger for info
-        logging.info(f"Evaluation results: Mean Reward = {mean_reward:.2f} +/- {std_reward:.2f}")
+        # --- Final Evaluation (still useful for final stable numbers) ---
+        logging.info(f"Evaluating final model over {NUM_EVAL_EPISODES} episodes...")
+        try:
+            # Check if envs need syncing (only if they are VecNormalize instances)
+            # sync_envs_normalization(train_env, eval_env)
+            pass
+        except AttributeError:
+            logging.warning("Skipping sync_envs_normalization for final eval: Environments might not be VecNormalize wrappers.")
 
-        # Optional: Save the model from this run
-        # model_save_path = os.path.join(trial_log_dir, "tuned_model.zip")
-        # model.save(model_save_path)
+        # Cast results explicitly to float
+        _mean_reward, _std_reward = evaluate_policy(model, eval_env, n_eval_episodes=NUM_EVAL_EPISODES, deterministic=True)
+        mean_reward = float(_mean_reward)
+        std_reward = float(_std_reward)
 
+        logging.info(f"Final Evaluation results: Mean Reward = {mean_reward:.2f} +/- {std_reward:.2f}")
+
+        # --- Store results in user attributes --- 
+        trial.set_user_attr("mean_reward", mean_reward)
+        trial.set_user_attr("std_reward", std_reward)
+        trial.set_user_attr("duration_seconds", training_time)
+
+    except TrialPruned as e:
+         logging.info(f"Trial {trial_number} pruned: {e}")
+         raise # Re-raise to let Optuna handle it
     except Exception as e:
         # Use logger for error and traceback
         logging.error(f"Error during Optuna trial {trial_number} ({run_name}): {e}")
@@ -169,7 +251,7 @@ def run_experiment(params: Dict[str, Any], trial_number: int, seed: int | None =
         # Use logger for info
         logging.info(f"--- Finished Optuna {run_name} ---")
 
-    # Return the metric Optuna should optimize (higher is better)
+    # Return the final mean reward for Optuna to optimize
     return mean_reward
 
 # --- Optuna Objective Function ---
@@ -222,10 +304,10 @@ def objective(trial: optuna.Trial, seed: int | None = None) -> float:
     else: # "large"
         params["policy_kwargs"] = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
-    # Run the experiment with the suggested parameters and seed
-    mean_reward = run_experiment(params, trial.number, seed=seed)
+    # Run the experiment, passing the trial object
+    mean_reward = run_experiment(trial, params, trial.number, seed=seed)
 
-    # Optional: Report intermediate results for pruning (if using a pruner)
+    # Reporting is now handled inside run_experiment by the callback
     # trial.report(mean_reward, step=TUNE_TIMESTEPS)
     # if trial.should_prune():
     #     raise optuna.exceptions.TrialPruned()
@@ -234,35 +316,34 @@ def objective(trial: optuna.Trial, seed: int | None = None) -> float:
 
 
 if __name__ == "__main__":
-    # --- Adjust sys.path if run directly (less ideal now) ---
-    if '' not in sys.path:
-         sys.path.insert(0, os.path.dirname(__file__))
-    # Re-define paths needed for direct execution context
-    PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-    OPTUNA_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "optuna_study")
-    BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json")
-    logger.info(f"Executing {__file__} directly. Paths adjusted.")
+    # --- REMOVE sys.path adjustment and path redefinitions ---
+    # Paths are defined globally now and should work when run via `python -m src.tune`
+    # if '' not in sys.path:
+    #      sys.path.insert(0, os.path.dirname(__file__))
+    # PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
+    # OPTUNA_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "optuna_study")
+    # BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json")
+    # logger.info(f"Executing {__file__} directly. Paths adjusted.")
 
     parser = argparse.ArgumentParser(description="Run PPO hyperparameter tuning using Optuna for Fanuc Env.")
     parser.add_argument("-d", "--duration", type=int, default=12, # Default in minutes
                         help="Maximum tuning duration in minutes (default: 12).")
-    parser.add_argument("--study_name", type=str, default="ppo_fanuc_tuning", help="Name for the Optuna study.")
-    # Add argument for storage URL (e.g., SQLite database)
-    parser.add_argument("--storage", type=str, default=None, help="Optuna storage URL (e.g., 'sqlite:///optuna_study.db'). If None, uses in-memory storage.")
+    parser.add_argument("--study_name", type=str, default="ppo_fanuc_default_study", help="Name for the Optuna study.")
+    # Update storage argument to have the default URL
+    parser.add_argument("--storage", type=str, default=DEFAULT_STORAGE_URL,
+                        help=f"Optuna storage URL. Defaults to {DEFAULT_STORAGE_URL}")
     # Add argument for seed
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible tuning trials (default: 42).")
     args = parser.parse_args()
 
-    # Create Optuna log directory if it doesn't exist (path updated)
-    os.makedirs(OPTUNA_LOG_DIR, exist_ok=True)
-
     # Use logger for info
     logger.info(f"Starting Optuna study '{args.study_name}' for a maximum duration of {args.duration} minutes.")
-    logger.info(f"Using storage: {'In-memory' if args.storage is None else args.storage}")
+    # Storage is now handled by args.storage default
+    logger.info(f"Using storage: {args.storage}")
     logger.info(f"Each trial trains for {TUNE_TIMESTEPS} timesteps and evaluates over {NUM_EVAL_EPISODES} episodes.")
 
-    # --- Create or Load Optuna Study ---
-    # Using storage allows resuming studies
+    # --- Setup Study --- 
+    # Uses args.storage which now has a default value
     study = optuna.create_study(
         study_name=args.study_name,
         storage=args.storage,
@@ -274,16 +355,15 @@ if __name__ == "__main__":
         )
     )
 
-    # --- Run Optuna Optimisation ---
+    # --- Run Optimisation --- 
+    tuning_duration_seconds = args.duration * 60
+    logger.info(f"Starting Optuna tuning for {args.duration} minutes ({tuning_duration_seconds} seconds)...")
     try:
-        # Convert duration from minutes to seconds for timeout
-        timeout_seconds = args.duration * 60
-        logger.info(f"Setting Optuna timeout to {timeout_seconds} seconds ({args.duration} minutes).")
         study.optimize(
             # Pass the seed from args to the objective function using lambda
             lambda trial: objective(trial, seed=args.seed),
             n_trials=None, # Run indefinitely until timeout
-            timeout=timeout_seconds # Use timeout in seconds
+            timeout=tuning_duration_seconds # Use timeout in seconds
             # n_jobs=1 # Parallel trials can be tricky with PyBullet/multiprocessing envs
         )
     except KeyboardInterrupt:
@@ -294,7 +374,7 @@ if __name__ == "__main__":
         logger.error(f"An error occurred during the Optuna study: {e}")
         logger.error(traceback.format_exc())
 
-    # --- Post-Study Summary ---
+    # --- Post-Study Summary --- 
     # Use logger for info
     logger.info("=============== Optuna Study Summary ===============")
     logger.info(f"Study Name: {study.study_name}")
@@ -353,5 +433,4 @@ if __name__ == "__main__":
         # Use logger for warning
         logger.warning("No trials completed successfully in the study. Cannot determine best parameters.")
 
-    # Use logger for info
     logger.info("Optuna tuning script finished.") 

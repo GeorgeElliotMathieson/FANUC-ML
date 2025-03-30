@@ -90,20 +90,17 @@ class FanucEnv(gym.Env):
         self.min_target_radius = self.min_base_radius * self.min_target_radius_multiplier
         logger.info(f"Calculated Min Target Radius: {self.min_target_radius:.4f} (Base: {self.min_base_radius:.4f} * {self.min_target_radius_multiplier}) ")
 
-        # --- Curriculum Learning Parameters (Continuous Scaling) ---
-        # Remove discrete stage parameters
-        # self.num_curriculum_stages = 3
-        # self.current_curriculum_stage = 0
-        # self.success_streak_threshold = 3
-        # self.consecutive_successes = 0
+        # --- Curriculum Learning Parameters (Decreasing Minimum Radius) ---
+        self.fixed_max_target_radius = self.max_target_radius # Max radius remains constant
+        self.final_min_target_radius = self.min_target_radius # Store the ultimate goal minimum radius
+        # Start with the minimum target radius equal to the maximum, forcing outer sampling initially
+        self.initial_min_target_radius = self.fixed_max_target_radius
+        self.current_min_target_radius = self.initial_min_target_radius # Current operational minimum radius
 
-        # New parameters for continuous scaling
-        self.final_max_target_radius = self.max_target_radius # Store the ultimate goal radius
-        self.initial_max_target_radius = self.final_max_target_radius * 0.4 # Start smaller (e.g., 40%)
-        self.current_max_target_radius = self.initial_max_target_radius # Current operational radius
+        # Parameters for update logic
         self.success_rate_window_size = 20 # Check success rate over this many episodes
-        self.success_rate_threshold = 0.75 # Increase difficulty if success rate exceeds this
-        self.radius_increase_step = 0.05 # How much to increase radius by (in meters)
+        self.success_rate_threshold = 0.75 # Decrease difficulty (min radius) if success rate exceeds this
+        self.radius_decrease_step = 0.05 # How much to decrease min_radius by (in meters)
         self.episode_results = collections.deque(maxlen=self.success_rate_window_size)
 
         # Base rotation reward shaping
@@ -250,7 +247,8 @@ class FanucEnv(gym.Env):
             f"  - End Effector Link Index: {self.end_effector_link_index}\n"
             f"  - Action Space Shape: {self.action_space.shape}\n"
             f"  - Observation Space Shape: {self.observation_space.shape}\n"
-            f"  - Continuous Curriculum: Initial Radius={self.initial_max_target_radius:.3f}, Final Radius={self.final_max_target_radius:.3f}, Window={self.success_rate_window_size}, Threshold={self.success_rate_threshold:.2f}, Step={self.radius_increase_step}\n"
+            # Update curriculum log message
+            f"  - Curriculum (Dec Min Radius): Fixed MaxR={self.fixed_max_target_radius:.3f}, Target MinR={self.final_min_target_radius:.3f}, Initial MinR={self.initial_min_target_radius:.3f}, Window={self.success_rate_window_size}, Threshold={self.success_rate_threshold:.2f}, Step={self.radius_decrease_step}\n"
             f"  - Angle Bonus Factor: {self.angle_bonus_factor}\n"
             f"  - Start with Obstacles: {self.start_with_obstacles}"
         )
@@ -305,7 +303,7 @@ class FanucEnv(gym.Env):
             "target_position": self.target_position.copy(),
             "collision": False,
             "success": False,
-            "current_max_target_radius": self.current_max_target_radius, # Add current radius for info
+            "current_min_target_radius": self.current_min_target_radius, # Use updated key name
             "obstacle_collision": False # Add flag for obstacle collision
         }
 
@@ -313,20 +311,22 @@ class FanucEnv(gym.Env):
         # Determine radius range based on continuous curriculum OR forced outer edge
         if self.force_outer_radius:
             # Force sampling near the maximum possible radius (80-100%)
-            min_radius = self.final_max_target_radius * 0.80
-            max_radius = self.final_max_target_radius
-            # Ensure min is not greater than max (could happen if final_max_target_radius is very small, unlikely)
+            min_radius = self.fixed_max_target_radius * 0.80 # Use fixed max
+            max_radius = self.fixed_max_target_radius # Use fixed max
             min_radius = min(min_radius, max_radius - 1e-6)
             logger.info("[Test Mode] Forcing target generation to outer edge.")
         else:
             # Normal curriculum-based sampling
-            min_radius = self.min_target_radius # Use the calculated, larger minimum target radius
-            max_radius = self.current_max_target_radius # Use the current scaling radius
+            min_radius = self.current_min_target_radius # Use the CURRENT minimum radius
+            max_radius = self.fixed_max_target_radius # Use the FIXED maximum radius
 
-        # Ensure min_radius is not less than the absolute minimum (should be handled by check_workspace)
-        # min_radius = max(min_radius, self.min_base_radius)
-        # Ensure max_radius is not less than min_radius (can happen if current radius is small)
-        max_radius = max(max_radius, min_radius + 1e-6) # Add epsilon for safety
+        # Ensure max_radius is not less than min_radius (can happen if current min is very large)
+        max_radius = max(max_radius, min_radius + 1e-6)
+
+        # Ensure min_radius respects the absolute minimum calculated (final_min_target_radius)
+        min_radius = max(min_radius, self.final_min_target_radius)
+        # Ensure min_radius does not exceed max_radius after clamping
+        min_radius = min(min_radius, max_radius - 1e-6)
 
         # Generate a random target position within the calculated radius range
         radius = min_radius + np.random.rand() * (max_radius - min_radius)
@@ -346,8 +346,8 @@ class FanucEnv(gym.Env):
 
         # --- Detailed Debug Print for Visual Test --- 
         if self.render_mode == 'human':
-            # Update debug print to show current max radius
-            print(f"[Env Debug] CurrentMaxR={self.current_max_target_radius:.3f}, "
+            # Update debug print to show current min radius
+            print(f"[Env Debug] CurrentMinR={self.current_min_target_radius:.3f}, "
                   f"Bounds=[{min_radius:.3f}-{max_radius:.3f}], "
                   f"Sampled R={radius:.3f}, Phi={phi:.3f}, Theta={theta:.3f}, "
                   f"Target=[{x:.3f}, {y:.3f}, {z:.3f}]")
@@ -369,7 +369,7 @@ class FanucEnv(gym.Env):
             for attempt in range(max_placement_attempts):
                 # Generate random position within a reasonable area
                 # Use the actual max_target_radius (already includes 90% factor)
-                placement_radius_limit = self.max_target_radius
+                placement_radius_limit = self.fixed_max_target_radius
                 radius = self.obstacle_safe_dist_from_base + np.random.rand() * (placement_radius_limit - self.obstacle_safe_dist_from_base)
                 theta = np.random.rand() * 2 * math.pi
                 # Place obstacles mostly on the plane or slightly above
@@ -427,8 +427,8 @@ class FanucEnv(gym.Env):
         super().reset(seed=seed)
         self._step_counter = 0
 
-        # Curriculum stage always starts from initial radius on reset (unless loaded state)
-        self.current_max_target_radius = self.initial_max_target_radius
+        # Reset the MINIMUM target radius to its initial value (which is the fixed max radius)
+        self.current_min_target_radius = self.initial_min_target_radius
         # Clear recent results on reset
         self.episode_results.clear()
 
@@ -439,7 +439,8 @@ class FanucEnv(gym.Env):
             p.setJointMotorControl2(self.robot_id, joint_index, p.VELOCITY_CONTROL, force=0)
 
 
-        # Generate a new target using the potentially updated curriculum stage
+        # Generate a new target using the potentially updated curriculum state
+        # (uses current_min_target_radius and fixed_max_target_radius)
         self.target_position = self._get_random_target_pos()
 
         # --- Reset Base Angle Error Tracking --- 
@@ -481,7 +482,7 @@ class FanucEnv(gym.Env):
 
 
         observation = self._get_obs()
-        info = self._get_info() # Info now includes curriculum state
+        info = self._get_info() # Info now includes current_min_target_radius
 
         # print(f"Resetting Env. New Target: {self.target_position}") # Debug
 
@@ -555,26 +556,28 @@ class FanucEnv(gym.Env):
         # Initialise truncated here first to satisfy linter, will be properly set below
         truncated = False
 
-        # --- Continuous Curriculum Update ---
+        # --- Continuous Curriculum Update --- 
         # Store result of the episode (success or failure) when episode ends
-        # Moved this block AFTER truncated is defined (or at least initialised)
-        if terminated or truncated: # noqa: F821 - Silences 'undefined name truncated' if linter is confused
+        # Only update curriculum state when an episode actually finishes
+        if terminated or truncated:
              self.episode_results.append(success)
              # Check if we have enough data and if success rate is high enough
              if len(self.episode_results) == self.success_rate_window_size:
                  success_rate = sum(self.episode_results) / self.success_rate_window_size
+                 # Check if success rate is high and min radius is not already at its final minimum value
                  if success_rate >= self.success_rate_threshold and \
-                    self.current_max_target_radius < self.final_max_target_radius:
+                    self.current_min_target_radius > self.final_min_target_radius:
                       
-                      old_radius = self.current_max_target_radius
-                      self.current_max_target_radius = min(
-                          self.current_max_target_radius + self.radius_increase_step,
-                          self.final_max_target_radius
+                      old_radius = self.current_min_target_radius
+                      # Decrease the minimum radius, ensuring it doesn't go below the final target
+                      self.current_min_target_radius = max(
+                          self.current_min_target_radius - self.radius_decrease_step,
+                          self.final_min_target_radius
                       )
-                      logger.info(f"Curriculum Update: Success rate {success_rate:.2f} >= {self.success_rate_threshold:.2f}. Increasing max target radius from {old_radius:.3f} to {self.current_max_target_radius:.3f}.")
+                      logger.info(f"Curriculum Update: Success rate {success_rate:.2f} >= {self.success_rate_threshold:.2f}. Decreasing min target radius from {old_radius:.3f} to {self.current_min_target_radius:.3f}.")
                       # Clear the deque to require a new window of success
                       self.episode_results.clear()
-                 # else: Log if needed: print(f"Success rate {success_rate:.2f} < {self.success_rate_threshold:.2f}, not increasing radius.")
+                 # else: Log if needed: print(f"Success rate {success_rate:.2f} < {self.success_rate_threshold:.2f}, not decreasing radius.")
 
         # --- Actual Truncation Check ---
         # Reset truncated to False before checking step count
@@ -668,16 +671,15 @@ class FanucEnv(gym.Env):
 
 # Example usage (optional, for testing the environment)
 if __name__ == '__main__':
-    # Example of running the environment directly (now needs careful path handling if run this way)
-    # Adjust path temporarily if running src/fanuc_env.py directly
-    import sys
-    if '' not in sys.path: # Ensure script's dir is in path for relative imports if needed
-         sys.path.insert(0, os.path.dirname(__file__))
+    # --- REMOVE sys.path adjustment and path redefinitions ---
+    # Paths are defined globally now and should work when run via `python -m src.fanuc_env`
+    # import sys
+    # if '' not in sys.path:
+    #      sys.path.insert(0, os.path.dirname(__file__))
+    # WORKSPACE_CONFIG_FILENAME = os.path.join(os.path.dirname(__file__), '..', "workspace_config.json")
+    # logger.info(f"Executing {__file__} directly. WORKSPACE_CONFIG_FILENAME set to: {WORKSPACE_CONFIG_FILENAME}")
 
-    # Re-define WORKSPACE_CONFIG_FILENAME for standalone execution context
-    WORKSPACE_CONFIG_FILENAME = os.path.join(os.path.dirname(__file__), '..', "workspace_config.json")
-    logger.info(f"Executing {__file__} directly. WORKSPACE_CONFIG_FILENAME set to: {WORKSPACE_CONFIG_FILENAME}")
-
+    # Example run uses global WORKSPACE_CONFIG_FILENAME implicitly via constructor
     env = FanucEnv(render_mode='human')
     obs, info = env.reset()
     # Use logger for standalone testing info

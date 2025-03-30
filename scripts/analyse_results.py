@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 import logging
 import collections # Import collections needed for deque if used later
 from tensorboard.backend.event_processing import event_accumulator
-import sys
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -189,10 +188,10 @@ def load_best_params(filepath: str) -> dict | None:
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    # Adjust sys.path to include src directory if run directly
-    SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
-    if SRC_DIR not in sys.path:
-         sys.path.insert(0, SRC_DIR)
+    # REMOVE sys.path adjustment - not needed when run from scripts/
+    # SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
+    # if SRC_DIR not in sys.path:
+    #      sys.path.insert(0, SRC_DIR)
 
     parser = argparse.ArgumentParser(description="Analyse Fanuc RL training results.")
     parser.add_argument("--log_dir", type=str, default=DEFAULT_LOG_DIR,

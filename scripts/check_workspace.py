@@ -184,10 +184,9 @@ def main():
             p.disconnect(physics_client)
 
 if __name__ == "__main__":
-    # Adjust sys.path if run directly to find potential src imports if needed in future
-    # (Not currently needed but good practice)
-    SRC_DIR = os.path.join(os.path.dirname(__file__), '..', 'src')
-    if SRC_DIR not in sys.path:
-         sys.path.insert(0, SRC_DIR)
+    # REMOVE sys.path adjustment - not needed when run from scripts/
+    # SRC_DIR = os.path.join(os.path.dirname(__file__), '..', 'src')
+    # if SRC_DIR not in sys.path:
+    #      sys.path.insert(0, SRC_DIR)
 
     main() 
