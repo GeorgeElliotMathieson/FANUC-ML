@@ -38,11 +38,11 @@ from .fanuc_env import FanucEnv
 
 # --- Optuna Tuning Configuration ---
 # Keep timestep/eval config, remove iteration/convergence config
-TUNE_TIMESTEPS = 2_000_000  # Timesteps per Optuna trial (Increased significantly)
+TUNE_TIMESTEPS = 1_000_000  # Timesteps per Optuna trial (Reduced from 2M)
 # Increase evaluation episodes for better stability
 NUM_EVAL_EPISODES = 30  # Number of episodes for evaluation after each trial
 # Define evaluation frequency for the callback
-EVAL_FREQ = 50_000 # Evaluate every 50k steps within a trial
+EVAL_FREQ = 125_000 # Evaluate every 125k steps within a trial (Increased from 50k)
 # N_OPTUNA_TRIALS = 50 # Defined via command-line argument now
 
 # Define paths relative to the project root (one level up from src/)
