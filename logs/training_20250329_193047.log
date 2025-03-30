@@ -1,0 +1,43 @@
+2025-03-29 19:30:47,417 - PPO_Fanuc - INFO - Starting PPO training for Fanuc robotic arm
+2025-03-29 19:30:47,418 - PPO_Fanuc - INFO - Using device: cpu
+2025-03-29 19:30:47,420 - PPO_Fanuc - INFO - Loading config from ppo_fanuc/config.yaml
+2025-03-29 19:30:47,422 - PPO_Fanuc - INFO - Training configuration:
+2025-03-29 19:30:47,422 - PPO_Fanuc - INFO -   total_steps: 1000000
+2025-03-29 19:30:47,422 - PPO_Fanuc - INFO -   steps_per_epoch: 2048
+2025-03-29 19:30:47,422 - PPO_Fanuc - INFO -   batch_size: 64
+2025-03-29 19:30:47,422 - PPO_Fanuc - INFO -   hidden_dim: 256
+2025-03-29 19:30:47,423 - PPO_Fanuc - INFO -   lr: 0.0003
+2025-03-29 19:30:47,423 - PPO_Fanuc - INFO -   gamma: 0.99
+2025-03-29 19:30:47,423 - PPO_Fanuc - INFO -   gae_lambda: 0.95
+2025-03-29 19:30:47,423 - PPO_Fanuc - INFO -   clip_ratio: 0.2
+2025-03-29 19:30:47,423 - PPO_Fanuc - INFO -   value_coef: 0.5
+2025-03-29 19:30:47,423 - PPO_Fanuc - INFO -   entropy_coef: 0.01
+2025-03-29 19:30:47,424 - PPO_Fanuc - INFO -   max_grad_norm: 0.5
+2025-03-29 19:30:47,424 - PPO_Fanuc - INFO -   update_epochs: 10
+2025-03-29 19:30:47,424 - PPO_Fanuc - INFO -   save_interval: 10
+2025-03-29 19:30:47,424 - PPO_Fanuc - INFO -   eval_interval: 5
+2025-03-29 19:30:47,424 - PPO_Fanuc - INFO -   render: False
+2025-03-29 19:30:47,424 - PPO_Fanuc - INFO -   seed: 42
+2025-03-29 19:30:47,425 - PPO_Fanuc - INFO -   load_model: 
+2025-03-29 19:30:47,425 - PPO_Fanuc - INFO -   config: ppo_fanuc/config.yaml
+2025-03-29 19:30:47,425 - PPO_Fanuc - INFO -   target_radius: 0.02
+2025-03-29 19:30:47,425 - PPO_Fanuc - INFO -   max_steps: 100
+2025-03-29 19:30:47,427 - PPO_Fanuc - INFO - Random seed set to 42
+2025-03-29 19:30:47,427 - PPO_Fanuc - INFO - Starting training...
+2025-03-29 19:30:47,994 - PPO_Fanuc - ERROR - Training failed with error: 'NoneType' object is not subscriptable
+Traceback (most recent call last):
+  File "C:\Users\14gma\Documents\University\Year 3\Final Year Project\FANUC-ML\ppo_fanuc\run_training.py", line 78, in main
+    agent = train(cli_args)
+            ^^^^^^^^^^^^^^^
+  File "C:\Users\14gma\Documents\University\Year 3\Final Year Project\FANUC-ML\ppo_fanuc\train.py", line 116, in train
+    env = FanucReachEnv(render_mode=render_mode)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\14gma\Documents\University\Year 3\Final Year Project\FANUC-ML\ppo_fanuc\environment.py", line 90, in __init__
+    self.reset()
+  File "C:\Users\14gma\Documents\University\Year 3\Final Year Project\FANUC-ML\ppo_fanuc\environment.py", line 312, in reset
+    ee_position = self.get_end_effector_position()
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\14gma\Documents\University\Year 3\Final Year Project\FANUC-ML\ppo_fanuc\environment.py", line 260, in get_end_effector_position
+    return np.array(state[0])  # Position only
+                    ~~~~~^^^
+TypeError: 'NoneType' object is not subscriptable

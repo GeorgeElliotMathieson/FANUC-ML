@@ -1,0 +1,44 @@
+2025-03-29 19:35:13,486 - PPO_Fanuc - INFO - Starting PPO training for Fanuc robotic arm
+2025-03-29 19:35:13,486 - PPO_Fanuc - INFO - Using device: cpu
+2025-03-29 19:35:13,488 - PPO_Fanuc - INFO - Loading config from ppo_fanuc/config.yaml
+2025-03-29 19:35:13,490 - PPO_Fanuc - INFO - Training configuration:
+2025-03-29 19:35:13,490 - PPO_Fanuc - INFO -   total_steps: 1000000
+2025-03-29 19:35:13,490 - PPO_Fanuc - INFO -   steps_per_epoch: 2048
+2025-03-29 19:35:13,490 - PPO_Fanuc - INFO -   batch_size: 64
+2025-03-29 19:35:13,490 - PPO_Fanuc - INFO -   hidden_dim: 256
+2025-03-29 19:35:13,491 - PPO_Fanuc - INFO -   lr: 0.0003
+2025-03-29 19:35:13,491 - PPO_Fanuc - INFO -   gamma: 0.99
+2025-03-29 19:35:13,491 - PPO_Fanuc - INFO -   gae_lambda: 0.95
+2025-03-29 19:35:13,492 - PPO_Fanuc - INFO -   clip_ratio: 0.2
+2025-03-29 19:35:13,492 - PPO_Fanuc - INFO -   value_coef: 0.5
+2025-03-29 19:35:13,492 - PPO_Fanuc - INFO -   entropy_coef: 0.01
+2025-03-29 19:35:13,492 - PPO_Fanuc - INFO -   max_grad_norm: 0.5
+2025-03-29 19:35:13,492 - PPO_Fanuc - INFO -   update_epochs: 10
+2025-03-29 19:35:13,492 - PPO_Fanuc - INFO -   save_interval: 10
+2025-03-29 19:35:13,492 - PPO_Fanuc - INFO -   eval_interval: 5
+2025-03-29 19:35:13,492 - PPO_Fanuc - INFO -   render: False
+2025-03-29 19:35:13,493 - PPO_Fanuc - INFO -   seed: 42
+2025-03-29 19:35:13,493 - PPO_Fanuc - INFO -   load_model: 
+2025-03-29 19:35:13,493 - PPO_Fanuc - INFO -   config: ppo_fanuc/config.yaml
+2025-03-29 19:35:13,493 - PPO_Fanuc - INFO -   target_radius: 0.02
+2025-03-29 19:35:13,493 - PPO_Fanuc - INFO -   max_steps: 100
+2025-03-29 19:35:13,495 - PPO_Fanuc - INFO - Random seed set to 42
+2025-03-29 19:35:13,495 - PPO_Fanuc - INFO - Starting training...
+2025-03-29 19:35:18,083 - PPO_Fanuc - ERROR - Training failed with error: Trying to backward through the graph a second time (or directly access saved tensors after they have already been freed). Saved intermediate values of the graph are freed when you call .backward() or autograd.grad(). Specify retain_graph=True if you need to backward through the graph a second time or if you need to access saved tensors after calling backward.
+Traceback (most recent call last):
+  File "C:\Users\14gma\Documents\University\Year 3\Final Year Project\FANUC-ML\ppo_fanuc\run_training.py", line 78, in main
+    agent = train(cli_args)
+            ^^^^^^^^^^^^^^^
+  File "C:\Users\14gma\Documents\University\Year 3\Final Year Project\FANUC-ML\ppo_fanuc\train.py", line 245, in train
+    update_metrics = agent.update()
+                     ^^^^^^^^^^^^^^
+  File "C:\Users\14gma\Documents\University\Year 3\Final Year Project\FANUC-ML\ppo_fanuc\ppo_agent.py", line 278, in update
+    total_loss.backward()
+  File "C:\Users\14gma\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\torch\_tensor.py", line 521, in backward
+    torch.autograd.backward(
+  File "C:\Users\14gma\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\torch\autograd\__init__.py", line 289, in backward
+    _engine_run_backward(
+  File "C:\Users\14gma\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\torch\autograd\graph.py", line 769, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Trying to backward through the graph a second time (or directly access saved tensors after they have already been freed). Saved intermediate values of the graph are freed when you call .backward() or autograd.grad(). Specify retain_graph=True if you need to backward through the graph a second time or if you need to access saved tensors after calling backward.

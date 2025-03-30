@@ -1,0 +1,26 @@
+2025-03-29 19:41:00,228 - PPO_Fanuc - INFO - Starting PPO training for Fanuc robotic arm
+2025-03-29 19:41:00,228 - PPO_Fanuc - INFO - Using device: cpu
+2025-03-29 19:41:00,230 - PPO_Fanuc - INFO - Loading config from ppo_fanuc/config.yaml
+2025-03-29 19:41:00,231 - PPO_Fanuc - INFO - Training configuration:
+2025-03-29 19:41:00,232 - PPO_Fanuc - INFO -   total_steps: 1000000
+2025-03-29 19:41:00,232 - PPO_Fanuc - INFO -   steps_per_epoch: 2048
+2025-03-29 19:41:00,232 - PPO_Fanuc - INFO -   batch_size: 64
+2025-03-29 19:41:00,232 - PPO_Fanuc - INFO -   hidden_dim: 256
+2025-03-29 19:41:00,233 - PPO_Fanuc - INFO -   lr: 0.0003
+2025-03-29 19:41:00,233 - PPO_Fanuc - INFO -   gamma: 0.99
+2025-03-29 19:41:00,233 - PPO_Fanuc - INFO -   gae_lambda: 0.95
+2025-03-29 19:41:00,233 - PPO_Fanuc - INFO -   clip_ratio: 0.2
+2025-03-29 19:41:00,233 - PPO_Fanuc - INFO -   value_coef: 0.5
+2025-03-29 19:41:00,234 - PPO_Fanuc - INFO -   entropy_coef: 0.01
+2025-03-29 19:41:00,234 - PPO_Fanuc - INFO -   max_grad_norm: 0.5
+2025-03-29 19:41:00,234 - PPO_Fanuc - INFO -   update_epochs: 10
+2025-03-29 19:41:00,234 - PPO_Fanuc - INFO -   save_interval: 10
+2025-03-29 19:41:00,234 - PPO_Fanuc - INFO -   eval_interval: 5
+2025-03-29 19:41:00,234 - PPO_Fanuc - INFO -   render: False
+2025-03-29 19:41:00,234 - PPO_Fanuc - INFO -   seed: 42
+2025-03-29 19:41:00,235 - PPO_Fanuc - INFO -   load_model: 
+2025-03-29 19:41:00,235 - PPO_Fanuc - INFO -   config: ppo_fanuc/config.yaml
+2025-03-29 19:41:00,235 - PPO_Fanuc - INFO -   target_radius: 0.02
+2025-03-29 19:41:00,235 - PPO_Fanuc - INFO -   max_steps: 100
+2025-03-29 19:41:00,237 - PPO_Fanuc - INFO - Random seed set to 42
+2025-03-29 19:41:00,237 - PPO_Fanuc - INFO - Starting training...
