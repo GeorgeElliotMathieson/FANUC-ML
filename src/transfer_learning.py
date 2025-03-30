@@ -19,6 +19,8 @@ DEFAULT_STATE_STD: Optional[np.ndarray] = None  # Defaults to no normalization i
 DEFAULT_ACTION_SCALE: Optional[np.ndarray] = None # Defaults to no scaling if None
 DEFAULT_ACTION_OFFSET: Optional[np.ndarray] = None # Defaults to no offset if None
 DEFAULT_PARAMS_FILE = os.path.join(os.path.dirname(__file__), '..', 'config', 'transfer_params.json')
+# Default velocity limits (fallback if not provided)
+DEFAULT_VELOCITY_LIMITS_RAD_S = np.array([np.pi, np.pi, np.pi, np.pi*2, np.pi*2]) # Match deploy_real.py
 
 class RobotTransfer:
     """
@@ -45,7 +47,8 @@ class RobotTransfer:
                  state_std: np.ndarray | None = DEFAULT_STATE_STD,
                  action_scale: np.ndarray | None = DEFAULT_ACTION_SCALE,
                  action_offset: np.ndarray | None = DEFAULT_ACTION_OFFSET,
-                 params_file: str = DEFAULT_PARAMS_FILE):
+                 params_file: str = DEFAULT_PARAMS_FILE,
+                 velocity_limits: Optional[np.ndarray] = None):
         """
         Initialises the transfer module.
 
@@ -56,6 +59,7 @@ class RobotTransfer:
             action_scale: Optional scaling factor for actions.
             action_offset: Optional offset for actions.
             params_file: Path to the JSON file containing calibration parameters.
+            velocity_limits: Optional array of maximum joint velocities (rad/s) for clipping.
         """
         self.model_path: str = model_path
         self.model: PPO | None = None # Assuming PPO, specify correct type if different
@@ -69,6 +73,14 @@ class RobotTransfer:
         self.action_scale = np.array(action_scale, dtype=np.float32) if action_scale is not None else None
         self.action_offset = np.array(action_offset, dtype=np.float32) if action_offset is not None else None
         self.params_file = params_file
+
+        # Store velocity limits for clipping
+        self.velocity_limits = np.array(velocity_limits, dtype=np.float32) if velocity_limits is not None else DEFAULT_VELOCITY_LIMITS_RAD_S
+        if velocity_limits is None:
+             logger.warning("Velocity limits not provided to RobotTransfer, using default values for clipping.")
+        elif len(self.velocity_limits) != self.action_dim:
+             logger.error(f"Provided velocity_limits dimension ({len(self.velocity_limits)}) != action_dim ({self.action_dim}). Using defaults.")
+             self.velocity_limits = DEFAULT_VELOCITY_LIMITS_RAD_S
 
         self.is_calibrated: bool = False # Flag to track if calibration has been performed
 
@@ -231,6 +243,12 @@ class RobotTransfer:
             logger.warning(f"Insufficient real_states data provided ({len(real_states) if real_states is not None else 'None'} samples). State normalization parameters remain unchanged.")
 
         # --- Action Correction Calibration (Requires Paired Sim/Real Actions) --- 
+        # Ensure scale/offset are initialized as arrays before potential assignment
+        if self.action_scale is None:
+            self.action_scale = np.ones(self.action_dim, dtype=np.float32)
+        if self.action_offset is None:
+            self.action_offset = np.zeros(self.action_dim, dtype=np.float32)
+
         if (sim_actions is not None and real_actions is not None and
             len(sim_actions) > 1 and len(real_actions) == len(sim_actions)): # Need at least 2 points for fit
 
@@ -292,8 +310,21 @@ class RobotTransfer:
         if state is None or state.shape != (self.obs_dim,):
             logger.error(f"Invalid state shape for normalization: expected ({self.obs_dim},), got {state.shape if state is not None else 'None'}.")
             return None
+
+        # Ensure mean/std are initialized
+        if self.state_mean is None:
+            self.state_mean = np.zeros(self.obs_dim, dtype=np.float32)
+            logger.warning("State mean was None in normalize_state, initializing to zeros.")
+        if self.state_std is None:
+            self.state_std = np.ones(self.obs_dim, dtype=np.float32)
+            logger.warning("State std was None in normalize_state, initializing to ones.")
+
         try:
-            # Use stored mean/std. std already has epsilon added in calibrate
+            # Use stored mean/std. std already has epsilon added in load/calibrate
+            # Check again for safety before division
+            if self.state_std is None or self.state_mean is None: # Should not happen after checks above
+                 logger.error("State mean or std is unexpectedly None during normalization.")
+                 return None
             normalized_state = (state - self.state_mean) / self.state_std
             return normalized_state.astype(np.float32)
         except Exception as e:
@@ -306,14 +337,28 @@ class RobotTransfer:
         if action is None or action.shape != (self.action_dim,):
             logger.error(f"Invalid action shape for correction: expected ({self.action_dim},), got {action.shape if action is not None else 'None'}.")
             return None
+
+        # Ensure scale/offset are initialized
+        if self.action_scale is None:
+            self.action_scale = np.ones(self.action_dim, dtype=np.float32)
+            logger.warning("Action scale was None in correct_action, initializing to ones.")
+        if self.action_offset is None:
+            self.action_offset = np.zeros(self.action_dim, dtype=np.float32)
+            logger.warning("Action offset was None in correct_action, initializing to zeros.")
+
         try:
             # Apply scale and offset
             corrected_action = action * self.action_scale + self.action_offset
-            # **TODO:** Consider adding clipping based on real robot joint/velocity limits HERE.
+
+            # --- Clip action based on provided velocity limits --- #
             # This acts as a safety layer before sending to the robot API.
-            # Example (if action represents velocity in rad/s - needs robot limits):
-            # velocity_limits_rad_s = np.array([robot.joint_limits_rad[i][1] for i in range(self.action_dim)]) # Get from API/config
-            # corrected_action = np.clip(corrected_action, -velocity_limits_rad_s, velocity_limits_rad_s)
+            # Assuming the action represents velocity (rad/s) or leads to it.
+            if self.velocity_limits is not None:
+                 corrected_action = np.clip(corrected_action, -self.velocity_limits, self.velocity_limits)
+            else:
+                 # This case should not happen due to init logic, but handle defensively
+                 logger.warning("Velocity limits not available for action clipping.")
+
             return corrected_action.astype(np.float32)
         except Exception as e:
             logger.error(f"Error during action correction: {e}")

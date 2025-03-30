@@ -48,7 +48,8 @@ EVAL_FREQ = 125_000 # Evaluate every 125k steps within a trial (Increased from 5
 # Define paths relative to the project root (one level up from src/)
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 OPTUNA_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "optuna_study") # Adjusted path
-BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json") # Adjusted path
+# Point to the new config directory
+BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
 
 # Default policy if not specified in Optuna trial
 DEFAULT_POLICY = "MlpPolicy"

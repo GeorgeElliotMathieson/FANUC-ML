@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 # --- Constants ---
 # Project root is one level up from the scripts directory
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json")
+# Point to the new config directory
+BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
 # Define the path to the source directory relative to project root
 SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'output')

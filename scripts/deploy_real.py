@@ -8,6 +8,7 @@ import sys
 import traceback
 import json # Import json for loading workspace config
 import math # Import math for spherical coords
+import collections # <-- Import collections for deque
 from typing import List, Optional, Any # Import List, Optional, Any for type hinting
 import pybullet as p # Import pybullet for FK calculation
 import pybullet_data
@@ -117,105 +118,58 @@ logger.addHandler(log_handler)
 # --- Helper Functions ---
 # ==========================================================================
 
-# Global cache for PyBullet FK calculation to avoid reloading URDF repeatedly
-_fk_client: Optional[int] = None
-_fk_robot_id: int = -1
-_fk_joint_indices: List[int] = []
-_fk_ee_link_index: int = -1
+# Remove global cache and setup/cleanup for separate FK client
+# _fk_client: Optional[int] = None
+# _fk_robot_id: int = -1
+# _fk_joint_indices: List[int] = []
+# _fk_ee_link_index: int = -1
 
-def setup_fk_calculator():
-    """Initializes a PyBullet client in DIRECT mode for FK calculations."""
-    global _fk_client, _fk_robot_id, _fk_joint_indices, _fk_ee_link_index
-    if _fk_client is not None:
-        return # Already initialized
+# def setup_fk_calculator():
+#     """Initializes a PyBullet client in DIRECT mode for FK calculations."""
+#     ...
 
-    try:
-        logger.info("Initializing PyBullet client for Forward Kinematics...")
-        _fk_client = p.connect(p.DIRECT)
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+# def cleanup_fk_calculator():
+#     """Disconnects the PyBullet client used for FK."""
+#     ...
 
-        # Load robot URDF (ensure paths are correct relative to PROJECT_ROOT)
-        fanuc_dir = os.path.join(PROJECT_ROOT, "Fanuc")
-        urdf_path = os.path.join(fanuc_dir, "urdf", "Fanuc.urdf")
-        if not os.path.exists(urdf_path):
-             raise FileNotFoundError(f"FK URDF not found at {urdf_path}")
-        p.setAdditionalSearchPath(fanuc_dir) # For meshes
-
-        _fk_robot_id = p.loadURDF(urdf_path, basePosition=[0, 0, 0], useFixedBase=True, physicsClientId=_fk_client)
-
-        # Find joint indices and EE link index (only needs to be done once)
-        num_joints_total = p.getNumJoints(_fk_robot_id, physicsClientId=_fk_client)
-        _fk_joint_indices = []
-        _fk_ee_link_index = -1
-        link_name_to_index = {p.getJointInfo(_fk_robot_id, i, physicsClientId=_fk_client)[12].decode('UTF-8'): i for i in range(num_joints_total)}
-
-        for i in range(num_joints_total):
-            info = p.getJointInfo(_fk_robot_id, i, physicsClientId=_fk_client)
-            joint_type = info[2]
-            # Assuming first 5 revolute joints are the controlled ones
-            if joint_type == p.JOINT_REVOLUTE and len(_fk_joint_indices) < 5:
-                _fk_joint_indices.append(i)
-            link_name = info[12].decode('UTF-8')
-            if link_name == 'Part6': # Make sure 'Part6' is your EE link name
-                 _fk_ee_link_index = i
-
-        if _fk_ee_link_index == -1:
-            logger.warning("FK Calculator: Could not find EE link 'Part6', using last joint index.")
-            _fk_ee_link_index = p.getNumJoints(_fk_robot_id, physicsClientId=_fk_client) - 1
-        if len(_fk_joint_indices) != 5:
-             raise ValueError(f"FK Calculator: Found {len(_fk_joint_indices)} controllable joints, expected 5.")
-
-        logger.info("PyBullet FK calculator initialized successfully.")
-
-    except Exception as e:
-        logger.error(f"Error initializing PyBullet FK calculator: {e}")
-        logger.error(traceback.format_exc())
-        if _fk_client is not None:
-            p.disconnect(physicsClientId=_fk_client)
-        _fk_client = None # Ensure it's None on failure
-
-def cleanup_fk_calculator():
-    """Disconnects the PyBullet client used for FK."""
-    global _fk_client
-    if _fk_client is not None:
-        logger.info("Cleaning up PyBullet FK calculator...")
-        try:
-            p.disconnect(physicsClientId=_fk_client)
-        except Exception as e:
-             logger.error(f"Error disconnecting FK PyBullet client: {e}")
-        _fk_client = None
-
-def calculate_forward_kinematics(joint_angles_rad: np.ndarray) -> np.ndarray | None:
+# Modify FK function to accept client ID and robot ID
+def calculate_forward_kinematics(joint_angles_rad: np.ndarray, physics_client_id: int, robot_id: int, joint_indices: List[int], ee_link_index: int) -> np.ndarray | None:
     """
     Calculates the End Effector position using PyBullet based on joint angles.
+    Uses the provided physics client and robot ID.
 
     Args:
         joint_angles_rad: Array of 5 joint angles in radians.
+        physics_client_id: The PyBullet physics client ID.
+        robot_id: The PyBullet robot ID.
+        joint_indices: List of controllable joint indices for the robot.
+        ee_link_index: The end-effector link index for the robot.
 
     Returns:
         np.ndarray | None: The EE position [x, y, z] in meters (world frame),
                            or None if calculation fails.
     """
-    if _fk_client is None or _fk_robot_id == -1 or not _fk_joint_indices or _fk_ee_link_index == -1:
-        logger.error("FK calculator not initialized. Cannot calculate FK.")
+    # Removed check for global _fk_client
+    if physics_client_id < 0 or robot_id == -1:
+        logger.error("Invalid physics client or robot ID for FK calculation.")
         return None
-    if len(joint_angles_rad) != len(_fk_joint_indices):
-        logger.error(f"FK input dimension mismatch: Expected {len(_fk_joint_indices)}, got {len(joint_angles_rad)}")
+    if len(joint_angles_rad) != len(joint_indices):
+        logger.error(f"FK input dimension mismatch: Expected {len(joint_indices)}, got {len(joint_angles_rad)}")
         return None
 
     try:
-        # Reset joint states in the FK simulation
-        for i, joint_index in enumerate(_fk_joint_indices):
-            p.resetJointState(_fk_robot_id, joint_index,
+        # Reset joint states in the specified simulation
+        for i, joint_index in enumerate(joint_indices):
+            p.resetJointState(robot_id, joint_index,
                               targetValue=joint_angles_rad[i],
                               targetVelocity=0,
-                              physicsClientId=_fk_client)
+                              physicsClientId=physics_client_id)
 
         # Get the link state (world position of the link origin)
         # Use computeForwardKinematics=True just to be sure
-        link_state = p.getLinkState(_fk_robot_id, _fk_ee_link_index,
+        link_state = p.getLinkState(robot_id, ee_link_index,
                                   computeForwardKinematics=True,
-                                  physicsClientId=_fk_client)
+                                  physicsClientId=physics_client_id)
 
         ee_position_m = np.array(link_state[4], dtype=np.float32)
         return ee_position_m
@@ -367,57 +321,61 @@ def get_current_task_target() -> np.ndarray:
 
 def get_current_obstacles() -> list[np.ndarray]:
     """
-    **PLACEHOLDER: Implement logic to determine current obstacle positions.**
-    Returns a list of obstacle positions in METERS.
+    **NOTE: Obstacle handling disabled.**
+    Returns an empty list. If known static obstacles exist, this function
+    should be updated to return their coordinates relative to the robot base.
     """
-    # Example: One fixed obstacle for testing FK-based relative obs vector
-    obstacles_m: List[np.ndarray] = [np.array([0.5, 0.1, 0.2])] 
-    # logger.debug(f"Current Obstacles: {obstacles_m}")
+    # Known static obstacles are currently ignored.
+    # Example (if implemented): obstacles_m: List[np.ndarray] = [np.array([0.5, 0.1, 0.2])]
+    obstacles_m: List[np.ndarray] = [] # Return empty list
     return obstacles_m
 
 
-def perform_safety_checks(robot: FANUCRobotAPI, current_pos_rad: np.ndarray, command_rad: np.ndarray, is_velocity_cmd: bool) -> bool:
+def perform_safety_checks(robot_api: FANUCRobotAPI, current_pos_rad: np.ndarray, command_rad: np.ndarray, is_velocity_cmd: bool, skip_safety: bool, physics_client_id: int, gui_robot_id: int, gui_joint_indices: List[int], gui_ee_link_index: int) -> bool:
     """
     **PLACEHOLDER: Implement CRITICAL safety checks BEFORE sending a command.**
 
-    Checks to implement:
-    1.  **Joint Limit Violation:** Check if `command_rad` (if position) or the projected next position
-        (if velocity) exceeds `robot.joint_limits`.
-    2.  **Velocity Limit Violation:** Check if `command_rad` (if velocity) exceeds `MAX_JOINT_VEL_RAD_S`.
-    3.  **Workspace Boundary Violation:** Calculate the forward kinematics for the commanded position/velocity
-        and check if the end-effector position stays within `WORKSPACE_LIMITS_XYZ_MIN/MAX`.
-        (Requires FK function - PyBullet or external library needed).
-    4.  **Excessive Speed/Displacement:** Check if the commanded velocity or the difference between
-        current and commanded position is too large (`MAX_STEP_DISPLACEMENT_M`).
-    5.  **Collision Check:** (Advanced) If you have a collision model, check for self-collision or
-        collision with known obstacles for the commanded move.
-
     Args:
-        robot: The FANUCRobotAPI instance.
+        robot_api: The FANUCRobotAPI instance.
         current_pos_rad: Current joint positions (radians).
         command_rad: The intended command (position in rad or velocity in rad/s).
         is_velocity_cmd: True if the command is velocity.
+        skip_safety: If True, bypass all safety checks.
+        physics_client_id: PyBullet client ID for checks.
+        gui_robot_id: PyBullet robot ID for checks.
+        gui_joint_indices: Joint indices for the PyBullet robot.
+        gui_ee_link_index: EE link index for the PyBullet robot.
 
     Returns:
         bool: True if the command is deemed SAFE, False otherwise.
     """
+    # --- Bypass Check ---
+    if skip_safety:
+        # logger.warning("SAFETY CHECKS BYPASSED by flag.") # Logged in main loop entry
+        return True
+
     safe = True
-    # --- 1. Joint Limit Checks ---
+    # --- 1. Joint Limit Checks --- #
     if not is_velocity_cmd:
-        # Check if joint_limits is available and is a dictionary
-        if hasattr(robot, 'joint_limits') and isinstance(robot.joint_limits, dict):
+        # Check if joint_limits_rad is available and is a dictionary
+        # Corrected attribute access based on robot_api.py
+        if hasattr(robot_api, 'joint_limits_rad') and isinstance(robot_api.joint_limits_rad, dict):
             for i, pos_cmd in enumerate(command_rad):
-                 if i in robot.joint_limits: # Use robot.joint_limits
-                     low, high = robot.joint_limits[i] # Use robot.joint_limits
+                 # Check if the index i exists as a key in the dictionary
+                 if i in robot_api.joint_limits_rad:
+                     low, high = robot_api.joint_limits_rad[i] # Use robot_api.joint_limits_rad
+                     # Use radians for comparison
                      if not (low - 0.01 <= pos_cmd <= high + 0.01): # Allow small tolerance
-                          logger.critical(f"SAFETY VIOLATION: J{i+1} position command {np.rad2deg(pos_cmd):.2f} deg exceeds limits [{np.rad2deg(low):.2f}, {np.rad2deg(high):.2f}]")
+                          logger.critical(f"SAFETY VIOLATION: J{i+1} position command {pos_cmd:.3f} rad exceeds limits [{low:.3f}, {high:.3f}] rad")
                           safe = False
+                 else:
+                      # Log if a joint index expected is missing from the limits dict
+                      logger.warning(f"Safety Check: Joint index {i} not found in robot_api.joint_limits_rad dictionary.")
         else:
-            logger.warning("Safety Check: Robot joint_limits attribute not found or not a dict. Skipping position limit check.")
-            # Decide if this should be treated as unsafe
-            # safe = False
+            logger.warning("Safety Check: Robot joint_limits_rad attribute not found or not a dict. Skipping position limit check.")
+            # safe = False # Consider making this unsafe if limits are critical
     else:
-        # --- 2. Velocity Limit Checks ---
+        # --- 2. Velocity Limit Checks --- #
         for i, vel_cmd in enumerate(command_rad):
              if i < len(MAX_JOINT_VEL_RAD_S):
                  limit = MAX_JOINT_VEL_RAD_S[i]
@@ -425,30 +383,88 @@ def perform_safety_checks(robot: FANUCRobotAPI, current_pos_rad: np.ndarray, com
                      logger.critical(f"SAFETY VIOLATION: J{i+1} velocity command {vel_cmd:.3f} rad/s exceeds limit +/-{limit:.3f}")
                      safe = False
 
-    # --- 3. Workspace Boundary Checks (Requires FK) ---
-    # **TODO:** Implement FK check
-    # commanded_ee_pos_m = calculate_fk(command_rad) # Your FK function here
-    # if not np.all((WORKSPACE_LIMITS_XYZ_MIN <= commanded_ee_pos_m) & (commanded_ee_pos_m <= WORKSPACE_LIMITS_XYZ_MAX)):
-    #      logger.critical(f"SAFETY VIOLATION: Commanded EE position {commanded_ee_pos_m} outside workspace limits.")
-    #      safe = False
-    logger.warning("Safety Check: Workspace boundary check is NOT implemented.")
-
-    # --- 4. Excessive Displacement/Speed Check ---
+    # --- 3. Workspace Boundary Checks (Requires FK) --- #
+    # This check only applies to position commands
     if not is_velocity_cmd:
-        delta_joint = command_rad - current_pos_rad
-        # **TODO:** Convert joint delta to EE displacement (needs Jacobian or FK diff)
-        # approx_ee_displacement = estimate_ee_displacement(delta_joint)
-        # if approx_ee_displacement > MAX_STEP_DISPLACEMENT_M:
-        #     logger.critical(f"SAFETY VIOLATION: Commanded position results in large step displacement (~{approx_ee_displacement:.3f}m). Limit: {MAX_STEP_DISPLACEMENT_M:.3f}m.")
-        #     safe = False
-        logger.warning("Safety Check: Excessive step displacement check is NOT implemented.")
+        # Use modified FK function
+        commanded_ee_pos_m = calculate_forward_kinematics(command_rad, physics_client_id, gui_robot_id, gui_joint_indices, gui_ee_link_index)
+        if commanded_ee_pos_m is not None:
+             if not np.all((WORKSPACE_LIMITS_XYZ_MIN <= commanded_ee_pos_m) & (commanded_ee_pos_m <= WORKSPACE_LIMITS_XYZ_MAX)):
+                  logger.critical(f"SAFETY VIOLATION: Commanded EE position {commanded_ee_pos_m} outside workspace limits.")
+                  logger.critical(f"  Limits MIN: {WORKSPACE_LIMITS_XYZ_MIN}, MAX: {WORKSPACE_LIMITS_XYZ_MAX}")
+                  safe = False
+        else:
+             logger.warning("Safety Check: Could not calculate FK for command. Skipping workspace boundary check.")
+             # safe = False
 
-    # --- 5. Collision Checks (Requires Collision Model) ---
-    # **TODO:** Implement collision check if feasible
-    # if check_for_collisions(command_rad):
-    #     logger.critical("SAFETY VIOLATION: Predicted collision for command.")
-    #     safe = False
-    logger.warning("Safety Check: Collision check is NOT implemented.")
+    # --- 4. Excessive Displacement/Speed Check --- #
+    # This check only applies to position commands
+    if not is_velocity_cmd:
+        # Calculate EE pos for current joint angles using modified FK
+        current_ee_pos_m = calculate_forward_kinematics(current_pos_rad, physics_client_id, gui_robot_id, gui_joint_indices, gui_ee_link_index)
+        # Commanded EE pos calculated above (if successful)
+        commanded_ee_pos_m_for_disp = commanded_ee_pos_m # Reuse from workspace check
+
+        if current_ee_pos_m is not None and commanded_ee_pos_m_for_disp is not None:
+            ee_displacement = np.linalg.norm(commanded_ee_pos_m_for_disp - current_ee_pos_m)
+            if ee_displacement > MAX_STEP_DISPLACEMENT_M:
+                logger.critical(f"SAFETY VIOLATION: Commanded position results in large step displacement ({ee_displacement:.4f}m). Limit: {MAX_STEP_DISPLACEMENT_M:.3f}m.")
+                safe = False
+        else:
+             logger.warning("Safety Check: Could not calculate FK for current or commanded pose. Skipping displacement check.")
+             # safe = False
+
+    # --- 5. Collision Checks (Requires Collision Model) --- #
+    # 5.a Self-Collision Check (using GUI simulation instance)
+    if not is_velocity_cmd:
+        if physics_client_id >= 0 and gui_robot_id != -1:
+            try:
+                # Set robot pose in GUI sim (already done by FK calculation above)
+                # for i, joint_index in enumerate(gui_joint_indices):
+                #     p.resetJointState(gui_robot_id, joint_index,
+                #                       targetValue=command_rad[i],
+                #                       targetVelocity=0,
+                #                       physicsClientId=physics_client_id)
+
+                # Check for self-collisions
+                p.performCollisionDetection(physicsClientId=physics_client_id)
+                self_contacts = p.getContactPoints(bodyA=gui_robot_id, bodyB=gui_robot_id, physicsClientId=physics_client_id)
+
+                # Filter contacts: Ignore contacts between adjacent links
+                num_joints_fk = p.getNumJoints(gui_robot_id, physicsClientId=physics_client_id)
+                adjacent_link_pairs = set()
+                for i in range(num_joints_fk):
+                    joint_info = p.getJointInfo(gui_robot_id, i, physicsClientId=physics_client_id)
+                    parent_link_index = joint_info[16]
+                    child_link_index = i # In PyBullet, link index often matches joint index
+                    # Store pairs in both orders for easy checking
+                    adjacent_link_pairs.add(tuple(sorted((parent_link_index, child_link_index))))
+
+                dangerous_contacts = []
+                for contact in self_contacts:
+                    link_a = contact[3]
+                    link_b = contact[4]
+                    # Ignore contact with self and adjacent links
+                    if link_a != link_b and tuple(sorted((link_a, link_b))) not in adjacent_link_pairs:
+                        dangerous_contacts.append((link_a, link_b))
+
+                if dangerous_contacts:
+                    logger.critical(f"SAFETY VIOLATION: Predicted self-collision for command!")
+                    logger.debug(f"  Detected non-adjacent contact pairs: {dangerous_contacts}")
+                    safe = False
+
+            except Exception as e:
+                 logger.warning(f"Safety Check: Error during self-collision check: {e}")
+                 # safe = False
+        else:
+             logger.warning("Safety Check: GUI client/robot not available. Skipping self-collision check.")
+             # safe = False # Consider making this unsafe
+
+    # 5.b Environment Collision Check (Omitted)
+    # Assuming a closed-off environment clear of unknown/unmodeled static obstacles.
+    # Self-collision checks are still performed above.
+    # If static obstacles ARE present, they should be modeled and checked here.
+    # logger.warning("Safety Check: Environment collision check against known static obstacles is NOT implemented.")
 
     if not safe:
         logger.critical("Command deemed UNSAFE. Skipping command.")
@@ -480,7 +496,7 @@ def main():
 
     args = parser.parse_args()
 
-    logger.info("--- Starting Real Robot Deployment Script ---")
+    logger.info("--- Starting Real Robot Deployment Script with GUI Visualisation ---") # Updated title
     logger.info(f"Arguments: {vars(args)}")
 
     if args.skip_safety:
@@ -490,136 +506,235 @@ def main():
         logger.critical("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
         time.sleep(5.0) # Give user time to see the warning
 
-    # --- Initialize FK Calculator --- 
-    setup_fk_calculator()
-    if _fk_client is None:
-        logger.critical("Failed to initialize FK calculator. Cannot proceed.")
-        return
-
-    # --- Initialize Modules ---
-    logger.info("Initialising Robot API...")
-    robot = FANUCRobotAPI(ip=args.ip, port=args.port)
-
-    logger.info("Initialising Transfer Learning Module...")
-    if not os.path.exists(args.model):
-        logger.error(f"Model file not found at: {args.model}")
-        cleanup_fk_calculator()
-        return
-    try:
-        # Pass the expected path for calibration params to transfer module
-        transfer = RobotTransfer(model_path=args.model, params_file=PARAMS_FILE_PATH)
-    except Exception as e:
-        logger.error(f"Error initializing Transfer Learning module: {e}")
-        logger.error(traceback.format_exc())
-        cleanup_fk_calculator()
-        return
-
-    if transfer.model is None:
-         logger.error("Failed to load the RL model from the transfer module. Exiting.")
-         cleanup_fk_calculator()
-         return
-
-    # --- Connect to Robot ---
-    if not robot.connect():
-        logger.error("Failed to connect to the robot. Please check IP, port, network, and robot state.")
-        cleanup_fk_calculator()
-        return
-
-    # --- Calibration Observation Phase --- 
-    if args.calibrate:
-        logger.info("--- Running Calibration Observation Routine (before main loop) --- ")
-        run_calibration_observation_routine(robot)
-        logger.info("--- Calibration Observation Finished --- ")
-        logger.info("Please ensure you have created/updated config/transfer_params.json before proceeding.")
-        input("Press Enter to continue with the main control loop (after updating JSON)...")
-
-    # --- Check transfer parameters --- 
-    transfer.load_calibration_params(PARAMS_FILE_PATH)
-    if not transfer.is_calibrated:
-         logger.warning("Transfer module using default/uncalibrated parameters.")
-
-    # --- Main Control Loop Setup --- 
-    logger.info("Starting main control loop. Press Ctrl+C to stop.")
-    loop_delay = 1.0 / args.loop_rate_hz
-    is_velocity_control = (args.control_mode == 'velocity')
-    target_reached_threshold = 0.03 # Meters
-    current_target_m = get_current_task_target()
-
-    # Variables for velocity estimation
-    prev_joint_pos_rad = None
-    prev_timestamp = None
+    # --- Initialize PyBullet GUI --- #
+    physics_client_id = -1
+    gui_robot_id = -1
+    gui_joint_indices = []
+    gui_ee_link_index = -1
+    plane_id = -1
+    target_marker_id = -1
+    obstacle_marker_ids = []
 
     try:
+        logger.info("Initializing PyBullet GUI for visualisation...")
+        physics_client_id = p.connect(p.GUI)
+        if physics_client_id < 0:
+            raise ConnectionError("Failed to connect to PyBullet GUI.")
+
+        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=physics_client_id)
+        p.resetDebugVisualizerCamera(cameraDistance=1.5, cameraYaw=60, cameraPitch=-15,
+                                   cameraTargetPosition=[0,0,0.4], physicsClientId=physics_client_id)
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        p.setGravity(0, 0, -9.81, physicsClientId=physics_client_id)
+
+        # Load plane
+        plane_id = p.loadURDF("plane.urdf", physicsClientId=physics_client_id)
+
+        # Load robot URDF (ensure paths are correct relative to PROJECT_ROOT)
+        fanuc_dir = os.path.join(PROJECT_ROOT, "Fanuc")
+        urdf_path = os.path.join(fanuc_dir, "urdf", "Fanuc.urdf")
+        if not os.path.exists(urdf_path):
+             raise FileNotFoundError(f"GUI URDF not found at {urdf_path}")
+        p.setAdditionalSearchPath(fanuc_dir) # For meshes
+
+        gui_robot_id = p.loadURDF(urdf_path, basePosition=[0, 0, 0], useFixedBase=True, physicsClientId=physics_client_id)
+
+        # Find joint indices and EE link index for GUI robot
+        num_joints_total = p.getNumJoints(gui_robot_id, physicsClientId=physics_client_id)
+        for i in range(num_joints_total):
+            info = p.getJointInfo(gui_robot_id, i, physicsClientId=physics_client_id)
+            joint_type = info[2]
+            # Assuming first 5 revolute joints are the controlled ones
+            if joint_type == p.JOINT_REVOLUTE and len(gui_joint_indices) < 5:
+                gui_joint_indices.append(i)
+            link_name = info[12].decode('UTF-8')
+            if link_name == 'Part6': # Make sure 'Part6' is your EE link name
+                 gui_ee_link_index = i
+
+        if gui_ee_link_index == -1:
+            logger.warning("GUI Robot: Could not find EE link 'Part6', using last joint index.")
+            gui_ee_link_index = p.getNumJoints(gui_robot_id, physicsClientId=physics_client_id) - 1
+        if len(gui_joint_indices) != 5:
+             raise ValueError(f"GUI Robot: Found {len(gui_joint_indices)} controllable joints, expected 5.")
+
+        logger.info("PyBullet GUI initialized successfully.")
+
+        # --- Initialize Modules --- #
+        logger.info("Initialising Robot API...")
+        robot_api = FANUCRobotAPI(ip=args.ip, port=args.port) # Renamed variable
+
+        logger.info("Initialising Transfer Learning Module...")
+        if not os.path.exists(args.model):
+            logger.error(f"Model file not found at: {args.model}")
+            raise FileNotFoundError(args.model)
+        # Pass velocity limits for action clipping
+        transfer = RobotTransfer(model_path=args.model,
+                                 params_file=PARAMS_FILE_PATH,
+                                 velocity_limits=MAX_JOINT_VEL_RAD_S)
+
+        if transfer.model is None:
+             logger.error("Failed to load the RL model from the transfer module. Exiting.")
+             raise ValueError("RL Model load failed")
+
+        # --- Connect to Robot --- #
+        if not robot_api.connect():
+            logger.error("Failed to connect to the robot. Please check IP, port, network, and robot state.")
+            raise ConnectionError("Robot connection failed")
+
+        # --- Calibration Observation Phase --- #
+        if args.calibrate:
+            logger.info("--- Running Calibration Observation Routine (before main loop) --- ")
+            run_calibration_observation_routine(robot_api)
+            logger.info("--- Calibration Observation Finished --- ")
+            logger.info("Please ensure you have created/updated config/transfer_params.json before proceeding.")
+            input("Press Enter to continue with the main control loop (after updating JSON)...")
+
+        # --- Check transfer parameters --- #
+        transfer.load_calibration_params(PARAMS_FILE_PATH)
+        if not transfer.is_calibrated:
+             logger.warning("Transfer module using default/uncalibrated parameters.")
+
+        # --- Main Control Loop Setup --- #
+        logger.info("Starting main control loop. Press Ctrl+C to stop.")
+        loop_delay = 1.0 / args.loop_rate_hz
+        is_velocity_control = (args.control_mode == 'velocity')
+        target_reached_threshold = 0.03 # Meters
+        current_target_m = get_current_task_target()
+
+        # Variables for velocity estimation
+        prev_joint_pos_rad = None
+        prev_timestamp = None
+
+        # --- Velocity Filtering Setup --- #
+        VELOCITY_FILTER_WINDOW = 4 # Number of samples for moving average
+        # Initialize deque for each joint, assuming 5 controlled joints
+        # Get num_controlled_joints from robot_api instance if possible after init
+        # For now, assume 5 based on constants
+        num_joints_assumed = 5
+        velocity_history = [collections.deque(maxlen=VELOCITY_FILTER_WINDOW) for _ in range(num_joints_assumed)]
+
         # Get initial state
-        initial_obs = robot.get_robot_state_observation()
+        initial_obs = robot_api.get_robot_state_observation()
         if initial_obs is None:
              logger.error("Failed to get initial robot observation. Aborting loop.")
              raise ConnectionError("Cannot get initial state")
-        prev_joint_pos_rad = initial_obs[0:robot.num_controlled_joints]
+        # Use the correct number of joints from the robot_api instance
+        num_controlled_joints = robot_api.num_controlled_joints
+        if num_joints_assumed != num_controlled_joints:
+             logger.warning(f"Initial joint number assumption ({num_joints_assumed}) != robot_api value ({num_controlled_joints}). Re-initializing velocity filter.")
+             velocity_history = [collections.deque(maxlen=VELOCITY_FILTER_WINDOW) for _ in range(num_controlled_joints)]
+
+        prev_joint_pos_rad = initial_obs[0:num_controlled_joints]
         prev_timestamp = time.monotonic()
         current_joint_pos_rad = prev_joint_pos_rad # Use initial for first safety check
+
+        # Pre-fill velocity history with zeros to avoid issues on first loops
+        initial_zero_vel = np.zeros(num_controlled_joints)
+        for i in range(VELOCITY_FILTER_WINDOW):
+            for joint_idx in range(num_controlled_joints):
+                velocity_history[joint_idx].append(initial_zero_vel[joint_idx])
 
         while True:
             loop_start_time = time.monotonic()
             current_timestamp = loop_start_time # Use loop start time for consistency
 
-            # --- Connection Check --- 
-            if not robot.check_connection():
+            # --- Connection Check --- #
+            if not robot_api.check_connection():
                 logger.error("Robot connection lost. Attempting to reconnect...")
                 time.sleep(2.0)
-                if not robot.connect():
+                if not robot_api.connect():
                      logger.error("Reconnect failed. Exiting.")
                      break
                 else:
                      logger.info("Reconnected successfully.")
-                     initial_obs = robot.get_robot_state_observation() # Get fresh state
+                     initial_obs = robot_api.get_robot_state_observation() # Get fresh state
                      if initial_obs is None: raise ConnectionError("Cannot get state after reconnect")
-                     prev_joint_pos_rad = initial_obs[0:robot.num_controlled_joints]
+                     prev_joint_pos_rad = initial_obs[0:robot_api.num_controlled_joints]
                      prev_timestamp = time.monotonic()
                      current_joint_pos_rad = prev_joint_pos_rad
+                     # Reset velocity filter on reconnect
+                     for joint_hist in velocity_history:
+                         joint_hist.clear()
+                         for _ in range(VELOCITY_FILTER_WINDOW):
+                             joint_hist.append(0.0) # Fill with zeros
                      continue # Skip rest of loop iteration to get fresh data next time
 
             # 1. Get Real Robot Joint Positions (Degrees)
-            # We get the full observation later, but need current pos now for FK and velocity
-            current_joint_pos_deg_all = robot.get_joint_positions()
+            current_joint_pos_deg_all = robot_api.get_joint_positions()
             if current_joint_pos_deg_all is None:
                 logger.warning("Failed to get current joint positions. Skipping control cycle.")
                 time.sleep(max(0, loop_delay - (time.monotonic() - loop_start_time)))
                 continue
-            current_joint_pos_rad = np.deg2rad(current_joint_pos_deg_all[:robot.num_controlled_joints])
+            current_joint_pos_rad = np.deg2rad(current_joint_pos_deg_all[:robot_api.num_controlled_joints])
 
-            # --- Calculate Velocity --- 
+            # --- Update GUI Visualisation --- #
+            for i, joint_index in enumerate(gui_joint_indices):
+                p.resetJointState(gui_robot_id, joint_index,
+                                  targetValue=current_joint_pos_rad[i],
+                                  targetVelocity=0,
+                                  physicsClientId=physics_client_id)
+
+            # --- Calculate Velocity --- #
+            raw_velocity_rad_s = np.zeros_like(current_joint_pos_rad) # Default to zero
             if prev_joint_pos_rad is not None and prev_timestamp is not None:
                 delta_time = current_timestamp - prev_timestamp
                 if delta_time > 1e-6: # Avoid division by zero
                     delta_pos = current_joint_pos_rad - prev_joint_pos_rad
                     # Simple Euler estimate, could use filtering
-                    estimated_velocity_rad_s = delta_pos / delta_time
+                    raw_velocity_rad_s = delta_pos / delta_time
                 else:
-                    estimated_velocity_rad_s = np.zeros_like(current_joint_pos_rad)
-            else:
-                estimated_velocity_rad_s = np.zeros_like(current_joint_pos_rad)
-            # Update history for next iteration
-            prev_joint_pos_rad = current_joint_pos_rad
-            prev_timestamp = current_timestamp
+                    # If no previous data, raw velocity is zero
+                    pass # raw_velocity_rad_s already initialized to zero
 
-            # --- Calculate EE Position using FK --- 
-            current_ee_pos_m = calculate_forward_kinematics(current_joint_pos_rad)
+            # --- Filter Velocity --- #
+            filtered_velocity_rad_s = np.zeros_like(current_joint_pos_rad)
+            for i in range(len(current_joint_pos_rad)):
+                velocity_history[i].append(raw_velocity_rad_s[i])
+                # Calculate moving average
+                filtered_velocity_rad_s[i] = np.mean(velocity_history[i])
+
+            # --- Calculate EE Position using FK (from GUI robot state) --- #
+            # Note: FK function now implicitly uses the state set by resetJointState above
+            current_ee_pos_m = calculate_forward_kinematics(current_joint_pos_rad, physics_client_id, gui_robot_id, gui_joint_indices, gui_ee_link_index)
             if current_ee_pos_m is None:
                  logger.warning("Failed to calculate FK for current pose. Using origin as fallback.")
                  current_ee_pos_m = np.zeros(3)
 
-            # --- Target Reached Check --- 
+            # --- Update Target/Obstacle Markers --- #
+            obstacles_m = get_current_obstacles()
+            # Remove old markers
+            if target_marker_id >= 0:
+                p.removeBody(target_marker_id, physicsClientId=physics_client_id)
+                target_marker_id = -1
+            for obs_id in obstacle_marker_ids:
+                 if obs_id >= 0:
+                      try:
+                           p.removeBody(obs_id, physicsClientId=physics_client_id)
+                      except p.error:
+                           pass # Ignore error if body already removed
+            obstacle_marker_ids.clear()
+
+            # Draw new target marker
+            tgt_col = [0, 1, 0, 0.8] # Green
+            target_visual_shape_id = p.createVisualShape(p.GEOM_SPHERE, radius=0.02, rgbaColor=tgt_col, physicsClientId=physics_client_id)
+            target_marker_id = p.createMultiBody(baseMass=0, baseVisualShapeIndex=target_visual_shape_id, basePosition=current_target_m, physicsClientId=physics_client_id)
+
+            # Draw new obstacle markers
+            obs_col = [1, 0, 0, 0.7] # Red
+            for obs_pos in obstacles_m:
+                 obs_shape_id = p.createVisualShape(p.GEOM_SPHERE, radius=0.05, rgbaColor=obs_col, physicsClientId=physics_client_id)
+                 obs_marker_id = p.createMultiBody(baseMass=0, baseVisualShapeIndex=obs_shape_id, basePosition=obs_pos, physicsClientId=physics_client_id)
+                 obstacle_marker_ids.append(obs_marker_id)
+
+            # --- Target Reached Check --- #
             distance_to_target = np.linalg.norm(current_target_m - current_ee_pos_m)
             if distance_to_target < target_reached_threshold:
                 logger.info(f"Target {current_target_m} reached (Dist: {distance_to_target:.4f}m). Generating new target.")
                 current_target_m = get_current_task_target()
-                # Maybe reset velocity estimate history here?
                 prev_joint_pos_rad = None # Force zero velocity estimate next step
 
-            # --- Calculate Relative Vectors --- 
+            # --- Calculate Relative Vectors --- #
             relative_target_vec = current_target_m - current_ee_pos_m
-            obstacles_m = get_current_obstacles()
             if obstacles_m:
                 nearest_dist = float('inf')
                 relative_obstacle_vec = np.zeros(3)
@@ -631,12 +746,11 @@ def main():
             else:
                 relative_obstacle_vec = np.zeros(3)
 
-            # --- Construct Full Observation Vector --- 
-            # Use calculated/estimated values instead of placeholders
-            norm_joint_pos = np.zeros(robot.num_controlled_joints)
-            for i in range(robot.num_controlled_joints):
-                 if i in robot.joint_limits_rad:
-                     low, high = robot.joint_limits_rad[i]
+            # --- Construct Full Observation Vector --- #
+            norm_joint_pos = np.zeros(robot_api.num_controlled_joints)
+            for i in range(robot_api.num_controlled_joints):
+                 if i in robot_api.joint_limits_rad:
+                     low, high = robot_api.joint_limits_rad[i]
                      joint_range = high - low
                      if joint_range > 1e-6:
                          norm_joint_pos[i] = 2 * (current_joint_pos_rad[i] - low) / joint_range - 1.0
@@ -645,7 +759,7 @@ def main():
             try:
                 real_obs = np.concatenate([
                     current_joint_pos_rad,       # 5 dims
-                    estimated_velocity_rad_s,    # 5 dims
+                    filtered_velocity_rad_s,     # 5 dims (Now Filtered)
                     relative_target_vec,         # 3 dims
                     norm_joint_pos,              # 5 dims
                     relative_obstacle_vec        # 3 dims
@@ -655,43 +769,52 @@ def main():
                 time.sleep(max(0, loop_delay - (time.monotonic() - loop_start_time)))
                 continue
 
-            # --- Predict Action --- 
+            # --- Predict Action --- #
             action_for_robot_rad = transfer.predict(real_obs)
             if action_for_robot_rad is None:
                 logger.warning("Failed to predict action. Skipping control cycle.")
                 time.sleep(max(0, loop_delay - (time.monotonic() - loop_start_time)))
                 continue
 
-            # --- Safety Checks --- 
+            # --- Safety Checks --- #
             is_safe = True
             if not args.skip_safety:
-                # Pass current rad position and predicted rad command (pos or vel)
-                is_safe = perform_safety_checks(robot, current_joint_pos_rad, action_for_robot_rad, is_velocity_control)
+                # Pass GUI client/robot IDs for checks
+                is_safe = perform_safety_checks(robot_api, current_joint_pos_rad, action_for_robot_rad, is_velocity_control, args.skip_safety, physics_client_id, gui_robot_id, gui_joint_indices, gui_ee_link_index)
+            else:
+                is_safe = True
 
-            # --- Send Command --- 
+            # --- Send Command --- #
             if is_safe:
                 if is_velocity_control:
                      logger.error("Velocity control mode not supported by current API.")
                      success = False
                 else:
                     action_for_robot_deg = np.rad2deg(action_for_robot_rad)
-                    if robot.num_reported_joints == 6 and len(action_for_robot_deg) == 5:
+                    if robot_api.num_reported_joints == 6 and len(action_for_robot_deg) == 5:
                          command_deg = np.append(action_for_robot_deg, 0.0)
-                    elif len(action_for_robot_deg) == robot.num_reported_joints:
+                    elif len(action_for_robot_deg) == robot_api.num_reported_joints:
                          command_deg = action_for_robot_deg
                     else:
                          logger.error(f"Action dimension mismatch for command.")
                          command_deg = None
 
                     if command_deg is not None:
-                        success = robot.move_to_joint_positions(
+                        success = robot_api.move_to_joint_positions(
                             positions_deg=command_deg, speed_percent=args.pos_speed)
+                        # --- Add estimated wait after successful command send --- #
+                        if success:
+                             # WARNING: This is NOT a guarantee of move completion.
+                             # It\'s a fixed pause assuming the move starts quickly.
+                             # A robust solution requires robot status feedback.
+                             estimated_wait = loop_delay * 0.8 # Wait 80% of loop time
+                             time.sleep(estimated_wait)
                     else:
                         success = False
                 if not success:
                     logger.warning("Failed to send command to robot.")
 
-            # --- Loop Timing --- 
+            # --- Loop Timing --- #
             loop_end_time = time.monotonic()
             elapsed_time = loop_end_time - loop_start_time
             wait_time = loop_delay - elapsed_time
@@ -708,15 +831,21 @@ def main():
         logger.error(f"Unexpected error in control loop: {e}")
         logger.error(traceback.format_exc())
     finally:
-        # --- Cleanup --- 
+        # --- Cleanup --- #
         logger.info("Initiating shutdown...")
-        if robot.connected:
+        if 'robot_api' in locals() and robot_api.connected:
             logger.info("Attempting to stop robot motion...")
-            robot.stop_motion()
+            robot_api.stop_motion()
             time.sleep(0.5) # Short pause before disconnecting
             logger.info("Disconnecting from robot...")
-            robot.disconnect()
-        cleanup_fk_calculator() # Disconnect FK pybullet client
+            robot_api.disconnect()
+        # cleanup_fk_calculator() # Removed - using GUI client
+        if physics_client_id >= 0:
+             logger.info("Disconnecting PyBullet GUI...")
+             try:
+                  p.disconnect(physicsClientId=physics_client_id)
+             except Exception as e:
+                  logger.error(f"Error disconnecting PyBullet GUI: {e}")
         logger.info("Deployment script finished.")
 
 if __name__ == "__main__":

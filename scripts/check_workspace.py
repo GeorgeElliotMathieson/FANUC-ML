@@ -20,7 +20,8 @@ END_EFFECTOR_LINK_NAME = 'Part6' # Ensure this matches the link name in your URD
 
 # Define paths relative to the project root (one level up from scripts/)
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-CONFIG_FILENAME = os.path.join(PROJECT_ROOT, "workspace_config.json")
+# Point to the new config directory
+CONFIG_FILENAME = os.path.join(PROJECT_ROOT, "config", "workspace_config.json")
 FANUC_DIR = os.path.join(PROJECT_ROOT, "Fanuc")
 URDF_FILENAME = os.path.join(FANUC_DIR, "urdf", "Fanuc.urdf")
 

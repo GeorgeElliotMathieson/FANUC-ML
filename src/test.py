@@ -16,7 +16,8 @@ from .fanuc_env import FanucEnv
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 DEFAULT_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
 DEFAULT_MODEL_NAME = "ppo_fanuc_model.zip"
-BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json")
+# Point to the new config directory
+BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
 
 def find_latest_model(log_dir: str) -> str | None:
     """Finds the latest saved model .zip file in the log directory."""

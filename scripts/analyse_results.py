@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 # --- Constants ---
 # Define paths relative to the project root (one level up from scripts/)
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "best_params.json")
+# Point to the new config directory
+BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
 DEFAULT_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
 DEFAULT_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output", "analysis")
 

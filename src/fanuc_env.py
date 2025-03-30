@@ -8,6 +8,7 @@ import json # Import json
 import random # Import random for obstacle placement
 import logging # Import logging
 import collections # Import collections for deque
+import traceback # Import traceback for better error logging
 
 # --- Configure Logging (Root Logger) --- 
 # Basic config for use when the env is run standalone or imported
@@ -21,7 +22,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Define config filename relative to project root (one level up from src/)
-WORKSPACE_CONFIG_FILENAME = os.path.join(os.path.dirname(__file__), '..', "workspace_config.json")
+# Point to the new config directory
+WORKSPACE_CONFIG_FILENAME = os.path.join(os.path.dirname(__file__), '..', "config", "workspace_config.json")
 
 class FanucEnv(gym.Env):
     """Custom Gymnasium environment for the FANUC LRMate 200iD robot arm using PyBullet.

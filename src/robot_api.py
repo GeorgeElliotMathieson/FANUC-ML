@@ -272,23 +272,27 @@ class FANUCRobotAPI:
 
     def get_end_effector_pose(self) -> tuple[np.ndarray, np.ndarray] | None:
         """
-        **PLACEHOLDER:** Get current end effector pose (position and orientation).
-
-        **CRITICAL:** Requires a specific command for your interface (e.g., RDPOS,
-        CURPOS) and adaptation for units (mm/m?), coordinate frame (world,
-        tool, user?), and orientation format (WPR deg? XYZW quat? Euler ZYX rad?).
+        Attempts to read pose data using a common command (RDPOS) and logs the raw response.
+        This helps diagnose if pose data is available and determine its format.
+        **Does not parse the response.** Implement parsing based on observed data.
 
         Returns:
-            tuple(np.ndarray, np.ndarray) | None: (position_xyz_mm, orientation_wpr_deg)
-                                                or None if failed. Format/units depend on parsing.
+            None: This method currently always returns None after logging.
         """
-        logger.warning("`get_end_effector_pose` is not implemented. Needs specific robot command.")
-        command = "GET_EPOS_PLACEHOLDER" # Replace with actual command if available
-        # response = self._send_command(command)
-        # if response:
-            # --- PARSING ADAPTATION NEEDED --- 
-            # return parsed_pos_mm, parsed_orient_wpr
-        return None # Return None on failure
+        # Try a common command for reading Cartesian position
+        command = "RDPOS"
+        logger.info(f"Attempting to get End-Effector pose using command: '{command}'")
+        response = self._send_command(command)
+
+        if response is not None:
+            logger.info(f"Received potential pose data (raw): '{response}'")
+            logger.warning("Pose data received, but parsing is NOT implemented.")
+            logger.warning("Please analyse the raw response above and update the parsing logic in get_end_effector_pose.")
+        else:
+            logger.warning(f"No response received for '{command}'. Robot may not support this command or is not sending pose data.")
+
+        # Always return None as parsing is not implemented
+        return None
 
     def get_robot_state_observation(self) -> np.ndarray | None:
         """
