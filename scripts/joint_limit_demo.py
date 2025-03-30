@@ -20,8 +20,9 @@ PAUSE_DURATION = 0.5 # Seconds to pause at limits/home
 
 # Define paths relative to the project root (one level up from scripts/)
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-FANUC_DIR = os.path.join(PROJECT_ROOT, "Fanuc")
-URDF_FILENAME = os.path.join(FANUC_DIR, "urdf", "Fanuc.urdf")
+# Point to the new assets directory
+ROBOT_MODEL_DIR = os.path.join(PROJECT_ROOT, "assets", "robot_model")
+URDF_FILENAME = os.path.join(ROBOT_MODEL_DIR, "urdf", "Fanuc.urdf")
 
 # --- Configure Logging --- 
 logging.basicConfig(
@@ -55,7 +56,7 @@ def main():
              return
 
         # Add Fanuc directory to search path *before* loading URDF
-        p.setAdditionalSearchPath(FANUC_DIR)
+        p.setAdditionalSearchPath(ROBOT_MODEL_DIR)
 
         logger.info(f"Loading robot from: {URDF_FILENAME}")
         robot_id = p.loadURDF(

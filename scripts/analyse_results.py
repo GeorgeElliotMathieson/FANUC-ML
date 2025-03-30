@@ -26,22 +26,43 @@ DEFAULT_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output", "analysis")
 
 # --- Helper Functions ---
 
-def find_latest_event_file(log_dir):
-    """Finds the most recent TensorBoard event file in a directory."""
+def find_latest_run_dir(base_log_dir: str) -> str | None:
+    """Finds the latest timestamped run directory (e.g., 'run_YYYYMMDD_HHMMSS')."""
     try:
-        event_files = [os.path.join(log_dir, f) for f in os.listdir(log_dir) if 'events.out.tfevents' in f]
+        run_dirs = [d for d in os.listdir(base_log_dir)
+                    if os.path.isdir(os.path.join(base_log_dir, d)) and d.startswith("run_")]
+        if not run_dirs:
+            return None
+        # Sort directories, assuming timestamp format ensures chronological order
+        latest_run_dir = max(run_dirs)
+        return os.path.join(base_log_dir, latest_run_dir)
+    except FileNotFoundError:
+        logger.warning(f"Base log directory not found: {base_log_dir}")
+        return None
+    except Exception as e:
+        logger.error(f"Error finding latest run directory in {base_log_dir}: {e}")
+        return None
+
+def find_latest_event_file(run_dir: str) -> str | None:
+    """Finds the most recent TensorBoard event file in a specific run directory."""
+    try:
+        # Look for event files within the specific run directory
+        event_files = [os.path.join(run_dir, f) for f in os.listdir(run_dir) if 'events.out.tfevents' in f]
         if not event_files:
+            logger.warning(f"No event files found in run directory: {run_dir}")
             return None
         # Filter out potential temporary files if any exist
         event_files = [f for f in event_files if os.path.getsize(f) > 0]
         if not event_files:
+             logger.warning(f"No valid event files (non-empty) found in: {run_dir}")
              return None
+        # There should typically only be one, but return the latest if multiple somehow exist
         return max(event_files, key=os.path.getctime)
     except FileNotFoundError:
-        logger.warning(f"Log directory not found: {log_dir}")
+        logger.warning(f"Run directory not found: {run_dir}")
         return None
     except Exception as e:
-        logger.error(f"Error finding latest event file in {log_dir}: {e}")
+        logger.error(f"Error finding event file in {run_dir}: {e}")
         return None
 
 
@@ -219,10 +240,18 @@ if __name__ == "__main__":
 
     # --- Load TensorBoard Data ---
     event_file = args.event_file
-    if not event_file:
-        event_file = find_latest_event_file(args.log_dir)
+    target_log_dir = args.log_dir # The base directory (e.g., output/ppo_logs)
 
-    if event_file:
+    if not event_file:
+        logger.info(f"Event file not specified, searching {target_log_dir} for latest run...")
+        latest_run_dir = find_latest_run_dir(target_log_dir)
+        if latest_run_dir:
+            logger.info(f"Found latest run directory: {latest_run_dir}")
+            event_file = find_latest_event_file(latest_run_dir)
+        else:
+            logger.warning(f"No run directories found in {target_log_dir}. Cannot find event file.")
+
+    if event_file and os.path.exists(event_file):
         tb_data = load_tensorboard_data(event_file)
         logger.info("-" * 30)
 

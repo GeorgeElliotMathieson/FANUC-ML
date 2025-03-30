@@ -13,29 +13,48 @@ from stable_baselines3 import PPO
 from .fanuc_env import FanucEnv
 
 # Define paths relative to the project root (one level up from src/)
-PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..', '..') # Adjusted for src/rl/
 DEFAULT_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
-DEFAULT_MODEL_NAME = "ppo_fanuc_model.zip"
+DEFAULT_MODEL_NAME = "final_model.zip" # Default model name saved by train.py
 # Point to the new config directory
 BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
 
-def find_latest_model(log_dir: str) -> str | None:
-    """Finds the latest saved model .zip file in the log directory."""
+def find_latest_run_dir(base_log_dir: str) -> str | None:
+    """Finds the latest timestamped run directory (e.g., 'run_YYYYMMDD_HHMMSS')."""
     try:
-        # Look for the specific model name first
-        specific_model_path = os.path.join(log_dir, DEFAULT_MODEL_NAME)
-        if os.path.exists(specific_model_path):
-             return specific_model_path
-
-        # Fallback to finding any rl_model or ppo_fanuc_model zip
-        list_of_files = glob.glob(os.path.join(log_dir, 'ppo_fanuc_model*.zip')) + \
-                          glob.glob(os.path.join(log_dir, 'rl_model_*.zip'))
-        if not list_of_files:
+        run_dirs = [d for d in os.listdir(base_log_dir)
+                    if os.path.isdir(os.path.join(base_log_dir, d)) and d.startswith("run_")]
+        if not run_dirs:
             return None
-        latest_file = max(list_of_files, key=os.path.getctime)
-        return latest_file
+        # Sort directories, assuming timestamp format ensures chronological order
+        latest_run_dir = max(run_dirs)
+        return os.path.join(base_log_dir, latest_run_dir)
+    except FileNotFoundError:
+        logger.warning(f"Base log directory not found: {base_log_dir}")
+        return None
     except Exception as e:
-        logging.error(f"Error finding latest model in {log_dir}: {e}")
+        logger.error(f"Error finding latest run directory in {base_log_dir}: {e}")
+        return None
+
+def find_model_in_run_dir(run_dir: str) -> str | None:
+    """Finds the final model or the latest checkpoint in a specific run directory."""
+    try:
+        # Look for the final model first
+        final_model_path = os.path.join(run_dir, DEFAULT_MODEL_NAME)
+        if os.path.exists(final_model_path):
+            logger.info(f"Found final model: {final_model_path}")
+            return final_model_path
+
+        # Fallback to finding the latest checkpoint model
+        list_of_checkpoints = glob.glob(os.path.join(run_dir, 'rl_model_*_steps.zip'))
+        if not list_of_checkpoints:
+            logger.warning(f"No final model or checkpoints found in {run_dir}")
+            return None
+        latest_checkpoint = max(list_of_checkpoints, key=os.path.getctime)
+        logger.info(f"Found latest checkpoint model: {latest_checkpoint}")
+        return latest_checkpoint
+    except Exception as e:
+        logger.error(f"Error finding model in {run_dir}: {e}")
         return None
 
 if __name__ == "__main__":
@@ -58,14 +77,20 @@ if __name__ == "__main__":
     # --- Determine Model Path --- 
     model_file = args.model_path
     if model_file is None:
-        logger.info(f"Model path not specified, searching {DEFAULT_LOG_DIR}...")
-        model_file = find_latest_model(DEFAULT_LOG_DIR)
+        logger.info(f"Model path not specified, searching {DEFAULT_LOG_DIR} for latest run...")
+        latest_run_dir = find_latest_run_dir(DEFAULT_LOG_DIR)
+        if latest_run_dir:
+            logger.info(f"Found latest run directory: {latest_run_dir}")
+            model_file = find_model_in_run_dir(latest_run_dir)
+        else:
+            logger.error(f"No run directories found in {DEFAULT_LOG_DIR}. Cannot find model.")
+            sys.exit(1)
 
     # Check if a model was found or specified
     if not model_file or not os.path.exists(model_file):
-        fallback_path = os.path.join(DEFAULT_LOG_DIR, DEFAULT_MODEL_NAME)
-        logger.error(f"Error: Model file not found or specified. Tried searching {DEFAULT_LOG_DIR} and looking for {model_file or fallback_path}")
-        logger.error("Please ensure a model has been trained or specify path using --model_path.")
+        # Update error message
+        logger.error(f"Error: Model file not found. Tried searching latest run in {DEFAULT_LOG_DIR} or using specified path: {args.model_path or '(searched)'}")
+        logger.error("Please ensure a model has been trained or specify a valid path using --model_path.")
         sys.exit(1) # Exit if no model found
 
     logger.info(f"\nLoading model from {model_file} for visual testing...")

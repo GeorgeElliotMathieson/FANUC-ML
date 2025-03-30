@@ -25,8 +25,9 @@ END_EFFECTOR_LINK_NAME = robot_config.END_EFFECTOR_LINK_NAME
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
 # Point to the new config directory
 CONFIG_FILENAME = os.path.join(PROJECT_ROOT, "config", "workspace_config.json")
-FANUC_DIR = os.path.join(PROJECT_ROOT, "Fanuc")
-URDF_FILENAME = os.path.join(FANUC_DIR, "urdf", "Fanuc.urdf")
+# Point to the new assets directory
+ROBOT_MODEL_DIR = os.path.join(PROJECT_ROOT, "assets", "robot_model")
+URDF_FILENAME = os.path.join(ROBOT_MODEL_DIR, "urdf", "Fanuc.urdf")
 
 # --- Configure Logging --- 
 logging.basicConfig(
@@ -131,7 +132,7 @@ def main():
             logger.error(f"Cannot find URDF file at {URDF_FILENAME}")
             return
 
-        p.setAdditionalSearchPath(FANUC_DIR)
+        p.setAdditionalSearchPath(ROBOT_MODEL_DIR)
         logger.info(f"Loading robot from: {URDF_FILENAME}")
         robot_id = p.loadURDF(
             URDF_FILENAME,

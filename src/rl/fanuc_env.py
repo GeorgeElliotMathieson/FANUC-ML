@@ -145,17 +145,16 @@ class FanucEnv(gym.Env):
         # Load plane and robot
         self.plane_id = p.loadURDF("plane.urdf") # Store plane ID
 
-        # Construct the paths relative to this script's location (src/)
+        # Construct the paths relative to this script's location (src/rl/)
         script_dir = os.path.dirname(__file__)
-        project_root = os.path.join(script_dir, '..') # Go one level up to project root
-        # Path to Fanuc model relative to project root
-        fanuc_model_dir = os.path.join(project_root, "Fanuc")
-        urdf_file_path = os.path.join(fanuc_model_dir, "urdf", "Fanuc.urdf")
-        mesh_path = fanuc_model_dir # Main directory for meshes
+        project_root = os.path.join(script_dir, '..', '..') # Go two levels up to project root
+        # Path to robot model relative to project root
+        robot_model_dir = os.path.join(project_root, "assets", "robot_model")
+        urdf_file_path = os.path.join(robot_model_dir, "urdf", "Fanuc.urdf")
 
         # Load URDF with adjusted mesh paths
-        # Add the Fanuc directory (relative to project root) to the search path:
-        p.setAdditionalSearchPath(mesh_path)
+        # Add the model directory (relative to project root) to the search path:
+        p.setAdditionalSearchPath(robot_model_dir)
 
         # Load the robot - using a fixed base
         self.robot_id = p.loadURDF(

@@ -10,6 +10,9 @@ import argparse
 import sys
 import logging # Import logging
 from typing import Type, Union
+import datetime # For timestamped directories
+import shutil # For moving directories
+import traceback # For traceback
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
@@ -42,11 +45,14 @@ INITIAL_DEFAULT_PARAMS = {
 }
 
 # Define paths relative to the project root (one level up from src/)
-PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..', '..') # Adjusted for src/rl/
 # Point to the new config directory
 BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
-LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
-SAVE_PATH = os.path.join(LOG_DIR, "ppo_fanuc_model")
+# Base log directory
+BASE_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
+# Archive directory for old logs
+ARCHIVE_LOG_DIR = os.path.join(PROJECT_ROOT, "archive", "archived_ppo_logs")
+# SAVE_PATH = os.path.join(LOG_DIR, "ppo_fanuc_model") # Will be run-specific now
 
 # --- Function to load parameters ---
 def load_best_or_default_params():
@@ -178,8 +184,17 @@ if __name__ == "__main__":
     logger.info(f"Using device: {device}")
 
     # --- Load Best or Default Params --- 
-    # Uses global BEST_PARAMS_FILE path
     current_params = load_best_or_default_params()
+
+    # --- Generate Run-Specific Directory --- 
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"run_{timestamp}"
+    current_log_dir = os.path.join(BASE_LOG_DIR, run_name)
+    os.makedirs(current_log_dir, exist_ok=True)
+    logger.info(f"Saving logs and models for this run to: {current_log_dir}")
+
+    # Define run-specific final model save path
+    final_model_save_path = os.path.join(current_log_dir, "final_model.zip")
 
     # Use logger to print parameters
     logger.info("Using the following parameters for training:")
@@ -191,7 +206,7 @@ if __name__ == "__main__":
     # --- Set Training Constants --- 
     training_duration_seconds = args.duration * 60
     logger.info(f"Requested training duration: {args.duration} mins ({training_duration_seconds} s).")
-    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(BASE_LOG_DIR, exist_ok=True)
     save_freq = 50_000
 
     # --- Determine Number of CPUs --- 
@@ -227,7 +242,7 @@ if __name__ == "__main__":
         vf_coef=current_params["vf_coef"],
         max_grad_norm=current_params["max_grad_norm"],
         verbose=1, # Print training progress
-        tensorboard_log=LOG_DIR, # Use updated LOG_DIR path
+        tensorboard_log=current_log_dir, # Use run-specific directory
         device=device,
         policy_kwargs=policy_kwargs # Pass loaded policy_kwargs
     )
@@ -235,8 +250,8 @@ if __name__ == "__main__":
     # --- Callbacks --- 
     checkpoint_callback = CheckpointCallback(
         save_freq=max(save_freq // num_cpu, 1),
-        save_path=LOG_DIR,
-        name_prefix="rl_model"
+        save_path=current_log_dir, # Save checkpoints within the run directory
+        name_prefix="rl_model" # Checkpoints will be like current_log_dir/rl_model_xxxx_steps.zip
     )
     time_limit_callback = TimeLimitCallback(max_duration_seconds=training_duration_seconds, verbose=1)
     monitor_callback = TrainingMonitorCallback(check_freq=num_cpu * 100)
@@ -257,11 +272,54 @@ if __name__ == "__main__":
     finally:
         # --- Save the final model ---
         logger.info("Training finished. Saving final model...") # Use logger
-        model.save(SAVE_PATH) # Use updated SAVE_PATH
+        model.save(final_model_save_path) # Use updated SAVE_PATH
         train_env.close() # Important to close the parallel environments
         end_time = time.time()
-        logger.info(f"Model saved to {SAVE_PATH}.zip") # Use logger
+        logger.info(f"Model saved to {final_model_save_path}") # Use logger
         logger.info(f"Total training time: {(end_time - start_time)/60:.2f} minutes") # Use logger
-    # --- End of Training Block ---
+
+    # --- Archiving Logic --- 
+    try:
+        logger.info("Checking for old runs to archive...")
+        keep_latest = 5
+        os.makedirs(ARCHIVE_LOG_DIR, exist_ok=True)
+
+        # Get all run directories in the base log directory
+        all_runs = [os.path.join(BASE_LOG_DIR, d) for d in os.listdir(BASE_LOG_DIR)
+                    if os.path.isdir(os.path.join(BASE_LOG_DIR, d)) and d.startswith("run_")] # Filter for run directories
+
+        if len(all_runs) > keep_latest:
+            # Sort runs by creation time (oldest first)
+            all_runs.sort(key=os.path.getctime)
+            
+            # Determine runs to archive
+            runs_to_archive = all_runs[:-keep_latest] # All except the last 'keep_latest'
+            logger.info(f"Found {len(all_runs)} runs. Archiving {len(runs_to_archive)} oldest runs to {ARCHIVE_LOG_DIR}")
+
+            for run_path in runs_to_archive:
+                run_dir_name = os.path.basename(run_path)
+                destination_path = os.path.join(ARCHIVE_LOG_DIR, run_dir_name)
+                
+                # Avoid moving the archive directory into itself if somehow listed
+                if os.path.abspath(run_path) == os.path.abspath(ARCHIVE_LOG_DIR):
+                    continue 
+                # Avoid moving destination into itself if it already exists somehow
+                if os.path.abspath(run_path) == os.path.abspath(destination_path):
+                     logger.warning(f"Skipping move: Source and destination are the same ({run_path}).")
+                     continue
+
+                try:
+                    logger.info(f"  Archiving {run_dir_name}...")
+                    shutil.move(run_path, destination_path)
+                    logger.info(f"  Successfully moved {run_dir_name} to archive.")
+                except Exception as e:
+                    logger.error(f"  Failed to archive {run_dir_name}: {e}")
+        else:
+            logger.info(f"Found {len(all_runs)} runs. No archiving needed (keeping latest {keep_latest}).")
+
+    except Exception as e:
+        logger.error(f"An error occurred during the archiving process: {e}")
+        logger.error(traceback.format_exc()) # Log traceback for debugging
+    # --- End of Archiving Block --- 
     
     logger.info("Training script finished.") 
