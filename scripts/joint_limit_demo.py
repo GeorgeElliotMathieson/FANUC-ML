@@ -6,11 +6,14 @@ import numpy as np
 import logging # <-- Add logging import
 import sys # <-- Add sys import
 
+# Import robot config constants
+from config import robot_config
+
 # --- Constants (adapted from fanuc_env.py) ---
-# Using the limits defined in fanuc_env.py as the URDF uses 'continuous'
-JOINT_LIMITS_LOWER = np.array([-2.96, -1.74, -2.37, -3.31, -2.18]) # J1-J5 radians
-JOINT_LIMITS_UPPER = np.array([ 2.96,  2.35,  2.67,  3.31,  2.18]) # J1-J5 radians
-NUM_CONTROLLABLE_JOINTS = 5
+# Use constants imported from robot_config
+JOINT_LIMITS_LOWER = robot_config.JOINT_LIMITS_LOWER_RAD
+JOINT_LIMITS_UPPER = robot_config.JOINT_LIMITS_UPPER_RAD
+NUM_CONTROLLABLE_JOINTS = robot_config.NUM_CONTROLLED_JOINTS
 SIMULATION_TIME_STEP = 1.0/240.0
 MOVEMENT_DURATION_STEPS = 240 # Number of sim steps to move (e.g., 1 second at 240Hz)
 PAUSE_DURATION = 0.5 # Seconds to pause at limits/home

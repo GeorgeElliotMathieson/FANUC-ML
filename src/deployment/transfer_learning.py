@@ -8,6 +8,9 @@ import json # Import json for loading parameters
 from stable_baselines3 import PPO
 from typing import Optional # Import Optional for type hinting
 
+# Import robot config constants
+from config import robot_config
+
 logger = logging.getLogger(__name__)
 
 # Epsilon value to prevent division by zero in normalization/calibration
@@ -19,8 +22,8 @@ DEFAULT_STATE_STD: Optional[np.ndarray] = None  # Defaults to no normalization i
 DEFAULT_ACTION_SCALE: Optional[np.ndarray] = None # Defaults to no scaling if None
 DEFAULT_ACTION_OFFSET: Optional[np.ndarray] = None # Defaults to no offset if None
 DEFAULT_PARAMS_FILE = os.path.join(os.path.dirname(__file__), '..', 'config', 'transfer_params.json')
-# Default velocity limits (fallback if not provided)
-DEFAULT_VELOCITY_LIMITS_RAD_S = np.array([np.pi, np.pi, np.pi, np.pi*2, np.pi*2]) # Match deploy_real.py
+# Use default velocity limits from config
+DEFAULT_VELOCITY_LIMITS_RAD_S = robot_config.VELOCITY_LIMITS_RAD_S
 
 class RobotTransfer:
     """

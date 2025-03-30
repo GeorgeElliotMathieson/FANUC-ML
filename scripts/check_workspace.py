@@ -8,15 +8,18 @@ import logging # Import logging
 import traceback # Import traceback
 import sys
 
+# Import robot config constants
+from config import robot_config
+
 # --- Constants (Adapted from fanuc_env.py) ---
-# Ensure these match your fanuc_env.py
-JOINT_LIMITS_LOWER = np.array([-2.96, -1.74, -2.37, -3.31, -2.18]) # J1-J5 radians
-JOINT_LIMITS_UPPER = np.array([ 2.96,  2.35,  2.67,  3.31,  2.18]) # J1-J5 radians
-NUM_CONTROLLABLE_JOINTS = 5
+# Use constants imported from robot_config
+JOINT_LIMITS_LOWER = robot_config.JOINT_LIMITS_LOWER_RAD
+JOINT_LIMITS_UPPER = robot_config.JOINT_LIMITS_UPPER_RAD
+NUM_CONTROLLABLE_JOINTS = robot_config.NUM_CONTROLLED_JOINTS
 NUM_SAMPLES_PASS_1 = 100000 # Samples for initial max reach and Z
 NUM_SAMPLES_PASS_2 = 50000  # Samples specifically for reach at midpoint Z (can be less)
 MIDPOINT_Z_TOLERANCE = 0.05 # +/- tolerance in meters for Z midpoint slice
-END_EFFECTOR_LINK_NAME = 'Part6' # Ensure this matches the link name in your URDF/env
+END_EFFECTOR_LINK_NAME = robot_config.END_EFFECTOR_LINK_NAME
 
 # Define paths relative to the project root (one level up from scripts/)
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')

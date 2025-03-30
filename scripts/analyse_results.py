@@ -6,7 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import logging
 import collections # Import collections needed for deque if used later
-from tensorboard.backend.event_processing import event_accumulator
+from tensorboard.backend.event_processing import event_accumulator # type: ignore
 
 # --- Configure Logging ---
 logging.basicConfig(

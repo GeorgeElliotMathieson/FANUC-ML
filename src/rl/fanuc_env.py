@@ -10,6 +10,9 @@ import logging # Import logging
 import collections # Import collections for deque
 import traceback # Import traceback for better error logging
 
+# Import robot config constants
+from config import robot_config
+
 # --- Configure Logging (Root Logger) --- 
 # Basic config for use when the env is run standalone or imported
 # More sophisticated setup could involve named loggers
@@ -162,17 +165,15 @@ class FanucEnv(gym.Env):
             flags=p.URDF_USE_SELF_COLLISION,
         )
 
-        # --- Robot Configuration ---
+        # --- Robot Configuration (Use imported constants) ---
         self.num_joints = p.getNumJoints(self.robot_id)
         self.joint_indices = []
         self.joint_names = []
-        # Approximate joint limits (radians) for LRMate 200iD (J1 to J5 based on URDF)
-        # Source: FANUC LRMate 200iD Datasheet / General Robotics Knowledge
-        # Note: URDF uses continuous joints, so limits are enforced here.
-        self.joint_limits_lower = np.array([-2.96, -1.74, -2.37, -3.31, -2.18]) # J1, J2, J3, J4, J5
-        self.joint_limits_upper = np.array([ 2.96,  2.35,  2.67,  3.31,  2.18]) # J1, J2, J3, J4, J5
-        # Velocity limits (radians/sec) - Estimate reasonable values
-        self.velocity_limits = np.array([6.0, 6.0, 6.0, 8.0, 8.0]) * 0.5 # Scaled down
+        # Use constants from robot_config
+        self.joint_limits_lower = robot_config.JOINT_LIMITS_LOWER_RAD
+        self.joint_limits_upper = robot_config.JOINT_LIMITS_UPPER_RAD
+        self.velocity_limits = robot_config.VELOCITY_LIMITS_RAD_S
+        self.num_controllable_joints = robot_config.NUM_CONTROLLED_JOINTS
 
         link_name_to_index = {p.getJointInfo(self.robot_id, i)[12].decode('UTF-8'): i for i in range(self.num_joints)}
         self.end_effector_link_index = -1
@@ -185,13 +186,14 @@ class FanucEnv(gym.Env):
             # Identify controllable joints (only revolute/continuous are represented as JOINT_REVOLUTE by PyBullet)
             if joint_type == p.JOINT_REVOLUTE:
                 # Assuming the 5 controllable joints appear sequentially in the URDF
-                if len(self.joint_indices) < 5:
+                # Check against NUM_CONTROLLED_JOINTS from config
+                if len(self.joint_indices) < self.num_controllable_joints:
                     self.joint_indices.append(i)
                     self.joint_names.append(joint_name)
 
-            # Find end effector link index (assuming 'Part6' is the EE link)
+            # Find end effector link index (using name from config)
             link_name = info[12].decode('UTF-8')
-            if link_name == 'Part6':
+            if link_name == robot_config.END_EFFECTOR_LINK_NAME:
                 self.end_effector_link_index = i # Note: This gives the *joint* index connected *to* Part6.
                                                 # Pybullet uses link index for getLinkState, which is often joint_index.
 
@@ -203,8 +205,6 @@ class FanucEnv(gym.Env):
 
         if len(self.joint_indices) != 5:
              raise ValueError(f"Expected 5 controllable joints, but found {len(self.joint_indices)}. URDF might be different than expected.")
-
-        self.num_controllable_joints = len(self.joint_indices)
 
         # --- Action Space (Normalised Joint Velocity Control) ---
         # Action is delta velocity for each joint, scaled by velocity_limits

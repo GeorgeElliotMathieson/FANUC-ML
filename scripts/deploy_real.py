@@ -9,9 +9,15 @@ import traceback
 import json # Import json for loading workspace config
 import math # Import math for spherical coords
 import collections # <-- Import collections for deque
-from typing import List, Optional, Any # Import List, Optional, Any for type hinting
-import pybullet as p # Import pybullet for FK calculation
-import pybullet_data
+from typing import List, Optional, Any, Tuple # Import List, Optional, Any, Tuple for type hinting
+import pybullet as p # type: ignore # Import pybullet for FK calculation
+import pybullet_data # type: ignore
+
+# Import robot config constants
+from config import robot_config
+
+# Import custom modules (ensure src is in PYTHONPATH)
+# Add src directory to path temporarily if running script directly
 
 # --- Project Setup ---
 # Ensure the src directory is in the Python path
@@ -23,8 +29,8 @@ try:
         sys.path.insert(0, SRC_DIR)
 
     # Now we can import from src
-    from robot_api import FANUCRobotAPI # Removed DEFAULT imports
-    from transfer_learning import RobotTransfer
+    from src.deployment.robot_api import FANUCRobotAPI
+    from src.deployment.transfer_learning import RobotTransfer
 except ImportError as e:
      print(f"Error importing src modules: {e}")
      print("Ensure deploy_real.py is in the 'scripts' directory and src is accessible.")
@@ -45,8 +51,12 @@ DEFAULT_POS_SPEED_PERCENT = 20 # Speed for position moves
 # ** CRITICAL: DEFINE ACCURATE SAFETY LIMITS FOR YOUR SETUP **
 WORKSPACE_LIMITS_XYZ_MIN = np.array([0.1, -0.5, 0.05]) # Min X, Y, Z (meters)
 WORKSPACE_LIMITS_XYZ_MAX = np.array([0.8, 0.5, 0.8])  # Max X, Y, Z (meters)
-MAX_JOINT_VEL_RAD_S = np.array([np.pi, np.pi, np.pi, np.pi*2, np.pi*2]) # Max velocity per joint (rad/s)
-MAX_STEP_DISPLACEMENT_M = 0.05 # Max allowed EE movement per step (meters)
+
+# Load velocity limits from config
+MAX_JOINT_VEL_RAD_S = robot_config.VELOCITY_LIMITS_RAD_S
+
+# Workspace boundaries (Example - **VERIFY AND UPDATE**)
+# Used for safety checks if FK is available
 
 # Calibration settings
 CALIBRATION_POSES = {

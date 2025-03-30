@@ -7,6 +7,9 @@ import logging
 import traceback # Import traceback for better error logging
 import threading # Import threading for lock
 
+# Import robot config constants
+from config import robot_config
+
 logger = logging.getLogger(__name__)
 
 # Default values based on deprecated/control/instructions.md and example_usage.py
@@ -34,29 +37,21 @@ class FANUCRobotAPI:
         self.timeout: float = DEFAULT_TIMEOUT
         self.lock = threading.Lock() # Add lock for thread safety if sending commands from different threads
 
-        # Constants for joint limits (APPROXIMATE - VERIFY WITH YOUR ROBOT SPEC)
-        # Using limits from fanuc_env.py (assuming LRMate 200iD - **VERIFY YOUR MODEL**)
-        # Units: Degrees
-        self.joint_limits_deg = {
-            0: [-np.rad2deg(2.96), np.rad2deg(2.96)],  # J1 (~ +/- 170 deg)
-            1: [-np.rad2deg(1.74), np.rad2deg(2.35)],  # J2 (~ -100/+135 deg)
-            2: [-np.rad2deg(2.37), np.rad2deg(2.67)],  # J3 (~ -136/+153 deg)
-            3: [-np.rad2deg(3.31), np.rad2deg(3.31)],  # J4 (~ +/- 190 deg)
-            4: [-np.rad2deg(2.18), np.rad2deg(2.18)],  # J5 (~ +/- 125 deg)
-            5: [-360*2, 360*2]                        # J6 Example (~ +/- 720 deg) - VERIFY if used
-        }
-        # Number of joints the RL agent controls (based on fanuc_env.py action space)
-        self.num_controlled_joints: int = 5 # Store this based on RL environment
+        # --- Use constants from config --- #
+        # Number of joints the RL agent controls
+        self.num_controlled_joints: int = robot_config.NUM_CONTROLLED_JOINTS
         # Number of joints reported by RDJPOS (typically 6 for LRMate)
-        self.num_reported_joints: int = 6
+        self.num_reported_joints: int = robot_config.NUM_REPORTED_JOINTS
+        # Joint limits (Degrees) for reported joints
+        self.joint_limits_deg = robot_config.REPORTED_JOINT_LIMITS_DEG
 
-        # Convert to radians for internal reference if needed (API uses degrees)
+        # Convert controlled joints' limits to radians for internal reference if needed
         self.joint_limits_rad = {
-            k: [np.deg2rad(low), np.deg2rad(high)]
-            for k, (low, high) in self.joint_limits_deg.items()
-            # Only store rad limits for joints relevant to RL control
-            if k < self.num_controlled_joints
+            i: [np.deg2rad(self.joint_limits_deg[i][0]), np.deg2rad(self.joint_limits_deg[i][1])]
+            for i in range(self.num_controlled_joints)
+            if i in self.joint_limits_deg # Check if index exists in dict
         }
+
         logger.info(f"Initialized FANUCRobotAPI for {self.num_controlled_joints} controlled joints.")
         logger.info(f"  Target IP: {self.ip}, Port: {self.port}")
         logger.info("  Joint Limits (Degrees, Approx - VERIFY):")

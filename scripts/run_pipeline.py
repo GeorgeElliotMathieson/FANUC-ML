@@ -104,7 +104,7 @@ if __name__ == "__main__":
 
         # Command no longer needs --storage argument
         tune_command = [
-            "src.tune",
+            "src.rl.tune",
             "--duration", str(args.tune_duration),
             "--study_name", args.study_name,
             "--seed", str(args.seed)
@@ -120,9 +120,9 @@ if __name__ == "__main__":
 
     # --- Step 2: Training ---
     if not args.skip_training:
-        # Update command to use module path 'src.train'
+        # Update command to use module path 'src.rl.train'
         train_command = [
-            "src.train", # Module path
+            "src.rl.train",
             "--duration", str(args.train_duration)
         ]
         if not run_command(train_command, "Training"):
@@ -133,9 +133,9 @@ if __name__ == "__main__":
 
     # --- Step 3: Visual Testing ---
     if not args.skip_testing:
-        # Update command to use module path 'src.test'
+        # Update command to use module path 'src.rl.test'
         test_command = [
-            "src.test", # Module path
+            "src.rl.test",
             "--episodes", str(args.test_episodes)
         ]
         # We generally don't need to abort the whole pipeline if only the visual test fails
