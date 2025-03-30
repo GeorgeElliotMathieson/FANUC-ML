@@ -49,6 +49,12 @@ class FanucEnv(gym.Env):
         min_reach_default = 0.02
         # Update default based on check_workspace.py result (approx)
         max_reach_default = 1.26 # Updated from 1.2
+        safety_factor = 0.95 # Safety factor applied to chosen reach value (Updated to 95%)
+
+        loaded_min_reach = min_reach_default
+        loaded_max_reach = max_reach_default
+        loaded_reach_at_midpoint = 0.0 # Default
+
         try:
             if os.path.exists(WORKSPACE_CONFIG_FILENAME):
                 with open(WORKSPACE_CONFIG_FILENAME, 'r') as f:
@@ -56,34 +62,29 @@ class FanucEnv(gym.Env):
                 # Use loaded values, falling back to default if a key is missing
                 loaded_min_reach = workspace_config.get('min_reach', min_reach_default)
                 loaded_max_reach = workspace_config.get('max_reach', max_reach_default)
-                # Use logger
-                logger.info(f"Loaded workspace config: Min Reach={loaded_min_reach:.4f}, Max Reach={loaded_max_reach:.4f}")
-                # Remove safety factor - target generation offset removed
-                # safety_factor = 0.98
-                self.min_base_radius = loaded_min_reach
-                # Apply 90% safety factor to max reach
-                safety_factor = 0.90
-                self.max_target_radius = loaded_max_reach * safety_factor
-                # Use logger
-                logger.info(f"Applied safety factor ({safety_factor*100}%). Using Max Target Radius: {self.max_target_radius:.4f}")
+                loaded_reach_at_midpoint = workspace_config.get('reach_at_midpoint_z', 0.0)
+                logger.info(f"Loaded workspace config: Min={loaded_min_reach:.4f}, AbsMax={loaded_max_reach:.4f}, MidpointZReach={loaded_reach_at_midpoint:.4f}")
             else:
-                # Use logger
                 logger.warning(f"{WORKSPACE_CONFIG_FILENAME} not found. Using default workspace radii: Min={min_reach_default}, Max={max_reach_default}")
-                self.min_base_radius = min_reach_default
-                # Apply 90% safety factor to default max reach
-                safety_factor = 0.90
-                self.max_target_radius = max_reach_default * safety_factor
-                # Use logger
-                logger.info(f"Applied safety factor ({safety_factor*100}%). Using Max Target Radius: {self.max_target_radius:.4f}")
         except (IOError, json.JSONDecodeError) as e:
-            # Use logger
-            logger.warning(f"Warning: Error loading {WORKSPACE_CONFIG_FILENAME}: {e}. Using default workspace radii: Min={min_reach_default}, Max={max_reach_default}")
-            self.min_base_radius = min_reach_default
-            # Apply 90% safety factor to default max reach
-            safety_factor = 0.90
-            self.max_target_radius = max_reach_default * safety_factor
-            # Use logger
-            logger.info(f"Applied safety factor ({safety_factor*100}%). Using Max Target Radius: {self.max_target_radius:.4f}")
+            logger.warning(f"Warning: Error loading {WORKSPACE_CONFIG_FILENAME}: {e}. Using default workspace radii.")
+
+        # --- Determine Max Target Radius ---
+        self.min_base_radius = loaded_min_reach # Always use the loaded/default min reach
+
+        if loaded_reach_at_midpoint > 0:
+            # Use the reach calculated near the midpoint Z, applying the safety factor
+            base_radius = loaded_reach_at_midpoint
+            radius_source = "reach near midpoint Z"
+        else:
+            # Fallback: Use the absolute max reach
+            base_radius = loaded_max_reach
+            radius_source = "absolute max reach"
+            logger.warning(f"Reach at midpoint Z not available or invalid. Using fallback {radius_source}.")
+
+        self.max_target_radius = base_radius * safety_factor
+        logger.info(f"Using Max Target Radius: {self.max_target_radius:.4f} (Based on {radius_source}={base_radius:.4f} * {safety_factor})")
+
 
         # Calculate minimum target radius (e.g., 10x min base reach)
         self.min_target_radius_multiplier = 10.0

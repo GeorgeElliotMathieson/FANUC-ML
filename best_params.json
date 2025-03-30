@@ -1,27 +1,15 @@
 {
     "policy": "MlpPolicy",
-    "learning_rate": 0.0003,
-    "n_steps": 2048,
+    "learning_rate": 0.000587627124998195,
+    "n_steps": 1024,
     "batch_size": 256,
-    "n_epochs": 10,
-    "gamma": 0.99,
-    "gae_lambda": 0.95,
-    "clip_range": 0.2,
-    "ent_coef": 1e-05,
-    "vf_coef": 0.5,
-    "max_grad_norm": 0.5,
-    "angle_bonus_factor": 8.0,
-    "net_arch_size": "medium",
-    "policy_kwargs": {
-        "net_arch": {
-            "pi": [
-                128,
-                128
-            ],
-            "vf": [
-                128,
-                128
-            ]
-        }
-    }
+    "n_epochs": 12,
+    "gamma": 0.9228623681305521,
+    "gae_lambda": 0.9061412300516898,
+    "clip_range": 0.14211808551213018,
+    "ent_coef": 4.541321902296496e-06,
+    "vf_coef": 0.6080217251685085,
+    "max_grad_norm": 0.9011790190366016,
+    "angle_bonus_factor": 6.070887201131548,
+    "net_arch_size": "medium"
 }
