@@ -10,7 +10,7 @@ import json # Import json
 JOINT_LIMITS_LOWER = np.array([-2.96, -1.74, -2.37, -3.31, -2.18]) # J1-J5 radians
 JOINT_LIMITS_UPPER = np.array([ 2.96,  2.35,  2.67,  3.31,  2.18]) # J1-J5 radians
 NUM_CONTROLLABLE_JOINTS = 5
-NUM_SAMPLES = 20000 # Number of random configurations to sample
+NUM_SAMPLES = 100000 # Increased from 20000
 END_EFFECTOR_LINK_NAME = 'Part6' # Ensure this matches the link name in your URDF/env
 
 CONFIG_FILENAME = "workspace_config.json" # Define config filename
@@ -110,8 +110,9 @@ def main():
             # Get End Effector Position using Forward Kinematics
             # We need computeForwardKinematics=True IF we didn't reset the state but used controls.
             # Since we used resetJointState, the base calculation should be correct.
+            # Use link origin [4] instead of CoM [0] for EE position
             link_state = p.getLinkState(robot_id, end_effector_link_index) # computeForwardKinematics=0 by default
-            ee_position = np.array(link_state[0]) # World position of the link's CoM
+            ee_position = np.array(link_state[4]) # World position of the link origin
 
             # Calculate distance from base (origin)
             distance_from_base = np.linalg.norm(ee_position)

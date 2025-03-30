@@ -3,20 +3,100 @@
         "run_name": "baseline",
         "params": {
             "learning_rate": 0.0003,
-            "n_steps": 2048,
+            "n_steps": 1024,
             "batch_size": 64,
-            "n_epochs": 10,
+            "n_epochs": 5,
             "gamma": 0.99,
             "gae_lambda": 0.95,
             "clip_range": 0.2,
-            "ent_coef": 0.0,
+            "ent_coef": 0.005,
             "vf_coef": 0.5,
             "max_grad_norm": 0.5,
             "policy": "MlpPolicy"
         },
         "iteration": 1,
-        "training_time_s": 33.45614242553711,
-        "mean_reward": -879.9299139611423,
-        "std_reward": 823.4654534890873
+        "training_time_s": 93.31377673149109,
+        "mean_reward": -792.6938707318157,
+        "std_reward": 689.0533636784623
+    },
+    {
+        "run_name": "learning_rate_x0p5",
+        "params": {
+            "learning_rate": 0.00015,
+            "n_steps": 1024,
+            "batch_size": 64,
+            "n_epochs": 5,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 97.00902509689331,
+        "mean_reward": -740.0500574346166,
+        "std_reward": 510.8851391678322
+    },
+    {
+        "run_name": "learning_rate_x1p5",
+        "params": {
+            "learning_rate": 0.00045,
+            "n_steps": 1024,
+            "batch_size": 64,
+            "n_epochs": 5,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 86.67370820045471,
+        "mean_reward": -807.9795936586336,
+        "std_reward": 450.78777859503793
+    },
+    {
+        "run_name": "n_steps_x0p5",
+        "params": {
+            "learning_rate": 0.0003,
+            "n_steps": 512,
+            "batch_size": 64,
+            "n_epochs": 5,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 92.63497018814087,
+        "mean_reward": -573.1906825597398,
+        "std_reward": 276.9325797104693
+    },
+    {
+        "run_name": "n_steps_x2p0",
+        "params": {
+            "learning_rate": 0.0003,
+            "n_steps": 2048,
+            "batch_size": 64,
+            "n_epochs": 5,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.005,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 81.10050988197327,
+        "mean_reward": -1098.2067848838865,
+        "std_reward": 442.22195114998897
     }
 ]

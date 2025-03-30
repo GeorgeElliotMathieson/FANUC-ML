@@ -39,12 +39,15 @@ class FanucEnv(gym.Env):
                 loaded_min_reach = workspace_config.get('min_reach', min_reach_default)
                 loaded_max_reach = workspace_config.get('max_reach', max_reach_default)
                 print(f"Loaded workspace config: Min Reach={loaded_min_reach:.4f}, Max Reach={loaded_max_reach:.4f}")
+                # Remove safety factor - target generation offset removed
+                # safety_factor = 0.98
                 self.min_base_radius = loaded_min_reach
-                self.max_target_radius = loaded_max_reach
+                self.max_target_radius = loaded_max_reach # Use the full loaded reach
+                # print(f"Applied safety factor ({safety_factor*100}%). Using Max Target Radius: {self.max_target_radius:.4f}")
             else:
                 print(f"Warning: {WORKSPACE_CONFIG_FILENAME} not found. Using default workspace radii: Min={min_reach_default}, Max={max_reach_default}")
                 self.min_base_radius = min_reach_default
-                self.max_target_radius = max_reach_default
+                self.max_target_radius = max_reach_default # Default already includes some buffer
         except (IOError, json.JSONDecodeError) as e:
             print(f"Warning: Error loading {WORKSPACE_CONFIG_FILENAME}: {e}. Using default workspace radii: Min={min_reach_default}, Max={max_reach_default}")
             self.min_base_radius = min_reach_default
@@ -55,6 +58,9 @@ class FanucEnv(gym.Env):
         self.current_curriculum_stage = 0
         self.success_streak_threshold = 3
         self.consecutive_successes = 0
+        # Base rotation reward shaping
+        self.previous_base_angle_error = None
+        self.angle_bonus_factor = 0.5 # Factor for base rotation reward
         # self.max_target_radius = 0.6 # Now loaded or defaulted above
         # self.min_base_radius = 0.15 # Now loaded or defaulted above
 
@@ -186,16 +192,18 @@ class FanucEnv(gym.Env):
         joint_positions = np.array([state[0] for state in joint_states], dtype=np.float32)
         joint_velocities = np.array([state[1] for state in joint_states], dtype=np.float32)
 
+        # Use link origin [4] instead of CoM [0] for EE position
         ee_state = p.getLinkState(self.robot_id, self.end_effector_link_index, computeForwardKinematics=True)
-        ee_position = np.array(ee_state[0], dtype=np.float32) # World position of the link's CoM
+        ee_position = np.array(ee_state[4], dtype=np.float32) # World position of the link origin
 
         relative_position = self.target_position - ee_position
 
         return np.concatenate([joint_positions, joint_velocities, relative_position])
 
     def _get_info(self):
+        # Use link origin [4] instead of CoM [0] for EE position
         ee_state = p.getLinkState(self.robot_id, self.end_effector_link_index)
-        ee_position = np.array(ee_state[0], dtype=np.float32)
+        ee_position = np.array(ee_state[4], dtype=np.float32) # World position of the link origin
         distance = np.linalg.norm(self.target_position - ee_position)
         # Update info dict for curriculum
         return {
@@ -232,21 +240,25 @@ class FanucEnv(gym.Env):
         theta = np.random.rand() * 2 * math.pi # Azimuthal angle
         phi = (np.random.rand() * 0.6 + 0.1) * math.pi # Polar angle (restricted to upper hemisphere mostly)
 
-        # Spherical to Cartesian conversion
+        # Spherical to Cartesian conversion (Centered at Origin 0,0,0)
         x = radius * math.sin(phi) * math.cos(theta)
         y = radius * math.sin(phi) * math.sin(theta)
-        z = radius * math.cos(phi) + 0.1 # Offset center slightly upwards
+        z = radius * math.cos(phi) # REMOVED + 0.1 offset
 
-        # Ensure target is not too close to the base (redundant check, but safe)
-        # min_dist_from_base = 0.15 - Now handled by min_radius
         # Ensure target is above a minimum ground clearance
         min_z_height = 0.05
-        # Check only min z height now
         if z < min_z_height:
-            # If too low, regenerate (simple approach)
+            # If too low, regenerate
             return self._get_random_target_pos()
 
-        # print(f"[Stage {self.current_curriculum_stage}] Target Radius: {radius:.3f} (Range: [{min_radius:.3f}-{max_radius:.3f}])") # Debug
+        # --- Detailed Debug Print for Visual Test --- 
+        if self.render_mode == 'human':
+            print(f"[Env Debug] Stage={self.current_curriculum_stage}, "
+                  f"Bounds=[{min_radius:.3f}-{max_radius:.3f}], "
+                  f"Sampled R={radius:.3f}, Phi={phi:.3f}, Theta={theta:.3f}, "
+                  f"Target=[{x:.3f}, {y:.3f}, {z:.3f}]")
+
+        # print(f"[Stage {self.current_curriculum_stage}] Target Radius: {radius:.3f} -> Pos: ({x:.3f}, {y:.3f}, {z:.3f})") # Debug
         return np.array([x, y, z], dtype=np.float32)
 
     def reset(self, seed=None, options=None):
@@ -274,6 +286,17 @@ class FanucEnv(gym.Env):
 
         # Generate a new target using the potentially updated curriculum stage
         self.target_position = self._get_random_target_pos()
+
+        # --- Reset Base Angle Error Tracking --- 
+        # Get initial base angle
+        initial_joint_states = p.getJointStates(self.robot_id, self.joint_indices)
+        initial_base_angle = initial_joint_states[0][0] # Position of the first joint (base)
+        # Calculate initial target azimuth
+        target_azimuth = math.atan2(self.target_position[1], self.target_position[0])
+        # Calculate initial angle error
+        angle_diff_raw = target_azimuth - initial_base_angle
+        initial_angle_error = math.atan2(math.sin(angle_diff_raw), math.cos(angle_diff_raw))
+        self.previous_base_angle_error = abs(initial_angle_error)
 
         # Remove previous target visual marker if it exists
         if hasattr(self, 'target_visual_shape_id') and self.target_visual_shape_id >= 0:
@@ -334,6 +357,22 @@ class FanucEnv(gym.Env):
         # --- Calculate Reward ---
         # Dense reward: negative squared distance to target
         reward = -(distance**2)
+
+        # --- Base Rotation Reward (Potential-Based) --- 
+        base_angle = current_positions[0] # Base joint is index 0
+        target_azimuth = math.atan2(self.target_position[1], self.target_position[0])
+        angle_diff_raw = target_azimuth - base_angle
+        current_angle_error_signed = math.atan2(math.sin(angle_diff_raw), math.cos(angle_diff_raw))
+        current_angle_error_abs = abs(current_angle_error_signed)
+
+        if self.previous_base_angle_error is not None:
+            angle_improvement = self.previous_base_angle_error - current_angle_error_abs
+            rotation_reward = self.angle_bonus_factor * angle_improvement
+            reward += rotation_reward
+            # print(f"Angle Err: {current_angle_error_abs:.3f}, Prev: {self.previous_base_angle_error:.3f}, Improv: {angle_improvement:.3f}, RotRew: {rotation_reward:.3f}") # Debug
+
+        # Update for next step
+        self.previous_base_angle_error = current_angle_error_abs
 
         # Bonus for reaching the target accuracy
         success_bonus = 100.0

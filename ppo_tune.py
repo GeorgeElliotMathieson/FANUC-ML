@@ -17,14 +17,14 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from fanuc_env import FanucEnv
 
 # --- Tuning Configuration ---
-TUNE_TIMESTEPS = 60_000
+TUNE_TIMESTEPS = 250_000
 NUM_EVAL_EPISODES = 20 # Number of episodes for evaluation after each run
 RESULTS_FILE = "ppo_tuning_results.json"
 TUNING_LOG_DIR = "./ppo_tuning_logs/"
 BEST_PARAMS_FILE = "best_params.json" # Central file for best parameters
 # --- Iterative Tuning Config ---
 MAX_ITERATIONS = 5
-CONVERGENCE_THRESHOLD = 100.0 # Minimum mean reward improvement to continue
+CONVERGENCE_THRESHOLD = 500.0 # Increased from 100.0
 
 # --- Baseline Hyperparameters ---
 # Resetting based on educated guess for new env (squared reward, curriculum)
@@ -36,7 +36,7 @@ BASELINE_PARAMS = {
     "gamma": 0.99,            # Kept default
     "gae_lambda": 0.95,         # Kept default
     "clip_range": 0.2,          # Kept default
-    "ent_coef": 0.001,          # Increased from 0.0 (more exploration)
+    "ent_coef": 0.005,          # Increased from 0.001 (more exploration)
     "vf_coef": 0.5,             # Kept default
     "max_grad_norm": 0.5,       # Kept default
     "policy": "MlpPolicy",    # Kept default
