@@ -10,6 +10,15 @@ import logging # Import logging
 import traceback # Import traceback for logging errors
 from typing import Dict, Any # Updated typing imports
 import random # <-- Import random for seeding
+import collections # Import collections for deque
+
+# --- Configure Logging (Global Scope) --- 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__) # Get logger for this module
 
 # Import optuna
 import optuna # type: ignore
@@ -246,12 +255,12 @@ def objective(trial: optuna.Trial, seed: int | None = None) -> float:
 
 if __name__ == "__main__":
     # --- Configure Logging --- 
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    logger = logging.getLogger(__name__) # Get logger for this module
+    # logging.basicConfig(
+    #     level=logging.INFO,
+    #     format='%(asctime)s [%(levelname)s] %(message)s',
+    #     datefmt='%Y-%m-%d %H:%M:%S'
+    # )
+    # logger = logging.getLogger(__name__) # Get logger for this module - MOVED TO GLOBAL SCOPE
 
     parser = argparse.ArgumentParser(description="Run PPO hyperparameter tuning using Optuna for Fanuc Env.")
     parser.add_argument("-d", "--duration", type=int, default=720, # Changed default to 12 minutes
