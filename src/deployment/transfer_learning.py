@@ -21,7 +21,8 @@ DEFAULT_STATE_MEAN: Optional[np.ndarray] = None # Defaults to no normalization i
 DEFAULT_STATE_STD: Optional[np.ndarray] = None  # Defaults to no normalization if None
 DEFAULT_ACTION_SCALE: Optional[np.ndarray] = None # Defaults to no scaling if None
 DEFAULT_ACTION_OFFSET: Optional[np.ndarray] = None # Defaults to no offset if None
-DEFAULT_PARAMS_FILE = os.path.join(os.path.dirname(__file__), '..', 'config', 'transfer_params.json')
+# Define path relative to project root (two levels up from src/deployment/)
+DEFAULT_PARAMS_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'transfer_params.json')
 # Use default velocity limits from config
 DEFAULT_VELOCITY_LIMITS_RAD_S = robot_config.VELOCITY_LIMITS_RAD_S
 

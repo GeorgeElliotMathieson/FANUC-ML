@@ -45,8 +45,8 @@ NUM_EVAL_EPISODES = 30  # Number of episodes for evaluation after each trial
 EVAL_FREQ = 125_000 # Evaluate every 125k steps within a trial (Increased from 50k)
 # N_OPTUNA_TRIALS = 50 # Defined via command-line argument now
 
-# Define paths relative to the project root (one level up from src/)
-PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
+# Define paths relative to the project root (now two levels up from src/rl/)
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..', '..')
 OPTUNA_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "optuna_study") # Adjusted path
 # Point to the new config directory
 BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
@@ -103,12 +103,14 @@ def run_experiment(trial: optuna.Trial, params: Dict[str, Any], trial_number: in
         vec_env_cls = SubprocVecEnv if num_cpu > 1 else DummyVecEnv
         angle_bonus = params.get("angle_bonus_factor", 5.0)
         # Use simple lambda, FanucEnv is imported relatively now
+        # Disable obstacles during tuning for stability
         train_env = make_vec_env(
-            lambda: FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus),
+            lambda: FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus, start_with_obstacles=False),
             n_envs=num_cpu,
             vec_env_cls=vec_env_cls # type: ignore
         )
-        eval_env = FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus)
+        # Also disable obstacles for the evaluation environment during tuning
+        eval_env = FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus, start_with_obstacles=False)
 
         # --- Agent and Training ---
         device = "cuda" if torch.cuda.is_available() else "cpu"

@@ -1,22 +1,23 @@
-# FANUC Robot Arm RL Training with PPO, Obstacles, and Tuning
+# FANUC Robot Arm RL Training, Tuning, and Deployment
 
-This project trains a FANUC LRMate 200iC robot arm simulation to reach random target positions within its workspace using Proximal Policy Optimisation (PPO). The training incorporates several advanced features, focusing on learning forward kinematics without relying on pre-calculated inverse kinematics solutions.
+This project trains a FANUC LRMate 200iC robot arm simulation to reach random target positions within its workspace using Proximal Policy Optimisation (PPO), and provides scripts for deploying the trained model to a real robot.
 
 **Key Features:**
 
-*   **PyBullet Simulation:** Uses the PyBullet physics engine for efficient and flexible robot simulation.
-*   **Obstacle Avoidance:** The environment dynamically places obstacles, requiring the agent to learn collision-free paths.
-*   **Continuous Curriculum Learning:** Gradually increases the difficulty (target reach distance) based on the agent's recent success rate, facilitating learning.
-*   **Hyperparameter Tuning (Optuna):** Employs the Optuna library for efficient Bayesian optimisation of PPO hyperparameters.
-*   **Stable Baselines3:** Leverages the robust SB3 library for the PPO implementation and training utilities.
-*   **Time-Based Training:** Training duration is controlled by a specified time limit rather than a fixed number of steps.
-*   **Parallel Environments:** Utilises multiple CPU cores for accelerated training sample collection.
-*   **Modular Structure:** Codebase is organized into `src`, `scripts`, and `output` directories for better maintainability.
-*   **Analysis Tools:** Includes a script to parse training logs and generate performance plots.
+*   **PyBullet Simulation:** Uses the PyBullet physics engine for efficient robot simulation.
+*   **Obstacle Avoidance:** The environment dynamically places obstacles during training.
+*   **Continuous Curriculum Learning:** Gradually increases difficulty to aid learning.
+*   **Hyperparameter Tuning (Optuna):** Employs Optuna for optimising PPO hyperparameters.
+*   **Stable Baselines3:** Leverages SB3 for PPO implementation.
+*   **Time-Based Training & Tuning:** Duration is controlled by time limits.
+*   **Modular Structure:** Codebase organized into `src` (with `rl` and `deployment` submodules), `scripts`, `config`, `assets`, and `output`.
+*   **Automated Archiving:** Automatically archives older training runs from `output/ppo_logs/` to `archive/archived_ppo_logs/` to keep the output directory focused on recent runs.
+*   **Real Robot Deployment:** Includes scripts (`scripts/deploy_real.py`) and modules (`src/deployment/`) for interfacing with and controlling a real FANUC robot (**requires significant user adaptation and safety verification**).
+*   **Analysis Tools:** Includes a script to analyse training logs.
 
 ## Prerequisites
 
-*   Python 3.8+
+*   Python 3.8+ (3.8 - 3.10 recommended)
 *   PyBullet physics simulator
 *   PyTorch >= 2.0.0
 *   Stable Baselines3[extra] >= 2.0.0
@@ -29,164 +30,138 @@ This project trains a FANUC LRMate 200iC robot arm simulation to reach random ta
 
 ## Installation
 
-1.  **Clone the Project Repository (if necessary):**
+1.  **Clone the Project Repository:**
     ```bash
     # git clone <your-repo-url>
     cd <your-repo-directory>
     ```
 
-2.  **Clone the FANUC Robot Model Repository:**
-    The project requires the URDF and mesh files for the FANUC LRMate 200iC. Place the cloned `Fanuc` directory in the project root.
+2.  **Obtain Robot Model Data:**
+    Place the necessary URDF and mesh files for your specific FANUC robot model (e.g., LRMate 200iC) into the `assets/robot_model/` directory. Ensure the filenames and relative paths match those expected by the scripts (e.g., `assets/robot_model/urdf/Fanuc.urdf`).
+    *(Example source: You might obtain these from a repository like [sezan92/Fanuc](https://github.com/sezan92/Fanuc), but only the model files are needed).* 
     ```bash
-    # Run in the project root directory
-    git clone https://github.com/sezan92/Fanuc.git
+    # Example using the external repo (run in project root):
+    # git clone https://github.com/sezan92/Fanuc.git temp_fanuc
+    # mkdir -p assets/robot_model/urdf
+    # # Move only necessary files (adjust based on repo structure)
+    # mv temp_fanuc/urdf/Fanuc.urdf assets/robot_model/urdf/
+    # mv temp_fanuc/meshes/* assets/robot_model/meshes/ # Create meshes dir if needed
+    # rm -rf temp_fanuc
+    # Ensure assets/robot_model/.git is removed or ignored if needed
     ```
-    *(Note: This project uses the URDF/meshes with PyBullet, not the ROS components from the original repository.)*
 
-3.  **Create and Activate a Virtual Environment (Recommended):**
+3.  **Create and Activate Virtual Environment (Recommended):**
     ```bash
     python -m venv venv
-    # On Linux/macOS:
-    source venv/bin/activate
-    # On Windows (Command Prompt/PowerShell):
-    # venv\Scripts\activate
+    # Activate (Linux/macOS: source venv/bin/activate | Windows: venv\Scripts\activate)
     ```
 
 4.  **Install Python Dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
-    *(Note: The analysis script requires `pandas`, `matplotlib`, and `tensorboard`, which should be installed via `requirements.txt` or `stable-baselines3[extra]`)*
 
 ## Project Structure
 
 ```
 .
-├── Fanuc/                     # Robot model data (URDF, meshes) - External Git Repo
-├── output/                    # ALL generated outputs grouped here
-│   ├── ppo_logs/              # Training logs (TensorBoard) & saved models (.zip)
+├── archive/                   # Archived old runs and deprecated code
+│   ├── archived_ppo_logs/     # Older PPO training runs (moved automatically by src/rl/train.py)
+│   └── deprecated/
+├── assets/                    # Static assets
+│   └── robot_model/           # Robot model data (URDF, meshes)
+├── config/                    # Configuration files
+│   ├── best_params.json       # Best hyperparameters from tuning
+│   ├── workspace_config.json  # Estimated workspace limits
+│   ├── robot_config.py        # Central robot parameters (limits, etc.)
+│   └── transfer_params.json   # (Optional) Sim-to-real calibration parameters
+├── output/                    # Generated outputs from current runs
+│   ├── analysis/              # Analysis plots/data
 │   ├── optuna_study/          # Optuna study database/logs
-│   └── analysis/              # Analysis plots/reports generated by analyse_results.py
-├── scripts/                   # Runnable utility, analysis & pipeline scripts
-│   ├── run_pipeline.py        # Main pipeline execution script (Recommended Usage)
-│   ├── analyse_results.py     # Script to analyse logs and generate plots
-│   ├── check_workspace.py     # Utility script to estimate robot workspace limits
-│   └── joint_limit_demo.py    # Utility script to visualise joint limits
+│   └── ppo_logs/              # Recent PPO training runs (logs, models) - Older runs automatically moved to archive/
+├── scripts/                   # Runnable scripts
+│   ├── run_pipeline.py        # Main RL pipeline (tune->train->test)
+│   ├── analyse_results.py     # Analyse RL training results
+│   ├── check_workspace.py     # Utility: Estimate workspace
+│   ├── joint_limit_demo.py    # Utility: Visualise joint limits
+│   └── deploy_real.py         # **Script for real robot deployment**
 ├── src/                       # Core source code library
-│   ├── __init__.py            # Makes 'src' a Python package
-│   ├── fanuc_env.py           # Custom Gymnasium environment definition
-│   ├── tune.py                # Hyperparameter tuning logic (via Optuna)
-│   ├── train.py               # Agent training logic
-│   └── test.py                # Visual testing logic
-├── .gitignore                 # Standard git ignore file
-├── best_params.json           # Configuration: Best hyperparameters found by tuning
-├── requirements.txt           # Project Python dependencies
-├── README.md                  # This documentation file
-└── workspace_config.json      # Configuration: Estimated workspace limits
+│   ├── __init__.py
+│   ├── rl/                    # RL-related modules
+│   │   ├── __init__.py
+│   │   ├── fanuc_env.py       # RL Environment (Simulation)
+│   │   ├── tune.py            # RL Hyperparameter Tuning
+│   │   ├── train.py           # RL Agent Training (includes auto-archiving logic)
+│   │   └── test.py            # RL Agent Visual Testing
+│   └── deployment/            # **Real-robot deployment related modules**
+│       ├── __init__.py
+│       ├── robot_api.py       # Real Robot Communication API
+│       └── transfer_learning.py # Sim-to-Real Model Adaptation
+├── .gitignore                 # Git ignore file
+├── requirements.txt           # Python dependencies
+└── README.md                  # This documentation file
 ```
 
 ## Usage
 
-### Recommended Workflow: The Pipeline Script
+### Recommended Workflow: The RL Pipeline (`scripts/run_pipeline.py`)
 
-The easiest way to run the full workflow (tune -> train -> test) is using the main pipeline script.
-
+Run the full simulation workflow (tune -> train -> test):
 ```bash
 python scripts/run_pipeline.py [OPTIONS]
 ```
+*Key Options:* `--tune_duration`, `--train_duration`, `--test_episodes`, `--skip_tuning`, etc. (See script help `python scripts/run_pipeline.py -h` for details).
 
-**Key Pipeline Options:**
+### Running Individual RL Steps
 
-*   `--tune_duration MINUTES`: Duration for hyperparameter tuning (default: 16 minutes). Set to 0 to rely solely on `--skip_tuning`.
-*   `--train_duration MINUTES`: Duration for agent training (default: 29 minutes).
-*   `--test_episodes N`: Number of episodes for visual testing (default: 5).
-*   `--study_name NAME`: Unique name for the Optuna study (allows resuming).
-*   `--storage URL`: Optuna storage URL (e.g., `sqlite:///my_study.db`). If a *relative* path (like `my_study.db`) is given, it will be saved inside `output/optuna_study/`. Defaults to in-memory.
-*   `--seed SEED`: Random seed for reproducible tuning trials (default: 42).
-*   `--skip_tuning`: Skip the tuning step. Requires `best_params.json` to exist for training, otherwise uses defaults.
-*   `--skip_training`: Skip the training step. Requires a trained model in `output/ppo_logs/` for testing.
-*   `--skip_testing`: Skip the final visual testing step.
-*   `--delete_old_params`: Delete `best_params.json` before starting the tuning step.
+Run steps independently (from project root directory):
+*   **Tuning:** `python -m src.rl.tune [OPTIONS]`
+*   **Training:** `python -m src.rl.train [OPTIONS]` (Note: This script also triggers automatic archiving of old runs from `output/ppo_logs/`)
+*   **Visual Testing:** `python -m src.rl.test [OPTIONS]`
+*(See script help `-h` for specific options)*
 
-**Example Pipeline Run:**
+### Analysis Script (`scripts/analyse_results.py`)
 
-```bash
-# Run tuning for 60 mins, training for 120 mins, 10 test eps, save Optuna study
-python scripts/run_pipeline.py --tune_duration 60 --train_duration 120 --test_episodes 10 --storage "sqlite:///main_study.db"
-```
-
-### Running Individual Steps
-
-You can also run each step independently. This is useful for debugging or focusing on a specific phase. Note that these are run as modules from the project root directory.
-
-1.  **Hyperparameter Tuning (`src.tune`):**
-    ```bash
-    python -m src.tune --duration MINUTES [OPTIONS]
-    ```
-    *   `--duration MINUTES`: Tuning duration (default: 12 minutes).
-    *   `--study_name NAME`: Optuna study name (default: `ppo_fanuc_default_study`).
-    *   `--storage URL`: Optuna storage URL. **Defaults to a persistent SQLite database (`sqlite:///output/optuna_study/default_fanuc_study.db`)**, so this argument is optional for standard use. Provide it only to use a different file or database type.
-    *   `--seed SEED`: Random seed.
-    *   *Output:* Saves best parameters to `best_params.json` and logs/database to `output/optuna_study/`.
-
-2.  **Training (`src.train`):**
-    ```bash
-    python -m src.train --duration MINUTES
-    ```
-    *   `--duration MINUTES`: Training duration (default: 3 minutes).
-    *   *Input:* Automatically loads hyperparameters from `best_params.json` if it exists, otherwise uses defaults defined in the script.
-    *   *Output:* Saves the trained model (`ppo_fanuc_model.zip`) and TensorBoard logs to `output/ppo_logs/`.
-
-3.  **Visual Testing (`src.test`):**
-    ```bash
-    python -m src.test --episodes N [OPTIONS]
-    ```
-    *   `--episodes N`: Number of test episodes (default: 5).
-    *   `--model_path PATH`: Optionally specify the path to a model `.zip` file. If omitted, it searches for the latest model in `output/ppo_logs/`.
-    *   *Input:* Loads the specified or latest model. Loads `best_params.json` to configure the test environment (e.g., `angle_bonus_factor`).
-
-### Analysis Script
-
-After training, analyse the results and generate plots using:
-
+Analyse the latest training run results:
 ```bash
 python scripts/analyse_results.py [OPTIONS]
 ```
-
-**Key Analysis Options:**
-
-*   `--log_dir PATH`: Path to the training log directory (default: `output/ppo_logs/`).
-*   `--params_file PATH`: Path to the best parameters file (default: `best_params.json`).
-*   `--output_dir PATH`: Directory to save generated plots (default: `output/analysis/`).
-*   `--event_file PATH`: Specify a specific TensorBoard event file instead of searching the log directory.
-
-This script will:
-1.  Print the best hyperparameters loaded from the parameters file.
-2.  Load data from the latest TensorBoard event file found in the log directory.
-3.  Generate plots for key metrics (reward, episode length, success rate, collision rates, curriculum radius, losses, etc.) and save them as PNG files in the output directory.
+*(Options: `--log_dir`, `--params_file`, `--output_dir`, `--event_file`)*
 
 ### Utility Scripts
 
-*   **Workspace Check (`scripts/check_workspace.py`):**
-    Estimates the robot's minimum and maximum reachable distances by sampling random configurations. Crucial for setting environment boundaries.
-    ```bash
-    python scripts/check_workspace.py
-    ```
-    *   *Output:* Saves estimated limits to `workspace_config.json`. Run this if you modify the URDF.
+*   `scripts/check_workspace.py`: Estimates robot reach and saves to `config/workspace_config.json`.
+*   `scripts/joint_limit_demo.py`: Visually demonstrates joint limits in simulation.
 
-*   **Joint Limit Demo (`scripts/joint_limit_demo.py`):**
-    Visually demonstrates the movement range of each joint based on the limits defined in `src/fanuc_env.py`. Useful for verifying limits.
-    ```bash
-    python scripts/joint_limit_demo.py
-    ```
+### **Real Robot Deployment (`scripts/deploy_real.py`)**
+
+This script attempts to load a trained model and control a real FANUC robot.
+
+** **CRITICAL WARNINGS** **
+*   **ADAPTATION REQUIRED:** This script requires **SIGNIFICANT modification** to work with your specific robot hardware, network configuration, safety protocols, and task definition. Review the `TODO` comments within the script and associated modules (`src/deployment/robot_api.py`, `src/deployment/transfer_learning.py`).
+*   **SAFETY FIRST:** Operating real robotic hardware carries inherent risks. **Implement and rigorously test ALL necessary safety measures** (physical barriers, emergency stops, velocity limits, collision checks, operator supervision) before running this script on a real robot. The provided safety checks are placeholders and likely insufficient on their own.
+*   **VERIFY API:** Ensure the commands and parsing logic in `src/deployment/robot_api.py` match your controller's exact Socket Messaging interface.
+*   **CALIBRATION:** Sim-to-real transfer typically requires calibration. The provided `RobotTransfer` class and calibration routines are basic placeholders.
+*   **(Dependency Note):** PyBullet is still required for deployment, as it is used by `scripts/deploy_real.py` for Forward Kinematics (FK) calculations needed for safety checks and state estimation.
+
+**(Conceptual Workflow):** The script outlines steps for connecting, optionally calibrating, running a control loop (get state, predict action, safety check, send command), handling targets, and managing potential errors. These steps require user implementation.
+
+**Example Usage (Requires Adaptation & Extreme Caution):**
+```bash
+# VERIFY ALL PARAMETERS AND SAFETY BEFORE RUNNING
+python scripts/deploy_real.py --robot_ip <YOUR_ROBOT_IP> --model_path <PATH_TO_MODEL.zip> [--calibrate] [--skip_safety]
+```
+*(See script help `-h` for options like `--loop_rate`, `--control_mode`)*
 
 ## Configuration Files
 
-*   `best_params.json`: Automatically generated by `src/tune.py` (or the tuning step in the pipeline). Contains the best hyperparameters found by Optuna. Read by `src/train.py` and `src/test.py`.
-*   `workspace_config.json`: Automatically generated by `scripts/check_workspace.py`. Contains estimated `min_reach` and `max_reach`. Read by `src/fanuc_env.py` to set workspace boundaries.
-*   `requirements.txt`: Defines Python dependencies for `pip install -r requirements.txt`.
+Located in the `config/` directory:
+*   `best_params.json`: Stores the best hyperparameters found by Optuna tuning (`src/rl/tune.py`). Used by `src/rl/train.py` and `src/rl/test.py`.
+*   `workspace_config.json`: Stores estimated simulation workspace limits (min/max reach, reach at Z midpoint) generated by `scripts/check_workspace.py`. Used by `src/rl/fanuc_env.py`.
+*   `robot_config.py`: Central definition of core robot parameters (joint count, joint limits, velocity limits, link names) used across simulation and deployment code.
+*   `transfer_params.json` (Optional): Intended to store calibration parameters for sim-to-real transfer, potentially generated by a calibration routine in `scripts/deploy_real.py` and used by `src/deployment/transfer_learning.py`. Expected keys might include `state_mean`, `state_std`, `action_scale`, `action_offset` (as NumPy arrays/lists).
 
-## Environment Details (`src/fanuc_env.py`)
+## Environment Details (`src/rl/fanuc_env.py`)
 
 *   **Action Space:** Continuous, 5 dimensions representing normalised target velocities for the 5 controllable joints (J1-J5). Values range from -1 to 1, scaled by velocity limits internally.
 *   **Observation Space:** 21 dimensions:
@@ -213,7 +188,7 @@ This script will:
     *   Obstacles are randomly positioned within the workspace but outside safe zones near the robot base and the current target.
     *   Collision with an obstacle results in termination and a penalty.
 
-## Hyperparameter Tuning (`src/tune.py`)
+## Hyperparameter Tuning (`src/rl/tune.py`)
 
 *   Uses Optuna to find optimal hyperparameters for PPO.
 *   The `objective` function defines the search space for parameters like `learning_rate`, `n_steps`, `batch_size`, `n_epochs`, `gamma`, `gae_lambda`, `clip_range`, `ent_coef`, `vf_coef`, `max_grad_norm`, `angle_bonus_factor`, and network architecture size (`net_arch_size`).
@@ -221,11 +196,13 @@ This script will:
 *   **Intermediate Evaluation & Pruning:** Implements an Optuna callback (`TrialCallback`) to perform evaluations every `EVAL_FREQ` (50k) steps *during* a trial. These intermediate results are reported to Optuna, allowing the configured pruner (`MedianPruner`) to stop unpromising trials early, saving significant tuning time.
 *   **Default Storage:** Automatically saves study results to a default SQLite database (`output/optuna_study/default_fanuc_study.db`) unless overridden by the `--storage` argument. This allows for easy resuming of studies and use with visualization tools.
 *   **Extended Logging:** Logs the standard deviation of the evaluation reward (`std_reward`) and the actual trial duration (`duration_seconds`) to the Optuna study's user attributes for more detailed analysis.
-*   **Dashboard Compatibility:** The default SQLite storage makes the study directly compatible with the `optuna-dashboard` tool or IDE extensions. Simply point the dashboard tool/extension to the `.db` file in `output/optuna_study/`.
+*   **Dashboard Compatibility:** The default SQLite storage (`output/optuna_study/default_fanuc_study.db`) makes the study directly compatible with the `optuna-dashboard` tool or IDE extensions. Simply point the dashboard tool/extension to the `.db` file.
 *   Prunes trials early if `batch_size > n_steps`.
 
 ## Future Work / Improvements
 
+*   Refine real-robot deployment script (`deploy_real.py`) with robust status checking and error handling.
+*   Implement more sophisticated sim-to-real calibration techniques.
 *   Implement more complex obstacle scenarios (multiple obstacles, moving obstacles).
 *   Experiment with different RL algorithms (e.g., SAC for continuous control).
 *   Refine reward shaping further.

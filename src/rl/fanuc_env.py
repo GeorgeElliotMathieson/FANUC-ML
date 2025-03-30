@@ -24,9 +24,8 @@ logging.basicConfig(
 # Get a logger for this module
 logger = logging.getLogger(__name__)
 
-# Define config filename relative to project root (one level up from src/)
-# Point to the new config directory
-WORKSPACE_CONFIG_FILENAME = os.path.join(os.path.dirname(__file__), '..', "config", "workspace_config.json")
+# Define config filename relative to the project root (now two levels up from src/rl/)
+WORKSPACE_CONFIG_FILENAME = os.path.join(os.path.dirname(__file__), '..', '..', "config", "workspace_config.json")
 
 class FanucEnv(gym.Env):
     """Custom Gymnasium environment for the FANUC LRMate 200iD robot arm using PyBullet.
