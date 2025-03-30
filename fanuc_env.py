@@ -4,6 +4,10 @@ import pybullet as p
 import pybullet_data
 import os
 import math
+import json # Import json
+
+# Define config filename (consistent with check_workspace.py)
+WORKSPACE_CONFIG_FILENAME = "workspace_config.json"
 
 class FanucEnv(gym.Env):
     """Custom Gymnasium environment for the FANUC LRMate 200iD robot arm using PyBullet.
@@ -23,10 +27,42 @@ class FanucEnv(gym.Env):
         self._target_accuracy = target_accuracy
         self._step_counter = 0
 
+        # --- Load Workspace Config or Use Defaults ---
+        min_reach_default = 0.02
+        # Update default based on check_workspace.py result (approx)
+        max_reach_default = 1.26 # Updated from 1.2
+        try:
+            if os.path.exists(WORKSPACE_CONFIG_FILENAME):
+                with open(WORKSPACE_CONFIG_FILENAME, 'r') as f:
+                    workspace_config = json.load(f)
+                # Use loaded values, falling back to default if a key is missing
+                loaded_min_reach = workspace_config.get('min_reach', min_reach_default)
+                loaded_max_reach = workspace_config.get('max_reach', max_reach_default)
+                print(f"Loaded workspace config: Min Reach={loaded_min_reach:.4f}, Max Reach={loaded_max_reach:.4f}")
+                self.min_base_radius = loaded_min_reach
+                self.max_target_radius = loaded_max_reach
+            else:
+                print(f"Warning: {WORKSPACE_CONFIG_FILENAME} not found. Using default workspace radii: Min={min_reach_default}, Max={max_reach_default}")
+                self.min_base_radius = min_reach_default
+                self.max_target_radius = max_reach_default
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"Warning: Error loading {WORKSPACE_CONFIG_FILENAME}: {e}. Using default workspace radii: Min={min_reach_default}, Max={max_reach_default}")
+            self.min_base_radius = min_reach_default
+            self.max_target_radius = max_reach_default
+
+        # --- Curriculum Learning Parameters ---
+        self.num_curriculum_stages = 3
+        self.current_curriculum_stage = 0
+        self.success_streak_threshold = 3
+        self.consecutive_successes = 0
+        # self.max_target_radius = 0.6 # Now loaded or defaulted above
+        # self.min_base_radius = 0.15 # Now loaded or defaulted above
+
         # --- PyBullet Setup ---
         if self.render_mode == 'human':
             self.physics_client = p.connect(p.GUI)
             p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
+            # p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 1) # Enable wireframe visualisation (often shows collision shapes)
             # Improve rendering (optional)
             # p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
             # p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
@@ -39,7 +75,7 @@ class FanucEnv(gym.Env):
         p.setPhysicsEngineParameter(fixedTimeStep=1.0/240.0, numSolverIterations=100)
 
         # Load plane and robot
-        p.loadURDF("plane.urdf")
+        self.plane_id = p.loadURDF("plane.urdf") # Store plane ID
         # Construct the path to the URDF file relative to this script
         urdf_file_path = os.path.join(os.path.dirname(__file__), "Fanuc", "urdf", "Fanuc.urdf")
         # Define the mesh path replacement for PyBullet
@@ -57,6 +93,7 @@ class FanucEnv(gym.Env):
             urdf_file_path,
             basePosition=[0, 0, 0],
             useFixedBase=True,
+            flags=p.URDF_USE_SELF_COLLISION, # Enable self-collision (using URDF <collision> tags)
             # Flags might be needed if mesh loading fails, e.g., p.URDF_USE_MATERIAL_COLORS_FROM_MTL
         )
 
@@ -95,7 +132,8 @@ class FanucEnv(gym.Env):
 
         if self.end_effector_link_index == -1:
             print("Warning: Could not find link 'Part6'. Using last joint index as end effector.")
-            self.end_effector_link_index = self.joint_indices[-1] if self.joint_indices else self.num_joints - 1
+            # Fallback: use the last joint index. Check URDF if this happens.
+            self.end_effector_link_index = p.getNumJoints(self.robot_id) - 1
 
         if len(self.joint_indices) != 5:
              raise ValueError(f"Expected 5 controllable joints, but found {len(self.joint_indices)}. URDF might be different than expected.")
@@ -125,11 +163,22 @@ class FanucEnv(gym.Env):
         self.initial_joint_positions = np.zeros(self.num_controllable_joints) # Home position (all zeros)
         self.target_visual_shape_id = -1 # Initialise visual shape ID
 
+        # --- Parent Link Identification (for collision filtering) ---
+        self.parent_link_index = -1
+        try:
+            ee_joint_info = p.getJointInfo(self.robot_id, self.end_effector_link_index)
+            # PyBullet's getJointInfo returns parent link index at index 16
+            self.parent_link_index = ee_joint_info[16]
+        except Exception as e:
+            print(f"Warning: Could not get parent link index for end-effector. Error: {e}")
+
         print(f"FanucEnv initialised:")
         print(f"  - Joints: {self.joint_names}")
         print(f"  - End Effector Link Index: {self.end_effector_link_index}")
         print(f"  - Action Space Shape: {self.action_space.shape}")
         print(f"  - Observation Space Shape: {self.observation_space.shape}")
+        print(f"  - Curriculum Learning Enabled: {self.num_curriculum_stages} stages, threshold {self.success_streak_threshold}")
+        print(f"  - Current Stage: {self.current_curriculum_stage}")
 
 
     def _get_obs(self):
@@ -148,12 +197,38 @@ class FanucEnv(gym.Env):
         ee_state = p.getLinkState(self.robot_id, self.end_effector_link_index)
         ee_position = np.array(ee_state[0], dtype=np.float32)
         distance = np.linalg.norm(self.target_position - ee_position)
-        return {"distance": distance, "target_position": self.target_position.copy()}
+        # Update info dict for curriculum
+        return {
+            "distance": distance,
+            "target_position": self.target_position.copy(),
+            "collision": False,
+            "success": False, # Added for curriculum tracking
+            "curriculum_advanced": False, # Added for curriculum tracking
+            "curriculum_stage": self.current_curriculum_stage # Track current stage
+        }
 
     def _get_random_target_pos(self):
-        # Generate a random target position within an approximate reachable sphere
-        # LRMate 200iD reach is approx 0.7m. Sample within a sphere of radius 0.6m centered slightly above base.
-        radius = 0.2 + np.random.rand() * 0.4 # Sample between 0.2m and 0.6m radius
+        # Determine radius range based on curriculum stage
+        if self.current_curriculum_stage == 0:
+            # Stage 0: Outer region
+            min_radius = self.max_target_radius * 0.75
+            max_radius = self.max_target_radius
+        elif self.current_curriculum_stage == 1:
+            # Stage 1: Middle region
+            min_radius = self.max_target_radius * 0.50
+            max_radius = self.max_target_radius * 0.75
+        else: # Stage 2 (and beyond, if any) = Final stage
+            # Stage 2: Full range (respecting min_base_radius)
+            min_radius = self.min_base_radius
+            max_radius = self.max_target_radius
+
+        # Ensure min_radius is not less than the absolute minimum
+        min_radius = max(min_radius, self.min_base_radius)
+        # Ensure max_radius is not less than min_radius (can happen if max_target_radius is small)
+        max_radius = max(max_radius, min_radius + 1e-6) # Add epsilon for safety
+
+        # Generate a random target position within the calculated radius range
+        radius = min_radius + np.random.rand() * (max_radius - min_radius)
         theta = np.random.rand() * 2 * math.pi # Azimuthal angle
         phi = (np.random.rand() * 0.6 + 0.1) * math.pi # Polar angle (restricted to upper hemisphere mostly)
 
@@ -162,17 +237,33 @@ class FanucEnv(gym.Env):
         y = radius * math.sin(phi) * math.sin(theta)
         z = radius * math.cos(phi) + 0.1 # Offset center slightly upwards
 
-        # Ensure target is not too close to the base (avoids singularity/collision issues)
-        min_dist_from_base = 0.15
-        if np.linalg.norm([x, y, z]) < min_dist_from_base:
-            # If too close, regenerate (simple approach)
+        # Ensure target is not too close to the base (redundant check, but safe)
+        # min_dist_from_base = 0.15 - Now handled by min_radius
+        # Ensure target is above a minimum ground clearance
+        min_z_height = 0.05
+        # Check only min z height now
+        if z < min_z_height:
+            # If too low, regenerate (simple approach)
             return self._get_random_target_pos()
 
+        # print(f"[Stage {self.current_curriculum_stage}] Target Radius: {radius:.3f} (Range: [{min_radius:.3f}-{max_radius:.3f}])") # Debug
         return np.array([x, y, z], dtype=np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._step_counter = 0
+
+        # --- Curriculum Stage Override --- 
+        # Allow forcing a specific stage via reset options, primarily for testing
+        if options is not None and 'force_curriculum_stage' in options:
+            forced_stage = options['force_curriculum_stage']
+            if 0 <= forced_stage < self.num_curriculum_stages:
+                # print(f"Resetting: Forcing curriculum stage to {forced_stage}") # Debug
+                self.current_curriculum_stage = forced_stage
+                self.consecutive_successes = 0 # Reset streak when forcing stage
+            else:
+                print(f"Warning: Invalid 'force_curriculum_stage' ({forced_stage}) in options. Ignoring.")
+        # Otherwise, the stage persists from the previous episode allowing natural progression
 
         # Reset joint positions to initial/home state
         for i, joint_index in enumerate(self.joint_indices):
@@ -181,7 +272,7 @@ class FanucEnv(gym.Env):
             p.setJointMotorControl2(self.robot_id, joint_index, p.VELOCITY_CONTROL, force=0)
 
 
-        # Generate a new target
+        # Generate a new target using the potentially updated curriculum stage
         self.target_position = self._get_random_target_pos()
 
         # Remove previous target visual marker if it exists
@@ -200,7 +291,7 @@ class FanucEnv(gym.Env):
 
 
         observation = self._get_obs()
-        info = self._get_info()
+        info = self._get_info() # Info now includes curriculum state
 
         # print(f"Resetting Env. New Target: {self.target_position}") # Debug
 
@@ -237,37 +328,86 @@ class FanucEnv(gym.Env):
 
         # --- Get Observation and Info ---
         observation = self._get_obs()
-        info = self._get_info()
+        info = self._get_info() # Gets initial info dict with curriculum flags set to False
         distance = info['distance']
 
         # --- Calculate Reward ---
-        # Dense reward: negative distance to target
-        # Encourage faster convergence: reward = -distance**2? or 1/(distance + epsilon)?
-        # Simple negative distance is common.
-        reward = -distance
+        # Dense reward: negative squared distance to target
+        reward = -(distance**2)
 
         # Bonus for reaching the target accuracy
         success_bonus = 100.0
         terminated = False
+        success = False
         if distance < self._target_accuracy:
             reward += success_bonus
             terminated = True
-            # print(f"Target Reached! Steps: {self._step_counter}, Distance: {distance:.4f}") # Debug
+            success = True
+            info['success'] = True # Mark success in info
+            self.consecutive_successes += 1
+            # print(f"Target Reached! Consecutive successes: {self.consecutive_successes}") # Debug
+
+            # Check for curriculum advancement
+            if (self.consecutive_successes >= self.success_streak_threshold and
+                self.current_curriculum_stage < self.num_curriculum_stages - 1):
+
+                self.current_curriculum_stage += 1
+                self.consecutive_successes = 0 # Reset streak after advancing
+                info['curriculum_advanced'] = True # Mark advancement in info
+                info['curriculum_stage'] = self.current_curriculum_stage # Update stage in info
+                print(f"\n*** Curriculum Advanced to Stage {self.current_curriculum_stage}! Target range adjusted. ***\n")
 
         # --- Check Truncation ---
         truncated = False
         if self._step_counter >= self._max_episode_steps:
             truncated = True
-            # Optional: Add penalty for truncation? reward -= 10
+            # Reset success streak if truncated without success
+            if not success:
+                # print("Episode truncated, resetting success streak.") # Debug
+                self.consecutive_successes = 0
+
+        # --- Check for End-Effector Collisions ---
+        collision_penalty = -50.0 # Define penalty for collision
+        collision_detected = False
+
+        # 1. Check collision with the plane
+        plane_contacts = p.getContactPoints(bodyA=self.robot_id, bodyB=self.plane_id, linkIndexA=self.end_effector_link_index)
+        if plane_contacts:
+            collision_detected = True
+            # print(f"Step {self._step_counter}: Collision detected - End-effector hit plane.") # Debug
+
+        # 2. Check self-collision involving the end-effector
+        if not collision_detected: # Only check if not already collided with plane
+            self_contacts = p.getContactPoints(bodyA=self.robot_id, bodyB=self.robot_id)
+            # print(f"Step {self._step_counter}: Raw self-contacts: {self_contacts}") # Debug raw contacts
+            for contact in self_contacts:
+                link_a = contact[3]
+                link_b = contact[4]
+
+                # Check if the contact involves the end-effector link and another different link,
+                # AND ignore contact with the direct parent link.
+                is_ee_involved = (link_a == self.end_effector_link_index or link_b == self.end_effector_link_index)
+                is_ee_parent_contact = (self.parent_link_index != -1 and \
+                                        ((link_a == self.end_effector_link_index and link_b == self.parent_link_index) or \
+                                         (link_b == self.end_effector_link_index and link_a == self.parent_link_index)))
+
+                if is_ee_involved and not is_ee_parent_contact and link_a != link_b:
+                    collision_detected = True
+                    colliding_link = link_a if link_b == self.end_effector_link_index else link_b
+                    # print(f"Step {self._step_counter}: Collision detected - End-effector (link {self.end_effector_link_index}) hit link {colliding_link}.") # Debug
+                    break # Exit loop once a relevant self-collision is found
+
+        # Apply penalty and terminate if collision detected
+        if collision_detected:
+            reward += collision_penalty
+            terminated = True # End episode on collision
+            info['collision'] = True
+            # Reset success streak on collision
+            # print("Collision detected, resetting success streak.") # Debug
+            self.consecutive_successes = 0
 
         # Optional: Penalty for excessive joint velocity?
         # reward -= 0.01 * np.mean(np.abs(observation[self.num_controllable_joints:2*self.num_controllable_joints]))
-
-        # Optional: Check for collisions (more complex)
-        # contacts = p.getContactPoints(bodyA=self.robot_id) # Check self-collision / collision with plane
-        # if contacts:
-        #    reward -= 50 # Collision penalty
-        #    terminated = True # End episode on collision
 
         # Render if in human mode
         if self.render_mode == 'human':
@@ -299,7 +439,7 @@ if __name__ == '__main__':
     print("Initial Observation:", obs)
     print("Initial Info:", info)
 
-    episodes = 3
+    episodes = 20 # Increased episodes for testing
     for ep in range(episodes):
         print(f"--- Episode {ep+1} ---")
         obs, info = env.reset()

@@ -1,0 +1,22 @@
+[
+    {
+        "run_name": "baseline",
+        "params": {
+            "learning_rate": 0.0003,
+            "n_steps": 2048,
+            "batch_size": 64,
+            "n_epochs": 10,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.0,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "policy": "MlpPolicy"
+        },
+        "iteration": 1,
+        "training_time_s": 33.45614242553711,
+        "mean_reward": -879.9299139611423,
+        "std_reward": 823.4654534890873
+    }
+]
