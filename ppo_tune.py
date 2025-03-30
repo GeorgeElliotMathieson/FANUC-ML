@@ -9,6 +9,7 @@ import math # Keep for potential calculations
 import logging # Import logging
 import traceback # Import traceback for logging errors
 from typing import Dict, Any # Updated typing imports
+import random # <-- Import random for seeding
 
 # Import optuna
 import optuna # type: ignore
@@ -35,12 +36,13 @@ BEST_PARAMS_FILE = "best_params.json" # Central file for best parameters found
 DEFAULT_POLICY = "MlpPolicy"
 
 # --- Function to Run a Single Experiment (modified for Optuna) ---
-def run_experiment(params: Dict[str, Any], trial_number: int) -> float:
+def run_experiment(params: Dict[str, Any], trial_number: int, seed: int | None = None) -> float:
     """Runs a single training and evaluation experiment for an Optuna trial.
 
     Args:
         params: Dictionary of hyperparameters suggested by Optuna.
         trial_number: The Optuna trial number for logging.
+        seed: Optional random seed for reproducibility.
 
     Returns:
         The mean reward achieved during evaluation.
@@ -59,21 +61,44 @@ def run_experiment(params: Dict[str, Any], trial_number: int) -> float:
     cpu_count = multiprocessing.cpu_count()
     num_cpu = cpu_count # Use all available cores
 
+    # --- Set Seeds if provided ---
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+            # Potentially add deterministic behavior settings for CUDA if needed
+            # torch.backends.cudnn.deterministic = True
+            # torch.backends.cudnn.benchmark = False
+        logger.info(f"Set random seed to {seed} for Trial {trial_number}")
+
     try:
         # --- Environment Setup ---
+        # Function to create seeded environment for make_vec_env
+        def make_seeded_env(env_rank):
+            env_seed = seed + env_rank if seed is not None else None
+            env = FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus)
+            if env_seed is not None:
+                env.reset(seed=env_seed)
+            return env
+
         # Use logger for info
         logging.info(f"Using {num_cpu} parallel environments for training.")
         vec_env_cls = SubprocVecEnv if num_cpu > 1 else DummyVecEnv
         # Extract angle_bonus_factor from params, default if not present (should be)
         angle_bonus = params.get("angle_bonus_factor", 5.0)
-        # Pass angle_bonus_factor to FanucEnv constructor
+        # Pass angle_bonus_factor to FanucEnv constructor AND use seeded env creation
         train_env = make_vec_env(
-            lambda: FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus),
+            # lambda: FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus), # Old non-seeded
+            lambda rank: make_seeded_env(rank), # Pass rank to lambda
             n_envs=num_cpu,
             vec_env_cls=vec_env_cls # type: ignore
         )
         # Use the same factor for the eval_env for consistency
+        # Seed eval_env separately if desired, though deterministic eval uses fixed start
         eval_env = FanucEnv(render_mode=None, angle_bonus_factor=angle_bonus)
+        # if seed is not None: eval_env.reset(seed=seed + num_cpu) # Seed eval env
 
         # --- Agent and Training ---
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -87,7 +112,7 @@ def run_experiment(params: Dict[str, Any], trial_number: int) -> float:
         policy = params.get("policy", DEFAULT_POLICY)
         policy_kwargs = params.get("policy_kwargs", None) # Extract policy_kwargs if suggested
 
-        # Create PPO model with suggested parameters
+        # Create PPO model with suggested parameters and seed
         model = PPO(
             policy=policy,
             env=train_env,
@@ -104,7 +129,8 @@ def run_experiment(params: Dict[str, Any], trial_number: int) -> float:
             verbose=0, # Keep verbosity low for Optuna runs
             tensorboard_log=trial_log_dir,
             device=device,
-            policy_kwargs=policy_kwargs # Pass policy_kwargs
+            policy_kwargs=policy_kwargs, # Pass policy_kwargs
+            seed=seed # <-- Pass the seed to the PPO model
         )
 
         # Use logger for info
@@ -158,8 +184,16 @@ def run_experiment(params: Dict[str, Any], trial_number: int) -> float:
     return mean_reward
 
 # --- Optuna Objective Function ---
-def objective(trial: optuna.Trial) -> float:
-    """Defines the objective function for Optuna optimisation."""
+def objective(trial: optuna.Trial, seed: int | None = None) -> float:
+    """Defines the objective function for Optuna optimisation.
+
+    Args:
+        trial: The Optuna trial object.
+        seed: Optional random seed to pass to the experiment.
+
+    Returns:
+        The evaluation score (mean reward).
+    """
 
     # Define hyperparameters to search using trial.suggest_*
     params = {
@@ -199,8 +233,8 @@ def objective(trial: optuna.Trial) -> float:
     else: # "large"
         params["policy_kwargs"] = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
-    # Run the experiment with the suggested parameters
-    mean_reward = run_experiment(params, trial.number)
+    # Run the experiment with the suggested parameters and seed
+    mean_reward = run_experiment(params, trial.number, seed=seed)
 
     # Optional: Report intermediate results for pruning (if using a pruner)
     # trial.report(mean_reward, step=TUNE_TIMESTEPS)
@@ -225,6 +259,8 @@ if __name__ == "__main__":
     parser.add_argument("--study_name", type=str, default="ppo_fanuc_tuning", help="Name for the Optuna study.")
     # Add argument for storage URL (e.g., SQLite database)
     parser.add_argument("--storage", type=str, default=None, help="Optuna storage URL (e.g., 'sqlite:///optuna_study.db'). If None, uses in-memory storage.")
+    # Add argument for seed
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible tuning trials (default: 42).")
     args = parser.parse_args()
 
     # Create Optuna log directory if it doesn't exist
@@ -251,7 +287,8 @@ if __name__ == "__main__":
     # --- Run Optuna Optimisation ---
     try:
         study.optimize(
-            objective,
+            # Pass the seed from args to the objective function using lambda
+            lambda trial: objective(trial, seed=args.seed),
             n_trials=None, # Run indefinitely until timeout
             timeout=args.duration # Set the timeout in seconds
             # n_jobs=1 # Parallel trials can be tricky with PyBullet/multiprocessing envs
