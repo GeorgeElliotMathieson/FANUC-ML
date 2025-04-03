@@ -38,7 +38,7 @@ from .fanuc_env import FanucEnv
 
 # --- Optuna Tuning Configuration ---
 # Keep timestep/eval config, remove iteration/convergence config
-TUNE_TIMESTEPS = 1_000_000  # Timesteps per Optuna trial (Reduced from 2M)
+TUNE_TIMESTEPS = 2_000_000  # Timesteps per Optuna trial (Increased from 1M)
 # Increase evaluation episodes for better stability
 NUM_EVAL_EPISODES = 30  # Number of episodes for evaluation after each trial
 # Define evaluation frequency for the callback
@@ -278,7 +278,7 @@ def objective(trial: optuna.Trial, seed: int | None = None) -> float:
         # Batch size often related to n_steps, also suggest powers of 2
         "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256]),
         "n_epochs": trial.suggest_int("n_epochs", 1, 20),
-        "gamma": trial.suggest_float("gamma", 0.9, 0.999, log=False), # Linear scale might be ok here
+        "gamma": trial.suggest_float("gamma", 0.99, 0.999, log=False), # Enforce minimum gamma of 0.99
         "gae_lambda": trial.suggest_float("gae_lambda", 0.9, 0.99),
         "clip_range": trial.suggest_float("clip_range", 0.1, 0.4),
         "ent_coef": trial.suggest_float("ent_coef", 1e-6, 1e-2, log=True),
@@ -357,6 +357,46 @@ if __name__ == "__main__":
             n_startup_trials=5, n_warmup_steps=0, interval_steps=1
         )
     )
+
+    # --- Warm Start: Enqueue current best params --- 
+    if os.path.exists(BEST_PARAMS_FILE):
+        logger.info(f"Attempting to warm start study with parameters from {BEST_PARAMS_FILE}")
+        try:
+            with open(BEST_PARAMS_FILE, 'r') as f:
+                warm_start_params = json.load(f)
+            
+            # Basic validation: check if essential keys expected by objective are present
+            required_keys = ["learning_rate", "n_steps", "batch_size", "n_epochs", 
+                            "gamma", "gae_lambda", "clip_range", "ent_coef", 
+                            "vf_coef", "max_grad_norm", "angle_bonus_factor", 
+                            "net_arch_size"] # Policy is handled separately if fixed
+            
+            valid_params = True
+            params_for_enqueue = {}
+            for key in required_keys:
+                if key not in warm_start_params:
+                    logger.warning(f"Warm start file missing key '{key}'. Skipping warm start.")
+                    valid_params = False
+                    break
+                params_for_enqueue[key] = warm_start_params[key]
+
+            # Add fixed policy if not in file (it is currently fixed in the objective)
+            if "policy" not in params_for_enqueue:
+                 params_for_enqueue["policy"] = DEFAULT_POLICY 
+
+            if valid_params:
+                # Adjust gamma if below new minimum constraint
+                if "gamma" in params_for_enqueue and params_for_enqueue["gamma"] < 0.99:
+                    logger.warning(f"Warm start gamma ({params_for_enqueue['gamma']}) is below the new minimum (0.99). Adjusting to 0.99 for enqueue.")
+                    params_for_enqueue["gamma"] = 0.99
+
+                study.enqueue_trial(params_for_enqueue)
+                logger.info("Successfully enqueued warm start trial.")
+            
+        except Exception as e:
+            logger.error(f"Failed to load or enqueue warm start parameters from {BEST_PARAMS_FILE}: {e}")
+    else:
+        logger.info(f"{BEST_PARAMS_FILE} not found. Starting study without warm start.")
 
     # --- Run Optimisation --- 
     tuning_duration_seconds = args.duration * 60

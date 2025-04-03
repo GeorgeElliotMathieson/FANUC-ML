@@ -129,16 +129,16 @@ class TrainingMonitorCallback(BaseCallback):
         # Log custom metrics periodically or when an episode finishes
         # Relying on SB3's built-in logging interval for ep_info_buffer is cleaner
 
-        # Log current max target radius (if available in the first env's info)
+        # Log current min target radius (if available in the first env's info)
         if self.n_calls % self.check_freq == 0: # Check periodically
             if self.training_env is not None and isinstance(self.training_env, VecEnv):
                 # Attempt to get info from the buffer if available
                 infos = getattr(self.training_env, 'buf_infos', None)
                 if infos is not None and len(infos) > 0:
                     first_env_info = infos[0]
-                    if "current_max_target_radius" in first_env_info:
-                        # Use self.logger provided by BaseCallback
-                        self.logger.record("custom/current_max_target_radius", first_env_info["current_max_target_radius"])
+                    if "current_min_target_radius" in first_env_info:
+                        # Log using the corrected tag name
+                        self.logger.record("custom/current_min_target_radius", first_env_info["current_min_target_radius"])
 
         # Log success/collision rate using the episode info buffer (populated by SB3 wrapper)
         # This buffer usually contains info from the last 100 episodes

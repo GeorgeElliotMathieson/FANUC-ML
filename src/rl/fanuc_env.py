@@ -37,10 +37,11 @@ class FanucEnv(gym.Env):
         angle_bonus_factor (float, optional): Factor for base rotation reward. Defaults to 5.0.
         start_with_obstacles (bool, optional): Whether to place obstacles at the start. Defaults to True.
         force_outer_radius (bool, optional): If True, forces target generation to the outer edge (80-100% of max radius). Used for specific testing scenarios. Defaults to False.
+        distance_reward_multiplier (float, optional): Factor to scale the linear distance penalty. Defaults to 5.0.
     """
     metadata = {'render_modes': ['human'], 'render_fps': 30}
 
-    def __init__(self, render_mode=None, max_episode_steps=1000, target_accuracy=0.02, angle_bonus_factor=5.0, start_with_obstacles=True, force_outer_radius=False):
+    def __init__(self, render_mode=None, max_episode_steps=1000, target_accuracy=0.02, angle_bonus_factor=5.0, start_with_obstacles=True, force_outer_radius=False, distance_reward_multiplier=2.0):
         super().__init__()
 
         self.render_mode = render_mode
@@ -48,6 +49,7 @@ class FanucEnv(gym.Env):
         self._target_accuracy = target_accuracy
         self._step_counter = 0
         self.force_outer_radius = force_outer_radius # Store the new flag
+        self.distance_reward_multiplier = distance_reward_multiplier # Store the multiplier
 
         # --- Load Workspace Config or Use Defaults ---
         min_reach_default = 0.02
@@ -104,7 +106,7 @@ class FanucEnv(gym.Env):
 
         # Parameters for update logic
         self.success_rate_window_size = 20 # Check success rate over this many episodes
-        self.success_rate_threshold = 0.75 # Decrease difficulty (min radius) if success rate exceeds this
+        self.success_rate_threshold = 0.5 # Decrease difficulty if success rate > 0.5 (Changed from 0.75)
         self.radius_decrease_step = 0.05 # How much to decrease min_radius by (in meters)
         self.episode_results = collections.deque(maxlen=self.success_rate_window_size)
 
@@ -524,8 +526,9 @@ class FanucEnv(gym.Env):
         distance = info['distance']
 
         # --- Calculate Reward ---
-        # Dense reward: negative squared distance to target
-        reward = -(distance**2)
+        # Dense reward: Use linear distance penalty for stronger gradient near target
+        reward = -distance * self.distance_reward_multiplier
+        # reward = -(distance**2) # Old squared distance penalty
 
         # --- Base Rotation Reward (Potential-Based) --- 
         base_angle = current_positions[0] # Base joint is index 0
@@ -544,7 +547,7 @@ class FanucEnv(gym.Env):
         self.previous_base_angle_error = current_angle_error_abs
 
         # Bonus for reaching the target accuracy
-        success_bonus = 100.0
+        success_bonus = 1000.0 # Increased from 100.0
         terminated = False
         success = False
         if distance < self._target_accuracy:
