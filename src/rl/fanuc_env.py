@@ -37,11 +37,11 @@ class FanucEnv(gym.Env):
         angle_bonus_factor (float, optional): Factor for base rotation reward. Defaults to 5.0.
         start_with_obstacles (bool, optional): Whether to place obstacles at the start. Defaults to True.
         force_outer_radius (bool, optional): If True, forces target generation to the outer edge (80-100% of max radius). Used for specific testing scenarios. Defaults to False.
-        distance_reward_multiplier (float, optional): Factor to scale the linear distance penalty. Defaults to 5.0.
+        distance_reward_multiplier (float, optional): Factor to scale the linear distance penalty. Defaults to 1.0.
     """
     metadata = {'render_modes': ['human'], 'render_fps': 30}
 
-    def __init__(self, render_mode=None, max_episode_steps=1000, target_accuracy=0.02, angle_bonus_factor=5.0, start_with_obstacles=True, force_outer_radius=False, distance_reward_multiplier=2.0):
+    def __init__(self, render_mode=None, max_episode_steps=1000, target_accuracy=0.02, angle_bonus_factor=5.0, start_with_obstacles=True, force_outer_radius=False, distance_reward_multiplier=1.0):
         super().__init__()
 
         self.render_mode = render_mode

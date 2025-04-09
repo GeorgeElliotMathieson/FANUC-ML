@@ -1,10 +1,10 @@
 {
     "policy": "MlpPolicy",
-    "learning_rate": 0.0004,
+    "learning_rate": 0.0001,
     "n_steps": 1024,
     "batch_size": 128,
-    "n_epochs": 12,
-    "gamma": 0.995,
+    "n_epochs": 20,
+    "gamma": 0.993,
     "gae_lambda": 0.9617716011419803,
     "clip_range": 0.1843292572202595,
     "ent_coef": 0.005586898837600647,
