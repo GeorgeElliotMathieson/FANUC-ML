@@ -5,35 +5,31 @@ import json
 import pandas as pd
 import matplotlib.pyplot as plt
 import logging
-import collections # Import collections needed for deque if used later
+import collections
 from tensorboard.backend.event_processing import event_accumulator # type: ignore
 
-# Restore Top-Level Logging Config
+
 logging.basicConfig(
-    level=logging.INFO, # Default level
+    level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
 
-# --- Constants ---
-# Define paths relative to the project root (one level up from scripts/)
+
 PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-# Point to the new config directory
 BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
 DEFAULT_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
 DEFAULT_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output", "analysis")
 
-# --- Helper Functions ---
 
 def find_latest_run_dir(base_log_dir: str) -> str | None:
-    """Finds the latest timestamped run directory (e.g., 'run_YYYYMMDD_HHMMSS')."""
+    """Finds the latest timestamped run directory."""
     try:
         run_dirs = [d for d in os.listdir(base_log_dir)
                     if os.path.isdir(os.path.join(base_log_dir, d)) and d.startswith("run_")]
         if not run_dirs:
             return None
-        # Sort directories, assuming timestamp format ensures chronological order
         latest_run_dir = max(run_dirs)
         return os.path.join(base_log_dir, latest_run_dir)
     except FileNotFoundError:
@@ -43,25 +39,22 @@ def find_latest_run_dir(base_log_dir: str) -> str | None:
         logger.error(f"Error finding latest run directory in {base_log_dir}: {e}")
         return None
 
+
 def find_latest_event_file(run_dir: str) -> str | None:
-    """Finds the most recent TensorBoard event file, searching common subdirs like PPO_1."""
+    """Finds the most recent TensorBoard event file."""
     try:
         logger.debug(f"Searching for event files in directory: {run_dir}")
 
-        # --- Check common subdirectory pattern (e.g., PPO_1, PPO_2) --- 
         potential_log_subdirs = [d for d in os.listdir(run_dir)
                                if os.path.isdir(os.path.join(run_dir, d)) and d.startswith("PPO_")]
 
         search_dirs = []
         if potential_log_subdirs:
-            # If PPO_x subdirs exist, search only inside the first one found (usually PPO_1)
-            # Sort them to be deterministic if multiple exist (e.g., PPO_1, PPO_2)
             potential_log_subdirs.sort()
             log_subdir_path = os.path.join(run_dir, potential_log_subdirs[0])
             search_dirs.append(log_subdir_path)
             logger.debug(f"Found PPO subdirectory, searching inside: {log_subdir_path}")
         else:
-            # If no PPO_x subdir, search the main run directory directly (fallback)
             search_dirs.append(run_dir)
             logger.debug(f"No PPO subdirectory found, searching directly in: {run_dir}")
 
@@ -87,7 +80,7 @@ def find_latest_event_file(run_dir: str) -> str | None:
 
         logger.debug(f"Potential event files (full path): {event_files_full_paths}")
 
-        # Filter out empty files
+        # Filter empty files
         valid_event_files = []
         for f in event_files_full_paths:
              try:
@@ -101,7 +94,7 @@ def find_latest_event_file(run_dir: str) -> str | None:
              logger.warning(f"No valid event files (non-empty) found in: {run_dir}")
              return None
 
-        # Return the latest valid event file found
+        # Latest valid event file
         latest_file = max(valid_event_files, key=os.path.getctime)
         logger.debug(f"Selected latest event file: {latest_file}")
         return latest_file
@@ -122,11 +115,10 @@ def load_tensorboard_data(event_file_path: str) -> pd.DataFrame | None:
 
     logger.info(f"Loading data from: {event_file_path}")
     try:
-        # Increased reload_multifile to handle potential multiple event files per run
         ea = event_accumulator.EventAccumulator(event_file_path,
-            size_guidance={event_accumulator.SCALARS: 0} # Load all scalar data
+            size_guidance={event_accumulator.SCALARS: 0}
         )
-        ea.Reload() # Load the events from file
+        ea.Reload()
 
         tags = ea.Tags()['scalars']
         if not tags:
@@ -143,10 +135,8 @@ def load_tensorboard_data(event_file_path: str) -> pd.DataFrame | None:
                 if not events:
                      logger.warning(f"Tag '{tag}' found but contains no scalar events.")
                      continue
-                # Use wall_time for x-axis if step is not consistent? Let's stick to step.
                 steps = [e.step for e in events]
                 values = [e.value for e in events]
-                # Handle potential duplicate steps by keeping the last value?
                 s = pd.Series(values, index=steps, name=tag)
                 s = s[~s.index.duplicated(keep='last')]
                 data[tag] = s
@@ -161,14 +151,9 @@ def load_tensorboard_data(event_file_path: str) -> pd.DataFrame | None:
              logger.warning("No scalar data successfully extracted from the event file.")
              return None
 
-        # Create a DataFrame, forward-fill missing values, backward-fill initial NaNs
-        # This helps align data from different tags that log at different intervals
+        # Create DataFrame, fill missing values
         df = pd.DataFrame(data)
-        # Sort by index (step) first
         df.sort_index(inplace=True)
-        # Optional: Reindex to ensure uniform step intervals if needed, but can be large
-        # df = df.reindex(range(df.index.min(), df.index.max() + 1))
-        # Fill missing values (might occur if tags log at different frequencies)
         df.ffill(inplace=True)
         df.bfill(inplace=True)
 
@@ -177,6 +162,7 @@ def load_tensorboard_data(event_file_path: str) -> pd.DataFrame | None:
     except Exception as e:
         logger.error(f"Error loading TensorBoard data from {event_file_path}: {e}")
         return None
+
 
 def plot_learning_curves(df: pd.DataFrame, output_dir: str):
     """Plots key learning curves from the DataFrame."""
@@ -187,21 +173,13 @@ def plot_learning_curves(df: pd.DataFrame, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
     logger.info(f"Saving plots to: {output_dir}")
 
-    # Use a specific backend if needed, e.g., for servers without GUI
-    # import matplotlib
-    # matplotlib.use('Agg') # Use Agg backend for non-interactive plotting
+    plt.style.use('seaborn-v0_8-darkgrid')
 
-    plt.style.use('seaborn-v0_8-darkgrid') # Use a nice style
-
-    # Plot individual tags first
     tags_to_plot = {
         'rollout/ep_rew_mean': 'Mean Episode Reward',
         'rollout/ep_len_mean': 'Mean Episode Length',
-        # Exclude success_rate and radius from individual plots if plotting combined
-        # 'rollout/success_rate': 'Success Rate',
         'rollout/collision_rate': 'Collision Rate',
         'rollout/obstacle_collision_rate': 'Obstacle Collision Rate',
-        # 'custom/current_max_target_radius': 'Curriculum Min Radius',
         'train/value_loss': 'Value Loss',
         'train/policy_gradient_loss': 'Policy Gradient Loss',
         'train/entropy_loss': 'Entropy Loss',
@@ -219,7 +197,7 @@ def plot_learning_curves(df: pd.DataFrame, output_dir: str):
                 plt.figure(figsize=(12, 6))
                 plt.plot(df.index, df[tag], label=tag.split('/')[-1])
 
-                if any(k in tag for k in ['rew_mean', 'ep_len', 'rate']): # Adjusted smoothing condition
+                if any(k in tag for k in ['rew_mean', 'ep_len', 'rate']):
                      rolling_window = max(1, min(50, len(df) // 50))
                      rolling_window = min(rolling_window, len(df))
                      if rolling_window > 1:
@@ -241,7 +219,6 @@ def plot_learning_curves(df: pd.DataFrame, output_dir: str):
         else:
             logger.warning(f"Tag '{tag}' not found in data or contains only NaNs, skipping individual plot.")
 
-    # --- Add Combined Success Rate vs Curriculum Radius Plot --- 
     success_tag = 'rollout/success_rate'
     radius_tag = 'custom/current_min_target_radius'
 
@@ -255,31 +232,28 @@ def plot_learning_curves(df: pd.DataFrame, output_dir: str):
             ax1.set_xlabel('Training Steps')
             ax1.set_ylabel('Success Rate', color=color1)
             lns1 = ax1.plot(df.index, df[success_tag], color=color1, label='Success Rate')
-            # Add smoothed success rate
             rolling_window = max(1, min(50, len(df) // 50))
             rolling_window = min(rolling_window, len(df))
             if rolling_window > 1:
                 lns2 = ax1.plot(df.index, df[success_tag].rolling(window=rolling_window, min_periods=1).mean(),
                                   color=color1, linestyle='--', label='Success Rate (smoothed)')
             else:
-                lns2 = [] # Avoid adding to legend if no smoothing
+                lns2 = []
             ax1.tick_params(axis='y', labelcolor=color1)
-            ax1.grid(True) # Add grid for primary axis
+            ax1.grid(True)
 
-            # Instantiate a second axes that shares the same x-axis
             ax2 = ax1.twinx()
             color2 = 'tab:red'
             ax2.set_ylabel('Curriculum Min Radius (m)', color=color2)
             lns3 = ax2.plot(df.index, df[radius_tag], color=color2, label='Min Target Radius')
             ax2.tick_params(axis='y', labelcolor=color2)
 
-            # Combine legends
             lns = lns1 + (lns2 if lns2 else []) + lns3
             labs = [l.get_label() for l in lns]
             ax1.legend(lns, labs, loc='best')
 
             plt.title('Success Rate vs. Curriculum Minimum Target Radius')
-            fig.tight_layout() # Otherwise the right y-label is slightly clipped
+            fig.tight_layout()
             combined_filename = os.path.join(output_dir, 'success_vs_curriculum_radius.png')
             plt.savefig(combined_filename)
             logger.info(f"Saved combined plot: {combined_filename}")
@@ -287,9 +261,10 @@ def plot_learning_curves(df: pd.DataFrame, output_dir: str):
 
         except Exception as plot_err:
             logger.error(f"Failed to create combined plot: {plot_err}")
-            plt.close() # Ensure plot is closed even if error occurs
+            plt.close()
     else:
         logger.warning(f"Skipping combined Success Rate vs Curriculum Radius plot: One or both tags ('{success_tag}', '{radius_tag}') not found or NaN.")
+
 
 def load_best_params(filepath: str) -> dict | None:
     """Loads the best parameters from the JSON file."""
@@ -305,13 +280,8 @@ def load_best_params(filepath: str) -> dict | None:
         logger.error(f"Error loading best parameters from {filepath}: {e}")
         return None
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    # REMOVE sys.path adjustment - not needed when run from scripts/
-    # SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
-    # if SRC_DIR not in sys.path:
-    #      sys.path.insert(0, SRC_DIR)
 
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyse Fanuc RL training results.")
     parser.add_argument("--log_dir", type=str, default=DEFAULT_LOG_DIR,
                         help=f"Directory containing logs (default: {DEFAULT_LOG_DIR}).")
@@ -327,12 +297,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # --- Setup Logging Level Based on Args ---
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
 
     logger.info("--- Starting Analysis ---")
 
-    # --- Load Best Params ---
     best_params = load_best_params(args.params_file)
     if best_params:
         logger.info("Best Hyperparameters Found:")
@@ -341,9 +309,8 @@ if __name__ == "__main__":
             logger.info(f"  {line}")
     logger.info("-" * 30)
 
-    # --- Load TensorBoard Data ---
     event_file = args.event_file
-    target_log_dir = args.log_dir # The base directory (e.g., output/ppo_logs)
+    target_log_dir = args.log_dir
 
     if not event_file:
         logger.info(f"Event file not specified, searching {target_log_dir} for latest run...")
@@ -358,7 +325,6 @@ if __name__ == "__main__":
         tb_data = load_tensorboard_data(event_file)
         logger.info("-" * 30)
 
-        # --- Plot Data ---
         if tb_data is not None:
             plot_learning_curves(tb_data, args.output_dir)
         else:
@@ -366,4 +332,4 @@ if __name__ == "__main__":
     else:
         logger.warning(f"No event file found in {args.log_dir}. Skipping TensorBoard analysis.")
 
-    logger.info("--- Analysis Finished ---") 
+    logger.info("--- Analysis Finished ---")

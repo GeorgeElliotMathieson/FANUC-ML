@@ -12,21 +12,24 @@ from stable_baselines3 import PPO
 # Import the custom environment using relative import
 from .fanuc_env import FanucEnv
 
-# Define paths relative to the project root (one level up from src/)
-PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..', '..') # Adjusted for src/rl/
+# Project root path
+PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..', '..')
+# Default log directory
 DEFAULT_LOG_DIR = os.path.join(PROJECT_ROOT, "output", "ppo_logs")
-DEFAULT_MODEL_NAME = "final_model.zip" # Default model name saved by train.py
-# Point to the new config directory
+# Default model filename
+DEFAULT_MODEL_NAME = "final_model.zip"
+# Config directory
 BEST_PARAMS_FILE = os.path.join(PROJECT_ROOT, "config", "best_params.json")
 
+# Latest run directory finder
 def find_latest_run_dir(base_log_dir: str) -> str | None:
-    """Finds the latest timestamped run directory (e.g., 'run_YYYYMMDD_HHMMSS')."""
+    """Find latest run dir."""
     try:
+        # List run directories
         run_dirs = [d for d in os.listdir(base_log_dir)
                     if os.path.isdir(os.path.join(base_log_dir, d)) and d.startswith("run_")]
         if not run_dirs:
             return None
-        # Sort directories, assuming timestamp format ensures chronological order
         latest_run_dir = max(run_dirs)
         return os.path.join(base_log_dir, latest_run_dir)
     except FileNotFoundError:
@@ -36,16 +39,17 @@ def find_latest_run_dir(base_log_dir: str) -> str | None:
         logger.error(f"Error finding latest run directory in {base_log_dir}: {e}")
         return None
 
+# Model file finder in run directory
 def find_model_in_run_dir(run_dir: str) -> str | None:
-    """Finds the final model or the latest checkpoint in a specific run directory."""
+    """Find model in run dir."""
     try:
-        # Look for the final model first
+        # Check final model path
         final_model_path = os.path.join(run_dir, DEFAULT_MODEL_NAME)
         if os.path.exists(final_model_path):
             logger.info(f"Found final model: {final_model_path}")
             return final_model_path
 
-        # Fallback to finding the latest checkpoint model
+        # Check for checkpoints
         list_of_checkpoints = glob.glob(os.path.join(run_dir, 'rl_model_*_steps.zip'))
         if not list_of_checkpoints:
             logger.warning(f"No final model or checkpoints found in {run_dir}")
@@ -58,7 +62,7 @@ def find_model_in_run_dir(run_dir: str) -> str | None:
         return None
 
 if __name__ == "__main__":
-    # --- Configure Logging FIRST --- 
+    # Logging setup
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -66,7 +70,7 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    # --- Argument Parser --- 
+    # Command line arguments
     parser = argparse.ArgumentParser(description="Run visual test for trained PPO FANUC model.")
     parser.add_argument("-m", "--model_path", type=str, default=None,
                         help=f"Path to model .zip. If None, searches {DEFAULT_LOG_DIR}")
@@ -74,7 +78,7 @@ if __name__ == "__main__":
                         help="Number of test episodes to run (default: 5).")
     args = parser.parse_args()
 
-    # --- Determine Model Path --- 
+    # Set model file path
     model_file = args.model_path
     if model_file is None:
         logger.info(f"Model path not specified, searching {DEFAULT_LOG_DIR} for latest run...")
@@ -86,28 +90,26 @@ if __name__ == "__main__":
             logger.error(f"No run directories found in {DEFAULT_LOG_DIR}. Cannot find model.")
             sys.exit(1)
 
-    # Check if a model was found or specified
     if not model_file or not os.path.exists(model_file):
-        # Update error message
         logger.error(f"Error: Model file not found. Tried searching latest run in {DEFAULT_LOG_DIR} or using specified path: {args.model_path or '(searched)'}")
         logger.error("Please ensure a model has been trained or specify a valid path using --model_path.")
-        sys.exit(1) # Exit if no model found
+        sys.exit(1)
 
-    logger.info(f"\nLoading model from {model_file} for visual testing...")
+    logger.info(f"Loading model from {model_file} for visual testing...")
 
-    # --- Determine Device --- 
+    # Device selection
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
 
-    # --- Load the model --- 
+    # Load model
     try:
         loaded_model = PPO.load(model_file, device=device)
     except Exception as e:
         logger.error(f"Error loading model from {model_file}: {e}")
-        sys.exit(1) # Exit if model loading fails
+        sys.exit(1)
 
-    # --- Load Best Params for Environment Config --- #
-    loaded_angle_bonus = 5.0 # Default value (matches FanucEnv default)
+    # Default angle bonus
+    loaded_angle_bonus = 5.0
     if os.path.exists(BEST_PARAMS_FILE):
         try:
             with open(BEST_PARAMS_FILE, 'r') as f:
@@ -119,39 +121,43 @@ if __name__ == "__main__":
     else:
         logger.warning(f"{BEST_PARAMS_FILE} not found. Using default angle_bonus ({loaded_angle_bonus}).")
 
-    # --- Create Test Environment --- 
     logger.info("Creating test environment with rendering...")
     test_env = None
     try:
-        # Use relative import FanucEnv
+        # Initialise test environment
         test_env = FanucEnv(
             render_mode='human',
             angle_bonus_factor=loaded_angle_bonus,
-            force_outer_radius=True # Keep forcing outer radius for testing
+            force_outer_radius=True
         )
 
+        # Start testing episodes
         logger.info(f"Testing model for {args.episodes} episodes...")
         for episode in range(args.episodes):
-            logger.info(f"--- Test Episode {episode + 1}/{args.episodes} ---")
+            logger.info(f"Test Episode {episode + 1}/{args.episodes}")
 
-            obs, info = test_env.reset() # Reset without stage options
+            # Reset environment
+            obs, info = test_env.reset()
 
+            # Episode variables
             terminated = False
             truncated = False
             step = 0
             total_reward = 0
 
+            # Run episode loop
             while not (terminated or truncated):
+                # Predict action
                 action, _states = loaded_model.predict(obs, deterministic=True)
+                # Step environment
                 obs, reward, terminated, truncated, info = test_env.step(action)
-                # Rendering is handled by PyBullet GUI connection, step triggers update
                 total_reward += reward
                 step += 1
-                # Add a small delay to make visualisation smoother
-                time.sleep(1./60.) # ~60 Hz
+                # Delay for visualisation
+                time.sleep(1./60.)
 
                 if terminated or truncated:
-                    # Use logger for multi-line info
+                    # Log episode summary
                     episode_summary = (
                         f"Episode finished after {step} steps.\n"
                         f"  Terminated: {terminated}, Truncated: {truncated}\n"
@@ -161,19 +167,22 @@ if __name__ == "__main__":
                         f"  Collision: {info.get('collision', 'N/A')}"
                     )
                     logger.info(episode_summary)
-                    # Pause briefly between episodes for better viewing
                     logger.info("Pausing before next episode...")
                     time.sleep(2)
-                    break # Exit while loop
+                    break
 
+        # Testing complete
         logger.info("Visual testing finished.")
 
     except Exception as e:
+        # Log testing errors
         logger.error(f"An error occurred during testing: {e}")
         logger.error(traceback.format_exc())
     finally:
         if test_env is not None:
+             # Close environment
              logger.info("Closing test environment.")
              test_env.close()
 
+    # Script completion
     logger.info("Test script finished.") 

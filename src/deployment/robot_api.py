@@ -4,62 +4,58 @@ import struct
 import time
 import numpy as np
 import logging
-import traceback # Import traceback for better error logging
-import threading # Import threading for lock
+import traceback
+import threading
 
-# Import robot config constants
 from config import robot_config
 
 logger = logging.getLogger(__name__)
 
-# Default values based on deprecated/control/instructions.md and example_usage.py
-DEFAULT_ROBOT_IP = "192.168.1.10" # <-- VERIFY ROBOT IP from instructions
-DEFAULT_ROBOT_PORT = 6000        # <-- VERIFY PORT from instructions
+# Default robot IP
+DEFAULT_ROBOT_IP = "192.168.1.10"
+# Default robot port
+DEFAULT_ROBOT_PORT = 6000
 
-# Timeout for socket operations (seconds)
+# Socket timeout (s)
 DEFAULT_TIMEOUT = 5.0
 
 class FANUCRobotAPI:
-    """
-    Handles communication with a FANUC robot controller using simple socket messaging.
-    Based on the example logic found in deprecated/control/fanuc_robot_controller.py.
-
-    **CRITICAL WARNING:** Assumes the controller is configured for Socket Messaging (SM)
-    and responds to commands like RDJPOS, MOVJ, STOP with \r termination.
-    Verify command syntax, parsing, units, and error handling against YOUR specific
-    controller version and configuration.
-    """
+    # FANUC socket communication.
+    # WARNING: Assumes SM config. Verify commands/parsing.
     def __init__(self, ip: str = DEFAULT_ROBOT_IP, port: int = DEFAULT_ROBOT_PORT):
         self.ip: str = ip
         self.port: int = port
         self.socket: socket.socket | None = None
         self.connected: bool = False
         self.timeout: float = DEFAULT_TIMEOUT
-        self.lock = threading.Lock() # Add lock for thread safety if sending commands from different threads
+        self.lock = threading.Lock()
 
-        # --- Use constants from config --- #
-        # Number of joints the RL agent controls
+        # Controlled joints count
         self.num_controlled_joints: int = robot_config.NUM_CONTROLLED_JOINTS
-        # Number of joints reported by RDJPOS (typically 6 for LRMate)
+        # Reported joints count
         self.num_reported_joints: int = robot_config.NUM_REPORTED_JOINTS
-        # Joint limits (Degrees) for reported joints
+        # Reported joint limits (deg)
         self.joint_limits_deg = robot_config.REPORTED_JOINT_LIMITS_DEG
 
-        # Convert controlled joints' limits to radians for internal reference if needed
+        # Controlled joint limits (rad)
         self.joint_limits_rad = {
             i: [np.deg2rad(self.joint_limits_deg[i][0]), np.deg2rad(self.joint_limits_deg[i][1])]
             for i in range(self.num_controlled_joints)
-            if i in self.joint_limits_deg # Check if index exists in dict
+            if i in self.joint_limits_deg
         }
 
-        logger.info(f"Initialized FANUCRobotAPI for {self.num_controlled_joints} controlled joints.")
+        logger.info(f"Initialised FANUCRobotAPI for {self.num_controlled_joints} controlled joints.")
         logger.info(f"  Target IP: {self.ip}, Port: {self.port}")
-        logger.info("  Joint Limits (Degrees, Approx - VERIFY):")
+        logger.info("  Joint Limits (deg, Approx - VERIFY):")
         for i in range(self.num_controlled_joints):
-            logger.info(f"    J{i+1}: {self.joint_limits_deg[i]}")
+             if i in self.joint_limits_deg:
+                 logger.info(f"    J{i+1}: {self.joint_limits_deg[i]}")
+             else:
+                 logger.warning(f"    J{i+1}: Limits not defined in robot_config.")
+
 
     def connect(self) -> bool:
-        """Establish connection to the robot controller."""
+        # Establish connection.
         if self.connected:
             logger.warning("Already connected.")
             return True
@@ -70,9 +66,6 @@ class FANUCRobotAPI:
             self.socket.connect((self.ip, self.port))
             self.connected = True
             logger.info(f"Successfully connected to robot controller.")
-            # Optional: Add an initial check like getting positions?
-            # if self.get_joint_positions() is None:
-            #     raise ConnectionError("Initial position check failed after connect.")
             return True
         except socket.timeout:
             logger.error(f"Connection timed out to {self.ip}:{self.port}. Check IP, port, network, and controller program/state.")
@@ -94,13 +87,12 @@ class FANUCRobotAPI:
             return False
 
     def disconnect(self):
-        """Close the connection to the robot."""
+        # Close connection.
         if not self.connected:
-            # logger.info("Already disconnected.")
             return
         if self.socket:
             try:
-                self.socket.shutdown(socket.SHUT_RDWR) # Graceful shutdown
+                self.socket.shutdown(socket.SHUT_RDWR)
                 self.socket.close()
                 logger.info("Socket closed.")
             except Exception as e:
@@ -110,59 +102,47 @@ class FANUCRobotAPI:
         logger.info("Disconnected from FANUC robot.")
 
     def _send_command(self, command: str) -> str | None:
-        """
-        (Internal) Send a command string to the robot and get the response.
-        Uses simple request-response with \r termination.
-        Acquires a lock for thread safety.
-        """
+        # Send command, get response.
         if not self.check_connection() or self.socket is None:
             logger.warning("Not connected to robot. Cannot send command.")
             return None
 
-        with self.lock: # Ensure only one command is sent/received at a time
+        with self.lock:
             try:
-                # Add termination character if not present
                 if not command.endswith('\r'):
                     command += '\r'
 
                 logger.debug(f"Sending command: '{command.strip()}'")
-                self.socket.sendall(command.encode('ascii')) # Use ascii based on typical FANUC interfaces
+                self.socket.sendall(command.encode('ascii'))
 
-                # Receive response (blocking until response or timeout)
                 response_bytes = b''
-                self.socket.settimeout(self.timeout) # Ensure timeout is set for receive
+                self.socket.settimeout(self.timeout)
                 while True:
-                     # Read small chunks to find termination character
                      chunk = self.socket.recv(64)
                      if not chunk:
                           logger.error("Connection closed by robot while receiving response.")
                           self._handle_connection_error()
                           return None
                      response_bytes += chunk
-                     # Check for termination character (typically \r)
                      if b'\r' in response_bytes:
                           break
-                     # Optional: Add check for maximum response length if needed
 
-                # Decode and strip response
                 response_str = response_bytes.decode('ascii').strip()
                 logger.debug(f"Received response: '{response_str}'")
                 return response_str
 
             except socket.timeout:
                  logger.warning(f"Timeout waiting for robot response after sending '{command.strip()}'.")
-                 # Consider if timeout means failure or just no response needed
-                 return None # Assume timeout is failure for now
+                 return None
             except Exception as e:
                 logger.error(f"Error sending/receiving for command '{command.strip()}': {e}")
                 logger.error(traceback.format_exc())
-                self._handle_connection_error() # Assume connection is compromised
+                self._handle_connection_error()
                 return None
 
     def _handle_connection_error(self):
-        """Centralized handling for potential connection loss."""
+        # Centralised handling for connection loss.
         logger.error("Connection error detected. Marking as disconnected.")
-        # Attempt to close socket cleanly, ignore errors
         if self.socket:
             try:
                 self.socket.close()
@@ -170,30 +150,17 @@ class FANUCRobotAPI:
                 pass
         self.socket = None
         self.connected = False
-        # Optionally: Trigger automatic reconnection attempt logic here?
-
-    # ==========================================================================
-    # --- High-Level API Methods (Adapted from deprecated controller) ---
-    # ==========================================================================
 
     def get_joint_positions(self) -> np.ndarray | None:
-        """
-        Get current joint positions in **degrees** using RDJPOS command.
-
-        Returns:
-            np.ndarray | None: Array of joint positions (degrees) for the
-                               number of reported joints (e.g., 6), or None if failed.
-        """
+        # Get current joint positions (deg) via RDJPOS.
+        # Returns: Array (deg) of reported joints, or None.
         command = "RDJPOS"
         response = self._send_command(command)
         if response and isinstance(response, str):
             try:
-                # Example parsing from deprecated controller:
-                # Format: "JOINT: J1=X.XXX J2=X.XXX J3=X.XXX J4=X.XXX J5=X.XXX J6=X.XXX"
                 if response.startswith("JOINT:"):
-                    parts = response.split(" ")[1:] # Split by space, skip "JOINT:"
+                    parts = response.split(" ")[1:]
                     if len(parts) >= self.num_reported_joints:
-                        # Extract values after '=' sign
                         joint_positions_deg = [float(p.split("=")[1]) for p in parts[:self.num_reported_joints]]
                         return np.array(joint_positions_deg)
                     else:
@@ -206,52 +173,31 @@ class FANUCRobotAPI:
                 logger.error(f"Unexpected error parsing RDJPOS response '{response}': {e}")
         else:
             logger.warning(f"No valid response received for command '{command}'.")
-        return None # Return None on failure
+        return None
 
     def move_to_joint_positions(self, positions_deg: list | np.ndarray, speed_percent: int = 20) -> bool:
-        """
-        Move robot to specified joint positions using MOVJ command.
-
-        Args:
-            positions_deg: List or array of target joint positions in DEGREES.
-                           Length should match the number of reported joints (e.g., 6).
-            speed_percent: Speed percentage (1-100) for the move. Default 20.
-
-        Returns:
-            bool: True if the command was SENT and acknowledged successfully,
-                  False otherwise. Note: This does not guarantee move completion.
-        """
+        # Move robot via MOVJ (deg). Returns ack status.
         if positions_deg is None or len(positions_deg) != self.num_reported_joints:
-            logger.error(f"Invalid joint positions array length provided (expected {self.num_reported_joints} dims): {positions_deg}")
+            logger.error(f"Invalid joint positions array length (expected {self.num_reported_joints}): {positions_deg}")
             return False
 
-        # Optional: Client-side limit check (controller is primary enforcer)
         self._log_limit_warnings(np.array(positions_deg))
 
-        # Format command based on deprecated controller example:
-        # "MOVJ pos1 pos2 pos3 pos4 pos5 pos6"
-        # Speed is often handled separately or via robot registers, not in MOVJ.
-        # Add speed/termination args ONLY if your specific interface requires them here.
         pos_str = ' '.join([f"{pos:.3f}" for pos in positions_deg])
         command = f"MOVJ {pos_str}"
-        # Example if speed/term needed: command = f"MOVJ {pos_str} S{speed_percent} CNT100"
 
         logger.debug(f"Sending command: '{command}'")
         response = self._send_command(command)
 
-        # Check for successful acknowledgment (adjust "OK" based on actual response)
         if response and "OK" in response:
             logger.info(f"MOVJ command acknowledged successfully.")
-            # **IMPORTANT:** Real applications NEED to monitor robot status
-            # to confirm move completion before sending the next command.
-            # This basic implementation only checks acknowledgment.
             return True
         else:
             logger.error(f"MOVJ command failed or NACKed: {response}")
             return False
 
     def stop_motion(self) -> bool:
-        """Emergency stop of robot motion using STOP command."""
+        # Emergency stop via STOP.
         logger.warning("Sending STOP command!")
         response = self._send_command("STOP")
         if response and "OK" in response:
@@ -261,20 +207,9 @@ class FANUCRobotAPI:
              logger.error(f"STOP command failed or NACKed: {response}")
              return False
 
-    # ==========================================================================
-    # --- Methods needing implementation based on specific interface/needs ---
-    # ==========================================================================
-
     def get_end_effector_pose(self) -> tuple[np.ndarray, np.ndarray] | None:
-        """
-        Attempts to read pose data using a common command (RDPOS) and logs the raw response.
-        This helps diagnose if pose data is available and determine its format.
-        **Does not parse the response.** Implement parsing based on observed data.
-
-        Returns:
-            None: This method currently always returns None after logging.
-        """
-        # Try a common command for reading Cartesian position
+        # Attempts RDPOS, logs raw response. Does NOT parse.
+        # Returns: None. Implement parsing based on logged data.
         command = "RDPOS"
         logger.info(f"Attempting to get End-Effector pose using command: '{command}'")
         response = self._send_command(command)
@@ -286,45 +221,23 @@ class FANUCRobotAPI:
         else:
             logger.warning(f"No response received for '{command}'. Robot may not support this command or is not sending pose data.")
 
-        # Always return None as parsing is not implemented
         return None
 
     def get_robot_state_observation(self) -> np.ndarray | None:
-        """
-        Get the robot state formatted for the RL agent's observation space.
+        # Get RL observation (21 dims).
+        # Returns: Observation vector (float32) or None.
 
-        **CRITICAL:** This REQUIRES adaptation to match `src/fanuc_env.py`'s
-        observation space precisely (21 dims: pos_rad[5], vel_rad_s[5], rel_target[3],
-        norm_limits[5], rel_obstacle[3]).
-
-        - Joint velocities are typically NOT available via simple socket APIs.
-          Requires estimation or specific interface commands.
-        - Relative target/obstacle info MUST be calculated externally.
-
-        Returns:
-            np.ndarray | None: Observation vector (21 dims, float32) or None if failed.
-        """
-
-        # 1. Get Joint Positions (degrees -> radians, taking first N)
         joint_pos_deg_all = self.get_joint_positions()
         if joint_pos_deg_all is None:
             logger.error("Failed to get joint positions for observation.")
             return None
-        # Take only the joints controlled by the RL agent
         joint_pos_deg = joint_pos_deg_all[:self.num_controlled_joints]
         joint_pos_rad = np.deg2rad(joint_pos_deg)
 
-        # 2. Get Joint Velocities (rad/s) - **NEEDS IMPLEMENTATION**
-        # Placeholder: Assume zero velocity.
         joint_vel_rad_s = np.zeros(self.num_controlled_joints)
-        # logger.warning("Joint velocity reporting is using zero placeholders.") # Reduce log spam
 
-        # 3. Relative Target Position - **EXTERNAL CALCULATION NEEDED**
-        # Placeholder: Zeros. Deploy script must overwrite this.
         relative_target = np.zeros(3)
-        # logger.warning("Relative target in observation is using zero placeholders.")
 
-        # 4. Normalised Joint Positions (-1 to 1)
         norm_joint_pos = np.zeros(self.num_controlled_joints)
         for i in range(self.num_controlled_joints):
              if i in self.joint_limits_rad:
@@ -332,25 +245,19 @@ class FANUCRobotAPI:
                  joint_range = high - low
                  if joint_range > 1e-6:
                      norm_joint_pos[i] = 2 * (joint_pos_rad[i] - low) / joint_range - 1.0
-                 # else: norm_joint_pos[i] stays 0.0
              else:
-                  # This shouldn't happen if joint_limits_rad is derived correctly
-                  logger.error(f"Joint index {i} not found in radian limits for normalization!")
+                  logger.error(f"Joint index {i} not found in radian limits for normalisation!")
         norm_joint_pos = np.clip(norm_joint_pos, -1.0, 1.0)
 
-        # 5. Relative Obstacle Position - **EXTERNAL CALCULATION NEEDED**
-        # Placeholder: Zeros. Deploy script must overwrite this.
         relative_obstacle = np.zeros(3)
-        # logger.warning("Relative obstacle in observation is using zero placeholders.")
 
-        # --- Concatenate Observation (Order MUST match fanuc_env.py) --- 
         try:
             obs = np.concatenate([
-                joint_pos_rad,           # 5 dims
-                joint_vel_rad_s,         # 5 dims
-                relative_target,         # 3 dims
-                norm_joint_pos,          # 5 dims
-                relative_obstacle        # 3 dims
+                joint_pos_rad,
+                joint_vel_rad_s,
+                relative_target,
+                norm_joint_pos,
+                relative_obstacle
             ]).astype(np.float32)
         except ValueError as e:
              logger.error(f"Error concatenating observation components: {e}")
@@ -358,8 +265,7 @@ class FANUCRobotAPI:
                           f"tgt={relative_target.shape}, norm={norm_joint_pos.shape}, obs={relative_obstacle.shape}")
              return None
 
-        # Final shape check
-        expected_dim = 21 # Based on fanuc_env.py
+        expected_dim = 21
         if obs.shape != (expected_dim,):
             logger.error(f"Constructed observation has wrong shape: {obs.shape}, expected ({expected_dim},).")
             return None
@@ -367,15 +273,11 @@ class FANUCRobotAPI:
         return obs
 
     def check_connection(self) -> bool:
-        """Check if the robot connection is likely still active."""
+        # Check if connection is likely active.
         if not self.connected or self.socket is None:
             return False
-        # Try a minimal check: can we get socket options without error?
         try:
-             # Setting timeout to 0 makes getsockopt non-blocking
-             # self.socket.settimeout(0.0)
              err = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-             # self.socket.settimeout(self.timeout) # Restore original timeout
              if err == 0:
                  return True
              else:
@@ -383,7 +285,6 @@ class FANUCRobotAPI:
                   self._handle_connection_error()
                   return False
         except socket.timeout:
-             # This shouldn't happen with timeout 0, but handle defensively
              logger.warning("Socket check timed out unexpectedly.")
              self._handle_connection_error()
              return False
@@ -393,23 +294,24 @@ class FANUCRobotAPI:
              return False
 
     def _log_limit_warnings(self, joint_target_deg: np.ndarray):
-        """(Internal) Logs warnings if commanded positions exceed client-side limits."""
-        num_to_check = min(len(joint_target_deg), len(self.joint_limits_deg))
+        # Log warnings if commanded positions exceed client-side limits.
+        num_to_check = min(len(joint_target_deg), self.num_reported_joints)
         for i in range(num_to_check):
             pos = joint_target_deg[i]
             if i in self.joint_limits_deg:
                 low, high = self.joint_limits_deg[i]
                 if not (low <= pos <= high):
                     logger.warning(f"Commanded position {pos:.2f} for J{i+1} exceeds client-side limits [{low}, {high}]. Relying on controller limits.")
+            else:
+                 logger.warning(f"No client-side limits defined for commanded J{i+1}.")
 
-# Example usage (for testing connection - adapt IP, commands, parsing)
+
+# Example usage
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG, # Use DEBUG for detailed testing
+    logging.basicConfig(level=logging.DEBUG,
                         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-    # --- REPLACE WITH YOUR ROBOT'S ACTUAL IP --- 
-    robot_ip = DEFAULT_ROBOT_IP # Use default or replace
-    robot_port = DEFAULT_ROBOT_PORT # Use default or replace
-    # ----------------------------------------- 
+    robot_ip = DEFAULT_ROBOT_IP
+    robot_port = DEFAULT_ROBOT_PORT
     logger.info(f"--- Robot API Test Script ---")
     logger.info(f"Attempting connection to {robot_ip}:{robot_port}")
 
@@ -418,32 +320,23 @@ if __name__ == '__main__':
     if robot.connect():
         logger.info("Connection successful.")
 
-        # Test getting positions
-        logger.info("Attempting to get joint positions (using RDJPOS command/parsing)...")
+        logger.info("Attempting to get joint positions (RDJPOS)...")
         positions = robot.get_joint_positions()
         if positions is not None:
-            logger.info(f"Received Joint Positions (degrees): {positions}")
+            logger.info(f"Received Joint Positions (deg): {positions}")
         else:
             logger.warning("Failed to get joint positions.")
         time.sleep(0.5)
 
-        # Test getting pose (will show warning as it's not implemented)
-        logger.info("Attempting to get EE pose (using placeholder - expect warning)...")
-        pose = robot.get_end_effector_pose()
-        if pose is not None:
-             pos, orient = pose
-             logger.info(f"Received EE Position (mm?): {pos}")
-             logger.info(f"Received EE Orientation (WPR deg?): {orient}")
-        else:
-            logger.warning("Failed to get EE pose (expected for placeholder).")
+        logger.info("Attempting to get EE pose (RDPOS - expect raw data log and warning)...")
+        robot.get_end_effector_pose()
+        logger.info("EE pose check completed (check logs for raw data/warnings).")
         time.sleep(0.5)
 
-        # Test getting observation vector
         logger.info("Attempting to get state observation vector...")
         obs = robot.get_robot_state_observation()
         if obs is not None:
             logger.info(f"Received Observation Vector (shape {obs.shape}):")
-            # Print components for clarity
             logger.info(f"  Pos (rad): {obs[0:robot.num_controlled_joints]}")
             logger.info(f"  Vel (rad/s): {obs[robot.num_controlled_joints:robot.num_controlled_joints*2]} (Placeholder!)")
             logger.info(f"  Rel Target: {obs[robot.num_controlled_joints*2:robot.num_controlled_joints*2+3]} (Placeholder!)")
@@ -454,25 +347,23 @@ if __name__ == '__main__':
              logger.warning("Failed to get observation vector.")
         time.sleep(0.5)
 
-        # Test moving (Use example from deprecated controller)
-        target_pos_deg = [0.0, 10.0, 0.0, 0.0, 0.0, 0.0] # Example 6 joint values
-        logger.info(f"Attempting to move joints to: {target_pos_deg}")
+        target_pos_deg = [0.0] * robot.num_reported_joints
+        target_pos_deg[1] = 10.0
+        logger.info(f"Attempting to move joints to (deg): {target_pos_deg}")
         success = robot.move_to_joint_positions(target_pos_deg, speed_percent=10)
         if success:
-             logger.info("MOVJ command acknowledged. (Move completion not guaranteed by this check)")
-             # In a real app, wait/check status here
-             time.sleep(3) # Simple pause
+             logger.info("MOVJ command acknowledged. (Move completion not guaranteed)")
+             time.sleep(3)
              logger.info("Reading position after move attempt...")
              new_positions = robot.get_joint_positions()
              if new_positions is not None:
-                 logger.info(f"Position after move attempt: {new_positions}")
+                 logger.info(f"Position after move attempt (deg): {new_positions}")
              else:
                   logger.warning("Failed to read position after move.")
         else:
              logger.error("MOVJ command failed.")
         time.sleep(0.5)
 
-        # Test stop
         logger.info("Attempting to send STOP command...")
         if robot.stop_motion():
              logger.info("STOP command acknowledged.")
@@ -481,4 +372,4 @@ if __name__ == '__main__':
 
         robot.disconnect()
     else:
-        logger.error("Connection failed. Please check settings and robot state.") 
+        logger.error("Connection failed. Check settings and robot state.") 
